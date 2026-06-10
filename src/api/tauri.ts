@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { SessionInfo, SessionSnapshot } from "../types";
+import type { AgentPresetInfo, HandoverResult, SessionInfo, SessionSnapshot } from "../types";
 
 declare global {
   interface Window {
@@ -25,6 +25,71 @@ export function createShellSession(): Promise<SessionInfo> {
     rows: 30,
     cols: 100,
   });
+}
+
+export function createAgentSession(agentId: string, cwd: string): Promise<SessionInfo> {
+  assertTauriRuntime();
+  return invoke("create_agent_session", {
+    agentId,
+    cwd,
+    rows: 30,
+    cols: 100,
+  });
+}
+
+export function listAgentPresets(): Promise<AgentPresetInfo[]> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve([
+      {
+        id: "claude-code",
+        name: "Claude Code",
+        description: "Anthropic Claude Code CLI",
+        available: false,
+        command: "claude",
+        resolvedCommand: null,
+      },
+      {
+        id: "codex",
+        name: "Codex",
+        description: "OpenAI Codex CLI",
+        available: false,
+        command: "codex",
+        resolvedCommand: null,
+      },
+      {
+        id: "gemini",
+        name: "Gemini CLI",
+        description: "Google Gemini CLI",
+        available: false,
+        command: "gemini",
+        resolvedCommand: null,
+      },
+      {
+        id: "copilot",
+        name: "GitHub Copilot",
+        description: "GitHub Copilot CLI",
+        available: false,
+        command: "copilot",
+        resolvedCommand: null,
+      },
+      {
+        id: "shell",
+        name: "Shell",
+        description: "System login shell",
+        available: true,
+        command: "/bin/zsh",
+        resolvedCommand: "/bin/zsh",
+      },
+    ]);
+  }
+  return invoke("list_agent_presets");
+}
+
+export function defaultWorkspace(): Promise<string> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve("");
+  }
+  return invoke("default_workspace");
 }
 
 export function listSessions(): Promise<SessionInfo[]> {
@@ -57,4 +122,34 @@ export function resizeSession(sessionId: string, rows: number, cols: number): Pr
 export function killSession(sessionId: string): Promise<void> {
   assertTauriRuntime();
   return invoke("kill_session", { sessionId });
+}
+
+export function forwardSession(
+  sourceSessionId: string,
+  targetSessionId: string,
+  note: string,
+): Promise<HandoverResult> {
+  assertTauriRuntime();
+  return invoke("forward_session", {
+    sourceSessionId,
+    targetSessionId,
+    note,
+  });
+}
+
+export function continueSession(
+  sourceSessionId: string,
+  targetAgentId: string,
+  cwd: string,
+  note: string,
+): Promise<HandoverResult> {
+  assertTauriRuntime();
+  return invoke("continue_session", {
+    sourceSessionId,
+    targetAgentId,
+    cwd,
+    note,
+    rows: 30,
+    cols: 100,
+  });
 }

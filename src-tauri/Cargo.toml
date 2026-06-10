@@ -1,12 +1,12 @@
 [package]
-name = "agent-relay"
+name = "waypoint"
 version = "0.1.0"
 description = "Local agent session router"
-authors = ["AgentRelay"]
+authors = ["waypoint"]
 edition = "2021"
 
 [lib]
-name = "agent_relay_lib"
+name = "waypoint_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -18,4 +18,3 @@ portable-pty = "0.9"
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = [] }
 uuid = { version = "1", features = ["v4", "serde"] }
-

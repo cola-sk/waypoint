@@ -79,7 +79,7 @@ function TerminalView({ sessionId }: TerminalViewProps) {
 
     const dataDisposable = terminal.onData((data) => {
       writeSession(sessionId, data).catch((err) => {
-        terminal.writeln(`\r\n[AgentRelay write error] ${String(err)}`);
+        terminal.writeln(`\r\n[waypoint write error] ${String(err)}`);
       });
     });
 
@@ -97,7 +97,7 @@ function TerminalView({ sessionId }: TerminalViewProps) {
         setStatus("attached");
       } catch (err) {
         setStatus("error");
-        terminal.writeln(`[AgentRelay attach error] ${String(err)}`);
+        terminal.writeln(`[waypoint attach error] ${String(err)}`);
       }
     }
 
@@ -123,4 +123,3 @@ function TerminalView({ sessionId }: TerminalViewProps) {
 }
 
 export default TerminalView;
-

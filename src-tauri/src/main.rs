@@ -1,3 +1,3 @@
 fn main() {
-    agent_relay_lib::run();
+    waypoint_lib::run();
 }

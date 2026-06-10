@@ -1,7 +1,9 @@
-export type SessionStatus = "starting" | "running" | "exited" | "error";
+export type SessionStatus = "running" | "exited" | "error";
 
 export type SessionInfo = {
   id: string;
+  agentId: string;
+  agentName: string;
   title: string;
   command: string;
   cwd: string;
@@ -30,3 +32,18 @@ export type SessionErrorEvent = {
   message: string;
 };
 
+export type HandoverResult = {
+  prompt: string;
+  sourceSession: SessionInfo;
+  targetSession: SessionInfo;
+  mode: string;
+};
+
+export type AgentPresetInfo = {
+  id: string;
+  name: string;
+  description: string;
+  available: boolean;
+  command: string;
+  resolvedCommand?: string | null;
+};
