@@ -11,12 +11,22 @@ export type SessionInfo = {
   attached: boolean;
   createdAt: number;
   lastActiveAt: number;
+  nativeSessionRef?: NativeSessionRef | null;
+};
+
+export type NativeSessionRef = {
+  provider: string;
+  id?: string | null;
+  name?: string | null;
+  resumeCommand?: string | null;
+  discoveredAt: number;
 };
 
 export type SessionSnapshot = {
   session: SessionInfo;
   replay: string;
   replayBase64?: string;
+  mode: "live" | "replay-only";
 };
 
 export type PtyDataEvent = {
@@ -55,4 +65,3 @@ export type WorkspaceFolder = {
   name: string;
   isPinned: boolean;
 };
-

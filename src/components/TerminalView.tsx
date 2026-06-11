@@ -5,13 +5,15 @@ import { Terminal } from "@xterm/xterm";
 import {
   attachSession,
   detachSession,
+  reactivateSession,
   resizeSession,
   writeSession,
 } from "../api/tauri";
-import type { PtyDataEvent } from "../types";
+import type { PtyDataEvent, SessionInfo } from "../types";
 
 type TerminalViewProps = {
   sessionId: string;
+  onSessionActivated?: (session: SessionInfo) => void;
 };
 
 const MIN_ROWS = 5;
@@ -39,7 +41,7 @@ function decodeBase64Bytes(base64: string): Uint8Array | null {
   }
 }
 
-function TerminalView({ sessionId }: TerminalViewProps) {
+function TerminalView({ sessionId, onSessionActivated }: TerminalViewProps) {
   const shellRef = useRef<HTMLDivElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -135,9 +137,76 @@ function TerminalView({ sessionId }: TerminalViewProps) {
     window.addEventListener("resize", debouncedFitAndResize);
 
     let isReplaying = true;
+    let isLive = false;
+    let isActivating = false;
+    let wasReplayOnly = false;
+    let pendingInput = "";
+    const queuedLiveOutput: Array<string | Uint8Array> = [];
+
+    const writePtyPayload = (payload: string | Uint8Array) => {
+      if (wasReplayOnly && isActivating && !isLive) {
+        queuedLiveOutput.push(payload);
+        return;
+      }
+      terminal.write(payload);
+    };
+
+    const switchReplayToLive = () => {
+      if (!wasReplayOnly) {
+        return;
+      }
+      terminal.reset();
+      terminal.clear();
+      fitAndResize();
+      wasReplayOnly = false;
+      queuedLiveOutput.splice(0).forEach((payload) => terminal.write(payload));
+    };
+
+    const flushPendingInput = () => {
+      if (!pendingInput) {
+        return;
+      }
+      const data = pendingInput;
+      pendingInput = "";
+      writeSession(sessionId, data).catch((err) => {
+        terminal.writeln(`\r\n[waypoint write error] ${String(err)}`);
+      });
+    };
+
+    const activateAndQueue = (data: string) => {
+      pendingInput += data;
+      if (isActivating) {
+        return;
+      }
+      isActivating = true;
+      setStatus("activating");
+      reactivateSession(sessionId)
+        .then((session) => {
+          if (disposed) return;
+          onSessionActivated?.(session);
+          isLive = session.status === "running";
+          isActivating = false;
+          setStatus(isLive ? "attached" : "readonly");
+          if (isLive) {
+            switchReplayToLive();
+            flushPendingInput();
+          }
+        })
+        .catch((err) => {
+          if (disposed) return;
+          isActivating = false;
+          pendingInput = "";
+          setStatus("error");
+          terminal.writeln(`\r\n[waypoint activate error] ${String(err)}`);
+        });
+    };
 
     const dataDisposable = terminal.onData((data) => {
       if (isReplaying) {
+        return;
+      }
+      if (!isLive) {
+        activateAndQueue(data);
         return;
       }
       writeSession(sessionId, data).catch((err) => {
@@ -149,6 +218,8 @@ function TerminalView({ sessionId }: TerminalViewProps) {
       try {
         const snapshot = await attachSession(sessionId);
         if (disposed) return;
+        isLive = snapshot.mode === "live" && snapshot.session.status === "running";
+        wasReplayOnly = !isLive;
         fitAndResize();
         const onWriteComplete = () => {
           isReplaying = false;
@@ -164,14 +235,14 @@ function TerminalView({ sessionId }: TerminalViewProps) {
             if (event.payload.dataBase64) {
               const bytes = decodeBase64Bytes(event.payload.dataBase64);
               if (bytes) {
-                terminal.write(bytes);
+                writePtyPayload(bytes);
               }
             } else if (event.payload.data) {
-              terminal.write(event.payload.data);
+              writePtyPayload(event.payload.data);
             }
           }
         });
-        setStatus("attached");
+        setStatus(isLive ? "attached" : "readonly");
         setTimeout(() => {
           if (!disposed) {
             terminal.focus();

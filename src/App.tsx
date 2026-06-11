@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Bot,
+  ChevronDown,
+  ChevronRight,
   Folder,
   RefreshCw,
   Send,
@@ -24,6 +26,41 @@ import {
 } from "./api/tauri";
 import type { AgentPresetInfo, SessionInfo, WorkspaceFolder } from "./types";
 
+function agentTreeKey(folderPath: string, agentId: string) {
+  return `${folderPath}::${agentId}`;
+}
+
+function formatSessionTime(timestamp: number) {
+  if (!timestamp) {
+    return "unknown";
+  }
+  const date = new Date(timestamp * 1000);
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  return `${month}/${day} ${hour}:${minute}`;
+}
+
+function sessionStateLabel(status: SessionInfo["status"]) {
+  if (status === "running") {
+    return "Live";
+  }
+  if (status === "exited") {
+    return "History";
+  }
+  return "Error";
+}
+
+function sessionStateHint(status: SessionInfo["status"]) {
+  if (status === "running") {
+    return "PTY running";
+  }
+  if (status === "exited") {
+    return "Click to replay";
+  }
+  return "Needs attention";
+}
 
 function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -46,6 +83,7 @@ function App() {
   const [newWorkspaceInput, setNewWorkspaceInput] = useState("");
   const [isAddingWorkspace, setIsAddingWorkspace] = useState(false);
   const [activeNewMenuFolder, setActiveNewMenuFolder] = useState<string | null>(null);
+  const [expandedAgents, setExpandedAgents] = useState<Record<string, boolean>>({});
   const [workspaceAgentHistory, setWorkspaceAgentHistory] = useState<
     Record<string, { agentId: string; agentName: string }[]>
   >({});
@@ -122,7 +160,7 @@ function App() {
       setSelectedAgentId(nextAgents[0]?.id ?? "claude-code");
     }
     if (!nextAgents.some((agent) => agent.id === continueAgentId)) {
-      setContinueAgentId(nextAgents[0]?.id ?? "shell");
+      setContinueAgentId(nextAgents[0]?.id ?? "claude-code");
     }
   }
 
@@ -194,6 +232,14 @@ function App() {
     }
   }
 
+  function toggleAgentGroup(path: string, agentId: string) {
+    const key = agentTreeKey(path, agentId);
+    setExpandedAgents((current) => ({
+      ...current,
+      [key]: !(current[key] ?? false),
+    }));
+  }
+
   // Create session for a specific agent and path
   async function handleCreateSessionForPath(agentId: string, path: string) {
     setError(null);
@@ -255,7 +301,7 @@ function App() {
     const firstAvailableAgent =
       agents.find((agent) => agent.id !== activeSession?.agentId && agent.available)?.id ??
       agents.find((agent) => agent.available)?.id ??
-      "shell";
+      "claude-code";
     setHandoverTargetId(firstTarget);
     setContinueAgentId(firstAvailableAgent);
     setContinueWorkspacePath(activeSession?.cwd ?? workspacePath);
@@ -470,93 +516,147 @@ function App() {
                 <div className="workspace-sessions-list">
                   {(() => {
                     const history = workspaceAgentHistory[folder.path] || [];
-                    const nodes: Array<
-                      | { type: "active"; session: SessionInfo }
-                      | { type: "offline"; agentId: string; agentName: string }
-                    > = [];
+                    const agentGroups = new Map<
+                      string,
+                      { agentId: string; agentName: string; sessions: SessionInfo[]; rememberedOnly: boolean }
+                    >();
 
                     folderSessions.forEach((session) => {
-                      nodes.push({ type: "active", session });
+                      if (!agentGroups.has(session.agentId)) {
+                        agentGroups.set(session.agentId, {
+                          agentId: session.agentId,
+                          agentName: session.agentName,
+                          sessions: [],
+                          rememberedOnly: false,
+                        });
+                      }
+                      agentGroups.get(session.agentId)?.sessions.push(session);
                     });
 
                     history.forEach((histAgent) => {
-                      const hasSession = folderSessions.some((s) => s.agentId === histAgent.agentId);
-                      if (!hasSession) {
-                        nodes.push({
-                          type: "offline",
+                      if (!agentGroups.has(histAgent.agentId)) {
+                        agentGroups.set(histAgent.agentId, {
                           agentId: histAgent.agentId,
                           agentName: histAgent.agentName,
+                          sessions: [],
+                          rememberedOnly: true,
                         });
                       }
                     });
 
-                    if (nodes.length === 0) {
+                    const groups = Array.from(agentGroups.values()).map((group) => ({
+                      ...group,
+                      sessions: [...group.sessions].sort((a, b) => b.createdAt - a.createdAt),
+                    }));
+
+                    groups.sort((a, b) => {
+                      const aLatest = a.sessions[0]?.createdAt ?? 0;
+                      const bLatest = b.sessions[0]?.createdAt ?? 0;
+                      if (aLatest !== bLatest) {
+                        return bLatest - aLatest;
+                      }
+                      return a.agentName.localeCompare(b.agentName);
+                    });
+
+                    if (groups.length === 0) {
                       return <div className="no-sessions">无活跃会话或历史记录</div>;
                     }
 
-                    return nodes.map((node) => {
-                      if (node.type === "active") {
-                        const session = node.session;
-                        return (
-                          <div
-                            className={`workspace-session-item active-session ${
-                              session.id === activeSessionId ? "active" : ""
-                            }`}
-                            key={`active-${session.id}`}
-                            onClick={() => setActiveSessionId(session.id)}
+                    return groups.map((group) => {
+                      const groupKey = agentTreeKey(folder.path, group.agentId);
+	                      const activeInGroup = group.sessions.some((session) => session.id === activeSessionId);
+	                      const expanded = expandedAgents[groupKey] ?? activeInGroup;
+	                      const runningCount = group.sessions.filter((session) => session.status === "running").length;
+
+	                      return (
+                        <div className="agent-history-group" key={groupKey}>
+                          <button
+                            type="button"
+                            className={`agent-history-header ${activeInGroup ? "active" : ""}`}
+                            onClick={() => toggleAgentGroup(folder.path, group.agentId)}
                           >
-                            <div className="session-info-left">
-                              <span className={`status-dot ${session.status}`} />
-                              <span className="session-label" title={session.title}>
-                                {session.agentName}
-                              </span>
+	                            {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+	                            <Bot size={13} />
+	                            <span className="agent-history-name">{group.agentName}</span>
+	                            <span className="agent-history-badges">
+	                              <span className="agent-history-count">
+	                                {group.sessions.length > 0
+	                                  ? `${group.sessions.length}`
+	                                  : "0"}
+	                              </span>
+	                              {runningCount > 0 ? (
+	                                <span className="agent-history-live">{runningCount} live</span>
+	                              ) : null}
+	                            </span>
+	                          </button>
+
+                          {expanded ? (
+                            <div className="agent-history-children">
+                              {group.sessions.length === 0 ? (
+                                <div className="agent-empty-history">
+                                  <span>暂无历史会话</span>
+                                  {group.rememberedOnly ? (
+                                    <button
+                                      type="button"
+                                      className="session-remove-history-btn"
+                                      onClick={() => handleRemoveAgentFromHistory(folder.path, group.agentId)}
+                                      title="删除该 Agent 历史记录"
+                                    >
+                                      <X size={10} />
+                                    </button>
+                                  ) : null}
+                                </div>
+                              ) : (
+                                group.sessions.map((session) => (
+                                  <div
+                                    className={`workspace-session-item chat-history-item ${
+                                      session.id === activeSessionId ? "active" : ""
+                                    }`}
+                                    key={`session-${session.id}`}
+                                    onClick={() => setActiveSessionId(session.id)}
+	                                    title={session.title}
+	                                  >
+	                                    <div className="session-info-left">
+	                                      <span className={`status-dot ${session.status}`} />
+	                                      <span className="session-copy">
+	                                        <span className="session-label">
+	                                          {formatSessionTime(session.createdAt)}
+	                                        </span>
+	                                        <span className="session-subtitle">
+	                                          {sessionStateHint(session.status)}
+	                                        </span>
+	                                      </span>
+	                                    </div>
+	                                    <div className="session-actions">
+	                                      <span className={`session-state ${session.status}`}>
+	                                        {sessionStateLabel(session.status)}
+	                                      </span>
+	                                      {session.status === "running" ? (
+	                                        <button
+	                                          className="session-kill-btn"
+	                                          onClick={async (e) => {
+	                                            e.stopPropagation();
+	                                            setError(null);
+	                                            try {
+	                                              await killSession(session.id);
+	                                              await refreshSessions();
+	                                            } catch (err) {
+	                                              setError(String(err));
+	                                            }
+	                                          }}
+	                                          title="强杀当前会话"
+	                                        >
+	                                          <Square size={8} fill="currentColor" />
+	                                        </button>
+	                                      ) : null}
+	                                    </div>
+	                                  </div>
+                                ))
+                              )}
                             </div>
-                            <button
-                              className="session-kill-btn"
-                              onClick={async (e) => {
-                                e.stopPropagation();
-                                setError(null);
-                                try {
-                                  await killSession(session.id);
-                                  await refreshSessions();
-                                } catch (err) {
-                                  setError(String(err));
-                                }
-                              }}
-                              title="强杀当前会话"
-                            >
-                              <Square size={8} fill="currentColor" />
-                            </button>
-                          </div>
-                        );
-                      } else {
-                        return (
-                          <div
-                            className="workspace-session-item offline-agent"
-                            key={`offline-${node.agentId}`}
-                            onClick={() => handleCreateSessionForPath(node.agentId, folder.path)}
-                            title="点击拉起新终端，在终端输入 /resume 即可恢复上次会话"
-                          >
-                            <div className="session-info-left">
-                              <span className="status-dot offline" />
-                              <span className="session-label offline">
-                                {node.agentName}
-                                <span className="offline-text">（离线 · 点击拉起）</span>
-                              </span>
-                            </div>
-                            <button
-                              className="session-remove-history-btn"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleRemoveAgentFromHistory(folder.path, node.agentId);
-                              }}
-                              title="删除该 Agent 历史记录"
-                            >
-                              <X size={10} />
-                            </button>
-                          </div>
-                        );
-                      }
+                          ) : null}
+                        </div>
+                      );
                     });
                   })()}
                 </div>
@@ -620,11 +720,11 @@ function App() {
           </div>
         </header>
 
-        {activeSession && activeSession.agentId !== "shell" && (
+        {activeSession && (
           <div className="resume-banner">
             <Info size={14} className="banner-icon" />
             <span>
-              提示：当前 Agent 支持原生会话恢复。您可以在终端中输入 <code>/resume</code> 并回车，来尝试载入上次的历史会话。
+              提示：历史会话会先以只读方式回放；开始输入时 Waypoint 会优先尝试当前 Agent 的原生恢复能力。
             </span>
           </div>
         )}
@@ -633,7 +733,19 @@ function App() {
 
         <div className="terminal-frame">
           {activeSessionId ? (
-            <TerminalView key={activeSessionId} sessionId={activeSessionId} />
+            <TerminalView
+              key={activeSessionId}
+              sessionId={activeSessionId}
+              onSessionActivated={(session) => {
+                setSessions((current) => {
+                  const exists = current.some((item) => item.id === session.id);
+                  if (!exists) {
+                    return [...current, session];
+                  }
+                  return current.map((item) => (item.id === session.id ? session : item));
+                });
+              }}
+            />
           ) : (
             <div className="empty-state">
               <div className="empty-state-inner">

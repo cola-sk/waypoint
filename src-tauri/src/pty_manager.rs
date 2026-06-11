@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     env, fs,
+    fs::{File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
     process::Command,
@@ -12,13 +13,14 @@ use std::{
 use base64::Engine;
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 const RING_LIMIT_CHARS: usize = 200_000;
 const INPUT_RING_LIMIT_CHARS: usize = 40_000;
 const RENDER_RING_LIMIT_BYTES: usize = 400_000;
+const PERSISTED_REPLAY_LIMIT_BYTES: usize = 1_500_000;
 const CHAT_HISTORY_LIMIT: usize = 200;
 const CHAT_MESSAGE_CONTENT_LIMIT_CHARS: usize = 120_000;
 const CHAT_STREAM_IDLE_FINALIZE_MS: u64 = 1_200;
@@ -52,6 +54,7 @@ struct PtySession {
     writer: Mutex<Box<dyn Write + Send>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     child: Mutex<Box<dyn Child + Send>>,
+    transcript_path: PathBuf,
     ring: Mutex<String>,
     input_ring: Mutex<String>,
     render_ring: Mutex<Vec<u8>>,
@@ -61,7 +64,8 @@ struct PtySession {
     last_assistant_output_at_ms: Mutex<Option<u64>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SessionMeta {
     id: String,
     agent_id: String,
@@ -73,6 +77,18 @@ struct SessionMeta {
     attached: bool,
     created_at: u64,
     last_active_at: u64,
+    #[serde(default)]
+    native_session_ref: Option<NativeSessionRef>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeSessionRef {
+    provider: String,
+    id: Option<String>,
+    name: Option<String>,
+    resume_command: Option<String>,
+    discovered_at: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -88,9 +104,10 @@ pub struct SessionInfo {
     attached: bool,
     created_at: u64,
     last_active_at: u64,
+    native_session_ref: Option<NativeSessionRef>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum SessionStatus {
     Running,
@@ -104,6 +121,7 @@ pub struct SessionSnapshot {
     session: SessionInfo,
     replay: String,
     replay_base64: String,
+    mode: String,
 }
 
 #[derive(Serialize)]
@@ -184,6 +202,13 @@ struct ResolvedAgentCommand {
     resolved_display: String,
 }
 
+struct NativeResumeCommand {
+    executable: String,
+    args: Vec<String>,
+    display_command: String,
+    native_session_ref: Option<NativeSessionRef>,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PtyDataEvent {
@@ -205,20 +230,6 @@ struct SessionErrorEvent {
 }
 
 #[tauri::command]
-pub fn create_shell_session(
-    state: State<'_, AppState>,
-    app: AppHandle,
-    title: Option<String>,
-    cwd: Option<String>,
-    rows: Option<u16>,
-    cols: Option<u16>,
-) -> Result<SessionInfo, String> {
-    state
-        .manager
-        .create_shell_session(app, title, cwd, rows, cols)
-}
-
-#[tauri::command]
 pub fn create_agent_session(
     state: State<'_, AppState>,
     app: AppHandle,
@@ -227,15 +238,6 @@ pub fn create_agent_session(
     rows: Option<u16>,
     cols: Option<u16>,
 ) -> Result<SessionInfo, String> {
-    if agent_id == "shell" {
-        return state.manager.create_shell_session(
-            app,
-            Some("Shell".to_string()),
-            Some(cwd),
-            rows,
-            cols,
-        );
-    }
     state
         .manager
         .create_agent_session(app, &agent_id, cwd, rows, cols)
@@ -243,8 +245,7 @@ pub fn create_agent_session(
 
 #[tauri::command]
 pub fn list_agent_presets() -> Vec<AgentPresetInfo> {
-    let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let mut presets = agent_definitions()
+    agent_definitions()
         .into_iter()
         .map(|definition| {
             let resolved = resolve_agent_command(&definition);
@@ -261,16 +262,7 @@ pub fn list_agent_presets() -> Vec<AgentPresetInfo> {
                 resolved_command: resolved.map(|command| command.resolved_display),
             }
         })
-        .collect::<Vec<_>>();
-    presets.push(AgentPresetInfo {
-        id: "shell".to_string(),
-        name: "Shell".to_string(),
-        description: "System login shell".to_string(),
-        available: true,
-        command: shell.clone(),
-        resolved_command: Some(shell),
-    });
-    presets
+        .collect()
 }
 
 #[tauri::command]
@@ -289,6 +281,19 @@ pub fn attach_session(
     session_id: String,
 ) -> Result<SessionSnapshot, String> {
     state.manager.attach_session(&session_id)
+}
+
+#[tauri::command]
+pub fn reactivate_session(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    session_id: String,
+    rows: Option<u16>,
+    cols: Option<u16>,
+) -> Result<SessionInfo, String> {
+    state
+        .manager
+        .reactivate_session(app, &session_id, rows, cols)
 }
 
 #[tauri::command]
@@ -380,35 +385,6 @@ pub fn get_session_diff_snapshot(
 }
 
 impl SessionManager {
-    fn create_shell_session(
-        &self,
-        app: AppHandle,
-        title: Option<String>,
-        cwd: Option<String>,
-        rows: Option<u16>,
-        cols: Option<u16>,
-    ) -> Result<SessionInfo, String> {
-        let command = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-        let cwd = cwd.unwrap_or_else(default_cwd);
-        let mut args = Vec::new();
-        if command.ends_with("zsh") || command.ends_with("bash") {
-            args.push("-l".to_string());
-        }
-        self.spawn_session(
-            app,
-            "shell",
-            "Shell",
-            title.unwrap_or_else(|| "Shell".to_string()),
-            command.clone(),
-            command,
-            args,
-            cwd,
-            rows,
-            cols,
-            Vec::new(),
-        )
-    }
-
     fn create_agent_session(
         &self,
         app: AppHandle,
@@ -457,14 +433,61 @@ impl SessionManager {
         cols: Option<u16>,
         extra_env: Vec<(String, String)>,
     ) -> Result<SessionInfo, String> {
+        self.spawn_session_with_identity(
+            app,
+            agent_id,
+            agent_name,
+            title,
+            display_command,
+            executable,
+            args,
+            cwd,
+            rows,
+            cols,
+            extra_env,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_session_with_identity(
+        &self,
+        app: AppHandle,
+        agent_id: &str,
+        agent_name: &str,
+        title: String,
+        display_command: String,
+        executable: String,
+        args: Vec<String>,
+        cwd: String,
+        rows: Option<u16>,
+        cols: Option<u16>,
+        extra_env: Vec<(String, String)>,
+        existing_id: Option<String>,
+        title_override: Option<String>,
+        created_at_override: Option<u64>,
+        native_session_ref: Option<NativeSessionRef>,
+    ) -> Result<SessionInfo, String> {
         let cwd_path = PathBuf::from(&cwd);
         if !cwd_path.is_dir() {
             return Err(format!("workspace directory does not exist: {cwd}"));
         }
 
-        let id = Uuid::new_v4().to_string();
+        let id = existing_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let now = unix_timestamp();
-        let session_title = format!("{title} {}", &id[..8]);
+        let session_title =
+            title_override.unwrap_or_else(|| format!("{title} {}", &id[..id.len().min(8)]));
+        let session_dir = session_dir(&id)?;
+        fs::create_dir_all(&session_dir).map_err(|err| {
+            format!(
+                "failed to create session directory {}: {err}",
+                session_dir.display()
+            )
+        })?;
+        let transcript_path = session_dir.join("transcript.log");
 
         let pty_system = native_pty_system();
         let initial_rows = rows.unwrap_or(30);
@@ -524,8 +547,9 @@ impl SessionManager {
             cwd,
             status: SessionStatus::Running,
             attached: false,
-            created_at: now,
+            created_at: created_at_override.unwrap_or(now),
             last_active_at: now,
+            native_session_ref,
         };
 
         let session = Arc::new(PtySession {
@@ -533,6 +557,7 @@ impl SessionManager {
             writer: Mutex::new(writer),
             master: Mutex::new(pair.master),
             child: Mutex::new(child),
+            transcript_path,
             ring: Mutex::new(String::new()),
             input_ring: Mutex::new(String::new()),
             render_ring: Mutex::new(Vec::new()),
@@ -542,6 +567,7 @@ impl SessionManager {
             last_assistant_output_at_ms: Mutex::new(None),
         });
 
+        session.persist_meta();
         self.sessions.lock().insert(id.clone(), session.clone());
 
         let reader_session = session.clone();
@@ -549,6 +575,7 @@ impl SessionManager {
         let reader_app = app.clone();
         thread::spawn(move || {
             let mut buf = [0_u8; 8192];
+            let mut transcript = open_transcript_append(&reader_session.transcript_path).ok();
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {
@@ -567,6 +594,9 @@ impl SessionManager {
                         let chat_chunk = clean_chat_chunk(&data);
                         let replace_chat = has_chat_repaint_hint(&data);
                         let encoded = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
+                        if let Some(file) = transcript.as_mut() {
+                            let _ = file.write_all(&buf[..n]);
+                        }
                         reader_session.append_ring(&data);
                         reader_session.append_render(&buf[..n]);
                         reader_session.append_chat_assistant_output(&chat_chunk, replace_chat);
@@ -606,38 +636,165 @@ impl SessionManager {
     }
 
     fn list_sessions(&self) -> Vec<SessionInfo> {
-        let mut sessions = self
-            .sessions
-            .lock()
+        let live_sessions = self.sessions.lock();
+        let mut sessions = live_sessions
             .values()
             .map(|session| session.info())
             .collect::<Vec<_>>();
+        let live_ids = live_sessions.keys().cloned().collect::<Vec<_>>();
+        drop(live_sessions);
+
+        for mut meta in load_all_session_metas() {
+            if live_ids.iter().any(|id| id == &meta.id) {
+                continue;
+            }
+            meta.attached = false;
+            if matches!(meta.status, SessionStatus::Running) {
+                meta.status = SessionStatus::Exited;
+            }
+            sessions.push(meta.to_info());
+        }
+
         sessions.sort_by_key(|session| session.created_at);
         sessions
     }
 
     fn attach_session(&self, session_id: &str) -> Result<SessionSnapshot, String> {
-        let session = self.get(session_id)?;
-        {
-            let mut meta = session.meta.lock();
-            meta.attached = true;
-            meta.last_active_at = unix_timestamp();
+        if let Some(session) = self.sessions.lock().get(session_id).cloned() {
+            {
+                let mut meta = session.meta.lock();
+                meta.attached = true;
+                meta.last_active_at = unix_timestamp();
+            }
+            session.persist_meta();
+            let replay = session.ring.lock().clone();
+            let replay_bytes = session.render_ring.lock().clone();
+            let info = session.info();
+            let mode = if matches!(info.status, SessionStatus::Running) {
+                "live"
+            } else {
+                "replay-only"
+            };
+            return Ok(SessionSnapshot {
+                session: info,
+                replay,
+                replay_base64: base64::engine::general_purpose::STANDARD.encode(replay_bytes),
+                mode: mode.to_string(),
+            });
         }
-        let replay = session.ring.lock().clone();
-        let replay_bytes = session.render_ring.lock().clone();
+
+        let mut meta = load_session_meta(session_id)?;
+        meta.attached = false;
+        if matches!(meta.status, SessionStatus::Running) {
+            meta.status = SessionStatus::Exited;
+        }
+        let replay_bytes = read_persisted_replay(session_id)?;
+        let replay = String::from_utf8_lossy(&replay_bytes).to_string();
         Ok(SessionSnapshot {
-            session: session.info(),
+            session: meta.to_info(),
             replay,
             replay_base64: base64::engine::general_purpose::STANDARD.encode(replay_bytes),
+            mode: "replay-only".to_string(),
         })
     }
 
     fn detach_session(&self, session_id: &str) -> Result<(), String> {
-        let session = self.get(session_id)?;
+        let Some(session) = self.sessions.lock().get(session_id).cloned() else {
+            return Ok(());
+        };
         let mut meta = session.meta.lock();
         meta.attached = false;
         meta.last_active_at = unix_timestamp();
+        drop(meta);
+        session.persist_meta();
         Ok(())
+    }
+
+    fn reactivate_session(
+        &self,
+        app: AppHandle,
+        session_id: &str,
+        rows: Option<u16>,
+        cols: Option<u16>,
+    ) -> Result<SessionInfo, String> {
+        if let Some(session) = self.sessions.lock().get(session_id).cloned() {
+            let info = session.info();
+            if matches!(info.status, SessionStatus::Running) {
+                return Ok(info);
+            }
+        }
+
+        let meta = load_session_meta(session_id)?;
+        if !PathBuf::from(&meta.cwd).is_dir() {
+            return Err(format!("workspace directory does not exist: {}", meta.cwd));
+        }
+
+        if let Some(command) = native_resume_command_for(&meta)? {
+            return self.spawn_session_with_identity(
+                app,
+                &meta.agent_id,
+                &meta.agent_name,
+                meta.agent_name.clone(),
+                command.display_command,
+                command.executable,
+                command.args,
+                meta.cwd,
+                rows,
+                cols,
+                Vec::new(),
+                Some(meta.id),
+                Some(meta.title),
+                Some(meta.created_at),
+                command.native_session_ref,
+            );
+        }
+
+        let definition = agent_definitions()
+            .into_iter()
+            .find(|definition| definition.id == meta.agent_id)
+            .ok_or_else(|| format!("unknown agent preset: {}", meta.agent_id))?;
+        let resolved = resolve_agent_command(&definition).ok_or_else(|| {
+            format!(
+                "{} is not available in PATH. Install it or make sure your login shell can resolve it.",
+                definition.name
+            )
+        })?;
+        let target_info = self.spawn_session_with_identity(
+            app,
+            definition.id,
+            definition.name,
+            definition.name.to_string(),
+            resolved.display,
+            resolved.executable,
+            resolved.args,
+            meta.cwd.clone(),
+            rows,
+            cols,
+            Vec::new(),
+            Some(meta.id.clone()),
+            Some(meta.title.clone()),
+            Some(meta.created_at),
+            meta.native_session_ref.clone(),
+        )?;
+
+        let target = self.get(&target_info.id)?;
+        let prompt = build_offline_handover_prompt(&meta, &target_info)?;
+        let handover_path = write_handover_file(&target_info.cwd, &prompt)?;
+        let display_path = handover_path
+            .strip_prefix(&target_info.cwd)
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| handover_path.display().to_string());
+        thread::sleep(Duration::from_millis(handover_startup_delay_ms(
+            &target_info.agent_id,
+        )));
+        inject_with_retry(
+            &target,
+            &format!(
+                "A prior Waypoint session transcript is summarized in {display_path}. Read only this exact file, acknowledge context loaded, then continue with my next instruction."
+            ),
+        )?;
+        self.remember_handover(&target, &prompt);
+        Ok(target_info)
     }
 
     fn write_session(&self, session_id: &str, data: String) -> Result<(), String> {
@@ -649,6 +806,7 @@ impl SessionManager {
             .write_all(data.as_bytes())
             .map_err(|err| format!("failed to write to PTY: {err}"))?;
         session.meta.lock().last_active_at = unix_timestamp();
+        session.persist_meta();
         Ok(())
     }
 
@@ -668,6 +826,7 @@ impl SessionManager {
         session.append_chat_user_message(payload);
         session.append_input(&format!("{payload}\n"));
         session.meta.lock().last_active_at = unix_timestamp();
+        session.persist_meta();
         Ok(())
     }
 
@@ -833,17 +992,7 @@ impl SessionManager {
             );
         }
 
-        let target_info = if target_agent_id == "shell" {
-            self.create_shell_session(
-                app,
-                Some("Shell Continue".to_string()),
-                Some(cwd),
-                rows,
-                cols,
-            )?
-        } else {
-            self.create_agent_session(app, target_agent_id, cwd, rows, cols)?
-        };
+        let target_info = self.create_agent_session(app, target_agent_id, cwd, rows, cols)?;
         let target = self.get(&target_info.id)?;
         let prompt = self.inject_handover(&source, &target, note, true)?;
 
@@ -884,6 +1033,7 @@ impl SessionManager {
             attached: false,
             created_at: unix_timestamp(),
             last_active_at: unix_timestamp(),
+            native_session_ref: None,
         };
         let prompt = self.build_compact_handover_prompt_for(
             source,
@@ -951,6 +1101,7 @@ impl SessionManager {
             attached: false,
             created_at: unix_timestamp(),
             last_active_at: unix_timestamp(),
+            native_session_ref: None,
         };
         let prompt = self.build_compact_handover_prompt_for(
             source,
@@ -1021,6 +1172,7 @@ impl SessionManager {
             attached: false,
             created_at: unix_timestamp(),
             last_active_at: unix_timestamp(),
+            native_session_ref: None,
         };
         let prompt =
             self.build_compact_handover_prompt_for(source, &source_info, &planned_target, note);
@@ -1085,6 +1237,7 @@ impl SessionManager {
             attached: false,
             created_at: unix_timestamp(),
             last_active_at: unix_timestamp(),
+            native_session_ref: None,
         };
         let prompt = self.build_compact_handover_prompt_for(
             source,
@@ -1147,13 +1300,9 @@ impl SessionManager {
             .strip_prefix(&target_info.cwd)
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| handover_path.display().to_string());
-        let short_instruction = if target_info.agent_id == "shell" {
-            format!("# Handover context saved in {display_path}")
-        } else {
-            format!(
-                "A handover context file is referenced at {display_path}. Read only this exact file (no directory listing or glob scanning), acknowledge context loaded, then wait for my next instruction."
-            )
-        };
+        let short_instruction = format!(
+            "A handover context file is referenced at {display_path}. Read only this exact file (no directory listing or glob scanning), acknowledge context loaded, then wait for my next instruction."
+        );
 
         if target_is_new {
             thread::sleep(Duration::from_millis(handover_startup_delay_ms(
@@ -1253,6 +1402,15 @@ impl PtySession {
         let mut meta = self.meta.lock();
         meta.status = status;
         meta.last_active_at = unix_timestamp();
+        drop(meta);
+        self.persist_meta();
+    }
+
+    fn persist_meta(&self) {
+        let meta = self.meta.lock().clone();
+        if let Err(err) = persist_session_meta(&meta) {
+            eprintln!("[waypoint] failed to persist session metadata: {err}");
+        }
     }
 
     fn append_ring(&self, data: &str) {
@@ -1404,6 +1562,7 @@ impl SessionMeta {
             attached: self.attached,
             created_at: self.created_at,
             last_active_at: self.last_active_at,
+            native_session_ref: self.native_session_ref.clone(),
         }
     }
 }
@@ -1413,6 +1572,89 @@ fn default_cwd() -> String {
         .ok()
         .and_then(|path| path.to_str().map(ToOwned::to_owned))
         .unwrap_or_else(|| env::var("HOME").unwrap_or_else(|_| "/".to_string()))
+}
+
+fn waypoint_sessions_dir() -> Result<PathBuf, String> {
+    let home = env::var("HOME").map_err(|err| format!("failed to resolve HOME: {err}"))?;
+    Ok(PathBuf::from(home).join(".waypoint").join("sessions"))
+}
+
+fn session_dir(session_id: &str) -> Result<PathBuf, String> {
+    Ok(waypoint_sessions_dir()?.join(session_id))
+}
+
+fn session_meta_path(session_id: &str) -> Result<PathBuf, String> {
+    Ok(session_dir(session_id)?.join("meta.json"))
+}
+
+fn session_transcript_path(session_id: &str) -> Result<PathBuf, String> {
+    Ok(session_dir(session_id)?.join("transcript.log"))
+}
+
+fn persist_session_meta(meta: &SessionMeta) -> Result<(), String> {
+    let dir = session_dir(&meta.id)?;
+    fs::create_dir_all(&dir).map_err(|err| {
+        format!(
+            "failed to create session directory {}: {err}",
+            dir.display()
+        )
+    })?;
+    let path = dir.join("meta.json");
+    let payload = serde_json::to_vec_pretty(meta)
+        .map_err(|err| format!("failed to encode session metadata: {err}"))?;
+    fs::write(&path, payload)
+        .map_err(|err| format!("failed to write session metadata {}: {err}", path.display()))
+}
+
+fn load_session_meta(session_id: &str) -> Result<SessionMeta, String> {
+    let path = session_meta_path(session_id)?;
+    let payload = fs::read(&path)
+        .map_err(|err| format!("failed to read session metadata {}: {err}", path.display()))?;
+    serde_json::from_slice(&payload)
+        .map_err(|err| format!("failed to parse session metadata {}: {err}", path.display()))
+}
+
+fn load_all_session_metas() -> Vec<SessionMeta> {
+    let Ok(dir) = waypoint_sessions_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("meta.json"))
+        .filter_map(|path| {
+            let payload = fs::read(&path).ok()?;
+            serde_json::from_slice::<SessionMeta>(&payload).ok()
+        })
+        .collect()
+}
+
+fn open_transcript_append(path: &Path) -> Result<File, String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create transcript directory {}: {err}",
+                parent.display()
+            )
+        })?;
+    }
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|err| format!("failed to open transcript {}: {err}", path.display()))
+}
+
+fn read_persisted_replay(session_id: &str) -> Result<Vec<u8>, String> {
+    let path = session_transcript_path(session_id)?;
+    let bytes = fs::read(&path).unwrap_or_default();
+    if bytes.len() <= PERSISTED_REPLAY_LIMIT_BYTES {
+        return Ok(bytes);
+    }
+    Ok(bytes[bytes.len() - PERSISTED_REPLAY_LIMIT_BYTES..].to_vec())
 }
 
 fn agent_definitions() -> Vec<AgentDefinition> {
@@ -1504,6 +1746,116 @@ fn resolve_candidate(candidate: &CommandCandidate) -> Option<ResolvedAgentComman
         display: candidate.display.to_string(),
         resolved_display,
     })
+}
+
+fn native_resume_command_for(meta: &SessionMeta) -> Result<Option<NativeResumeCommand>, String> {
+    let definition = agent_definitions()
+        .into_iter()
+        .find(|definition| definition.id == meta.agent_id)
+        .ok_or_else(|| format!("unknown agent preset: {}", meta.agent_id))?;
+    let resolved = resolve_agent_command(&definition).ok_or_else(|| {
+        format!(
+            "{} is not available in PATH. Install it or make sure your login shell can resolve it.",
+            definition.name
+        )
+    })?;
+    let now = unix_timestamp();
+    let native_id = meta
+        .native_session_ref
+        .as_ref()
+        .and_then(|session_ref| session_ref.id.clone());
+
+    let (args, display_command) = match meta.agent_id.as_str() {
+        "claude-code" => {
+            let mut args = resolved.args;
+            if let Some(native_id) = native_id {
+                args.push("--resume".to_string());
+                args.push(native_id.clone());
+                (
+                    args,
+                    format!("{} --resume {}", resolved.display, shell_quote(&native_id)),
+                )
+            } else {
+                args.push("--continue".to_string());
+                (args, format!("{} --continue", resolved.display))
+            }
+        }
+        "codex" => {
+            let mut args = resolved.args;
+            args.push("resume".to_string());
+            if let Some(native_id) = native_id {
+                args.push(native_id.clone());
+                (
+                    args,
+                    format!("{} resume {}", resolved.display, shell_quote(&native_id)),
+                )
+            } else {
+                args.push("--last".to_string());
+                (args, format!("{} resume --last", resolved.display))
+            }
+        }
+        "gemini" => {
+            let mut args = resolved.args;
+            args.push("--resume".to_string());
+            if let Some(native_id) = native_id {
+                args.push(native_id.clone());
+                (
+                    args,
+                    format!("{} --resume {}", resolved.display, shell_quote(&native_id)),
+                )
+            } else {
+                (args, format!("{} --resume", resolved.display))
+            }
+        }
+        "copilot" => {
+            if !resolved_command_mentions_resume(&resolved) {
+                return Ok(None);
+            }
+            let mut args = resolved.args;
+            args.push("resume".to_string());
+            if let Some(native_id) = native_id {
+                args.push(native_id.clone());
+                (
+                    args,
+                    format!("{} resume {}", resolved.display, shell_quote(&native_id)),
+                )
+            } else {
+                (args, format!("{} resume", resolved.display))
+            }
+        }
+        _ => return Ok(None),
+    };
+
+    Ok(Some(NativeResumeCommand {
+        executable: resolved.executable,
+        args,
+        display_command: display_command.clone(),
+        native_session_ref: Some(NativeSessionRef {
+            provider: meta.agent_id.clone(),
+            id: meta
+                .native_session_ref
+                .as_ref()
+                .and_then(|session_ref| session_ref.id.clone()),
+            name: meta
+                .native_session_ref
+                .as_ref()
+                .and_then(|session_ref| session_ref.name.clone()),
+            resume_command: Some(display_command),
+            discovered_at: now,
+        }),
+    }))
+}
+
+fn resolved_command_mentions_resume(resolved: &ResolvedAgentCommand) -> bool {
+    let mut command = shell_quote(&resolved.executable);
+    for arg in &resolved.args {
+        command.push(' ');
+        command.push_str(&shell_quote(arg));
+    }
+    command.push_str(" --help");
+    run_login_shell_output(&command)
+        .map(|output| output.to_ascii_lowercase().contains("resume"))
+        .unwrap_or(false)
 }
 
 fn resolve_executable(executable: &str) -> Option<String> {
@@ -1738,6 +2090,27 @@ Continue from the previous local agent session.
         recent_context = empty_fallback(recent_context, "No recent terminal context captured."),
         recent_user_inputs = empty_fallback(recent_user_inputs, "No recent user input captured."),
     )
+}
+
+fn build_offline_handover_prompt(
+    source_meta: &SessionMeta,
+    target_info: &SessionInfo,
+) -> Result<String, String> {
+    let replay_bytes = read_persisted_replay(&source_meta.id)?;
+    let replay_text = String::from_utf8_lossy(&replay_bytes);
+    let recent_context = clean_terminal_output(&replay_text, COMPACT_HANDOVER_CONTEXT_CHARS);
+    let git_status = git_command(&source_meta.cwd, &["status", "--short"])
+        .unwrap_or_else(|| "git status unavailable".to_string());
+    let source_info = source_meta.to_info();
+    Ok(build_compact_handover_prompt(
+        &source_info,
+        target_info,
+        "This session was reactivated from a persisted Waypoint terminal transcript after its PTY process exited.",
+        &tail_chars(&git_status, COMPACT_GIT_STATUS_CHARS),
+        "",
+        &recent_context,
+        "",
+    ))
 }
 
 fn inject_with_retry(target: &Arc<PtySession>, prompt: &str) -> Result<(), String> {

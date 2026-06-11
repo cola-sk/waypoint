@@ -568,6 +568,156 @@ textarea:focus-visible {
   box-shadow: 0 6px 14px rgba(255, 111, 76, 0.1);
 }
 
+.agent-history-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.agent-history-header {
+  display: grid;
+  grid-template-columns: 14px 14px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 7px;
+  text-align: left;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease,
+    color 120ms ease;
+}
+
+.agent-history-header:hover,
+.agent-history-header.active {
+  border-color: var(--border-color-muted);
+  background: rgba(255, 255, 255, 0.64);
+  color: var(--text-primary);
+}
+
+.agent-history-header svg {
+  flex-shrink: 0;
+}
+
+.agent-history-name {
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 750;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-history-count,
+.agent-history-live,
+.session-state {
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 750;
+  line-height: 1;
+  padding: 4px 6px;
+  white-space: nowrap;
+}
+
+.agent-history-badges {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-width: 0;
+}
+
+.agent-history-count {
+  background: rgba(31, 35, 40, 0.06);
+  color: var(--text-muted);
+  min-width: 18px;
+  text-align: center;
+}
+
+.agent-history-live {
+  background: rgba(96, 211, 148, 0.16);
+  color: #287a4c;
+}
+
+.agent-history-children {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-left: 18px;
+  padding-left: 10px;
+  border-left: 1px solid rgba(31, 35, 40, 0.08);
+}
+
+.workspace-session-item.chat-history-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 38px;
+  gap: 8px;
+  padding: 6px 6px 6px 7px;
+}
+
+.chat-history-item .session-info-left {
+  display: grid;
+  grid-template-columns: 7px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+}
+
+.session-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.session-subtitle {
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-width: 0;
+}
+
+.session-state.running {
+  background: rgba(96, 211, 148, 0.16);
+  color: #287a4c;
+}
+
+.session-state.exited {
+  background: rgba(31, 35, 40, 0.06);
+  color: var(--text-muted);
+}
+
+.session-state.error {
+  background: rgba(217, 83, 79, 0.11);
+  color: var(--accent-red);
+}
+
+.agent-empty-history {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 6px 7px;
+}
+
 .workspace-session-item.offline-agent {
   opacity: 0.72;
   border: 1px dashed #d7d3cb;
@@ -605,6 +755,11 @@ textarea:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.chat-history-item .session-label {
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .session-label.offline {

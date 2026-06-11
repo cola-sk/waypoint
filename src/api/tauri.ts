@@ -17,16 +17,6 @@ function assertTauriRuntime() {
   }
 }
 
-export function createShellSession(): Promise<SessionInfo> {
-  assertTauriRuntime();
-  return invoke("create_shell_session", {
-    title: null,
-    cwd: null,
-    rows: 30,
-    cols: 100,
-  });
-}
-
 export function createAgentSession(agentId: string, cwd: string): Promise<SessionInfo> {
   assertTauriRuntime();
   return invoke("create_agent_session", {
@@ -72,14 +62,6 @@ export function listAgentPresets(): Promise<AgentPresetInfo[]> {
         command: "copilot",
         resolvedCommand: null,
       },
-      {
-        id: "shell",
-        name: "Shell",
-        description: "System login shell",
-        available: true,
-        command: "/bin/zsh",
-        resolvedCommand: "/bin/zsh",
-      },
     ]);
   }
   return invoke("list_agent_presets");
@@ -102,6 +84,15 @@ export function listSessions(): Promise<SessionInfo[]> {
 export function attachSession(sessionId: string): Promise<SessionSnapshot> {
   assertTauriRuntime();
   return invoke("attach_session", { sessionId });
+}
+
+export function reactivateSession(sessionId: string): Promise<SessionInfo> {
+  assertTauriRuntime();
+  return invoke("reactivate_session", {
+    sessionId,
+    rows: 30,
+    cols: 100,
+  });
 }
 
 export function detachSession(sessionId: string): Promise<void> {
