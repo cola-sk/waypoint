@@ -870,7 +870,7 @@ impl SessionManager {
             last_active_at: unix_timestamp(),
         };
         let prompt =
-            self.build_compact_handover_prompt_for(source, &source_info, &planned_target, note);
+            self.build_compact_handover_prompt_for(source, &source_info, &planned_target, note.clone());
 
         let handover_path = write_handover_file(&cwd, &prompt)?;
         let startup_prompt = handover_reference_startup_prompt();
@@ -926,16 +926,21 @@ impl SessionManager {
             agent_id: definition.id.to_string(),
             agent_name: definition.name.to_string(),
             title: "Gemini CLI new session".to_string(),
-            command: "gemini --screen-reader --prompt-interactive <handover-inline>".to_string(),
+            command: "gemini --prompt-interactive <handover>".to_string(),
             cwd: cwd.clone(),
             status: SessionStatus::Running,
             attached: false,
             created_at: unix_timestamp(),
             last_active_at: unix_timestamp(),
         };
-        let prompt =
-            self.build_compact_handover_prompt_for(source, &source_info, &planned_target, note);
-        let startup_prompt = handover_inline_startup_prompt(&prompt);
+        let prompt = self.build_compact_handover_prompt_for(
+            source,
+            &source_info,
+            &planned_target,
+            note.clone(),
+        );
+        let handover_path = write_handover_file(&cwd, &prompt)?;
+        let startup_prompt = handover_reference_startup_prompt();
         let mut args = resolved.args;
         args.push("--prompt-interactive".to_string());
         args.push(startup_prompt);
@@ -944,13 +949,16 @@ impl SessionManager {
             definition.id,
             definition.name,
             definition.name.to_string(),
-            "gemini --screen-reader --prompt-interactive <handover-inline>".to_string(),
+            "gemini --prompt-interactive <handover>".to_string(),
             resolved.executable,
             args,
             cwd,
             rows,
             cols,
-            Vec::new(),
+            vec![(
+                WAYPOINT_HANDOVER_FILE_ENV.to_string(),
+                handover_path.to_string_lossy().into_owned(),
+            )],
         )?;
 
         Ok(HandoverResult {
@@ -1046,7 +1054,7 @@ impl SessionManager {
             format!("# Handover context saved in {display_path}")
         } else {
             format!(
-                "A handover context file is referenced at {display_path}. For now, acknowledge briefly and wait for my next instruction. Before executing any user task, first read the referenced handover file to load context, then continue."
+                "A handover context file is referenced at {display_path}. Read only this exact file (no directory listing or glob scanning), acknowledge context loaded, then wait for my next instruction."
             )
         };
 
@@ -1325,8 +1333,8 @@ fn agent_definitions() -> Vec<AgentDefinition> {
             description: "Google Gemini CLI",
             candidates: &[CommandCandidate {
                 executable: "gemini",
-                args: &["--screen-reader"],
-                display: "gemini --screen-reader",
+                args: &[],
+                display: "gemini",
                 verify: VerifyStrategy::CommandExists,
             }],
         },
@@ -1436,13 +1444,7 @@ fn write_handover_file(cwd: &str, prompt: &str) -> Result<PathBuf, String> {
 
 fn handover_reference_startup_prompt() -> String {
     format!(
-        "Initialization step for this new session: read the handover file path from the {WAYPOINT_HANDOVER_FILE_ENV} environment variable now (this read is explicitly allowed). After loading context, send one brief acknowledgment (max 2-3 sentences) and wait for my next instruction. This initialization is one-time only for session start; do not repeat it in later turns."
-    )
-}
-
-fn handover_inline_startup_prompt(handover: &str) -> String {
-    format!(
-        "Initialization step for this new session: the handover context is provided inline in this message. Do not run tools or shell/file reads during initialization. After loading context, send one brief acknowledgment (max 2-3 sentences) and wait for my next instruction. This initialization is one-time only for session start; do not repeat it in later turns.\n\n{handover}"
+        "Initialization step for this new session: read only the exact handover file path from the {WAYPOINT_HANDOVER_FILE_ENV} environment variable now (this single-file read is explicitly allowed). Do not list/search directories, do not use glob patterns, and do not read any other files during initialization (for example, do not scan .waypoint/handovers). After loading that single file, reply exactly: \"Context loaded. Waiting for your instruction.\" Then wait for the next user message. This initialization is one-time only for session start; do not repeat it in later turns."
     )
 }
 
