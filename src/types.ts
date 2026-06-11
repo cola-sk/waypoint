@@ -16,11 +16,13 @@ export type SessionInfo = {
 export type SessionSnapshot = {
   session: SessionInfo;
   replay: string;
+  replayBase64?: string;
 };
 
 export type PtyDataEvent = {
   sessionId: string;
-  data: string;
+  dataBase64?: string;
+  data?: string;
 };
 
 export type SessionEvent = {

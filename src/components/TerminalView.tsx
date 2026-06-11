@@ -23,6 +23,22 @@ function clampDimension(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+function decodeBase64Bytes(base64: string): Uint8Array | null {
+  if (!base64) {
+    return null;
+  }
+  try {
+    const binary = window.atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
 function TerminalView({ sessionId }: TerminalViewProps) {
   const shellRef = useRef<HTMLDivElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
@@ -129,10 +145,22 @@ function TerminalView({ sessionId }: TerminalViewProps) {
         const snapshot = await attachSession(sessionId);
         if (disposed) return;
         fitAndResize();
-        terminal.write(snapshot.replay);
+        const replayBytes = snapshot.replayBase64 ? decodeBase64Bytes(snapshot.replayBase64) : null;
+        if (replayBytes) {
+          terminal.write(replayBytes);
+        } else {
+          terminal.write(snapshot.replay);
+        }
         unlisten = await listen<PtyDataEvent>("pty:data", (event) => {
           if (event.payload.sessionId === sessionId) {
-            terminal.write(event.payload.data);
+            if (event.payload.dataBase64) {
+              const bytes = decodeBase64Bytes(event.payload.dataBase64);
+              if (bytes) {
+                terminal.write(bytes);
+              }
+            } else if (event.payload.data) {
+              terminal.write(event.payload.data);
+            }
           }
         });
         setStatus("attached");
