@@ -176,23 +176,26 @@ npm run tauri:dev
 6. waypoint 会把 handover prompt 注入已有目标 session。
 ```
 
-当前 handover 是 MVP 实现：它使用后端 ring buffer 作为最近上下文，并通过 bracketed paste 将 prompt 写入目标 PTY。主流程是创建新 session 并继续上下文；Existing Session 模式作为高级能力保留。后续版本会加入可预览 prompt、可编辑 prompt、结构化 transcript、session lineage 和 agent-specific adapter。
+当前 handover 是 MVP 实现：它使用后端 ring buffer 作为最近上下文，并将完整 prompt 写入 `~/.waypoint/<workspace-name>/handover-*.md`。主流程是创建新 session 并继续上下文；Existing Session 模式作为高级能力保留，会通过 bracketed paste 注入一段指向 handover 文件的短提示。后续版本会加入可预览 prompt、可编辑 prompt、结构化 transcript、session lineage 和 agent-specific adapter。
 
 不同 agent 的 Continue 注入策略：
 
 ```text
 Gemini CLI:
-  waypoint 将完整 handover 写入 .waypoint/handovers/*.md。
-  新 session 使用 gemini --prompt-interactive "Read this handover file..."。
+  waypoint 将完整 handover 写入 ~/.waypoint/<workspace-name>/handover-*.md。
+  新 session 使用 gemini --prompt-interactive "Read this exact handover file..."。
   这样 Gemini 只接收一段很短的启动 prompt，避免长 diff/context 卡住 TUI。
   Gemini 的 handover 文件使用 compact 模板：只包含 git status、少量最近上下文和操作指令，不内联完整 diff。
 
 Codex:
   使用 codex --no-alt-screen 启动，减少嵌入式 xterm 中的 alternate screen 闪屏。
-  handover 暂时通过 PTY bracketed paste 注入。
+  新 session 的启动提示直接包含 handover 文件路径。
 
-Claude Code / Shell:
-  handover 暂时通过 PTY bracketed paste 注入。
+Claude Code:
+  新 session 的启动提示直接包含 handover 文件路径。
+
+Shell / Existing Session:
+  暂时通过 PTY bracketed paste 注入一段指向 handover 文件的短提示。
 ```
 
 ---
