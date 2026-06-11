@@ -64,19 +64,19 @@ function TerminalView({ sessionId }: TerminalViewProps) {
       convertEol: false,
       scrollback: 8000,
       theme: {
-        background: "#060814",
-        foreground: "#f0f5ff",
-        cursor: "#00f0ff",
-        selectionBackground: "rgba(0, 240, 255, 0.2)",
-        black: "#060814",
-        red: "#ff0055",
-        green: "#00ff88",
-        yellow: "#ffaa00",
-        blue: "#38bdf8",
-        magenta: "#c084fc",
-        cyan: "#00f0ff",
-        white: "#f0f5ff",
-        brightBlack: "#52637a",
+        background: "#11100e",
+        foreground: "#eee8dc",
+        cursor: "#ff6f4c",
+        selectionBackground: "rgba(255, 111, 76, 0.24)",
+        black: "#11100e",
+        red: "#ff6b62",
+        green: "#60d394",
+        yellow: "#e9b44c",
+        blue: "#7aa2f7",
+        magenta: "#c7a0ff",
+        cyan: "#68c6c1",
+        white: "#eee8dc",
+        brightBlack: "#6f6a60",
         brightRed: "#f87171",
         brightGreen: "#86efac",
         brightYellow: "#fbbf24",
@@ -134,7 +134,12 @@ function TerminalView({ sessionId }: TerminalViewProps) {
 
     window.addEventListener("resize", debouncedFitAndResize);
 
+    let isReplaying = true;
+
     const dataDisposable = terminal.onData((data) => {
+      if (isReplaying) {
+        return;
+      }
       writeSession(sessionId, data).catch((err) => {
         terminal.writeln(`\r\n[waypoint write error] ${String(err)}`);
       });
@@ -145,11 +150,14 @@ function TerminalView({ sessionId }: TerminalViewProps) {
         const snapshot = await attachSession(sessionId);
         if (disposed) return;
         fitAndResize();
+        const onWriteComplete = () => {
+          isReplaying = false;
+        };
         const replayBytes = snapshot.replayBase64 ? decodeBase64Bytes(snapshot.replayBase64) : null;
         if (replayBytes) {
-          terminal.write(replayBytes);
+          terminal.write(replayBytes, onWriteComplete);
         } else {
-          terminal.write(snapshot.replay);
+          terminal.write(snapshot.replay, onWriteComplete);
         }
         unlisten = await listen<PtyDataEvent>("pty:data", (event) => {
           if (event.payload.sessionId === sessionId) {

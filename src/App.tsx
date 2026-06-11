@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Bot,
   Folder,
-  Play,
   RefreshCw,
   Send,
   Square,
@@ -77,26 +76,24 @@ function App() {
       folderMap[w.path] = { folder: w, sessions: [] };
     });
 
-    // 2. Map running sessions
+    // 2. Map sessions. Keep exited/error sessions visible so fast CLI exits do not look like no-ops.
     const unpinnedFolders: Record<string, { folder: WorkspaceFolder; sessions: SessionInfo[] }> = {};
-    
+
     sessions.forEach((session) => {
-      if (session.status === "running") {
-        if (folderMap[session.cwd]) {
-          folderMap[session.cwd].sessions.push(session);
-        } else {
-          if (!unpinnedFolders[session.cwd]) {
-            unpinnedFolders[session.cwd] = {
-              folder: {
-                path: session.cwd,
-                name: session.cwd.split(/[/\\]/).pop() || session.cwd,
-                isPinned: false,
-              },
-              sessions: [],
-            };
-          }
-          unpinnedFolders[session.cwd].sessions.push(session);
+      if (folderMap[session.cwd]) {
+        folderMap[session.cwd].sessions.push(session);
+      } else {
+        if (!unpinnedFolders[session.cwd]) {
+          unpinnedFolders[session.cwd] = {
+            folder: {
+              path: session.cwd,
+              name: session.cwd.split(/[/\\]/).pop() || session.cwd,
+              isPinned: false,
+            },
+            sessions: [],
+          };
         }
+        unpinnedFolders[session.cwd].sessions.push(session);
       }
     });
 
@@ -158,13 +155,16 @@ function App() {
     let history: Record<string, { agentId: string; agentName: string }[]> = {};
     if (saved) {
       try {
-        history = JSON.parse(saved);
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed === "object") {
+          history = parsed;
+        }
       } catch (e) {
-        console.error(e);
+        console.error("[Waypoint] Failed to parse workspace agent history:", e);
       }
     }
     
-    if (!history[path]) {
+    if (!history[path] || !Array.isArray(history[path])) {
       history[path] = [];
     }
     
@@ -181,7 +181,7 @@ function App() {
     if (!saved) return;
     try {
       const history = JSON.parse(saved);
-      if (history[path]) {
+      if (history && typeof history === "object" && Array.isArray(history[path])) {
         history[path] = history[path].filter((a: any) => a.agentId !== agentId);
         if (history[path].length === 0) {
           delete history[path];
@@ -190,7 +190,7 @@ function App() {
         localStorage.setItem("waypoint_workspace_agent_history", JSON.stringify(history));
       }
     } catch (e) {
-      console.error(e);
+      console.error("[Waypoint] Failed to remove agent from history:", e);
     }
   }
 
@@ -199,13 +199,16 @@ function App() {
     setError(null);
     setIsLaunching(true);
     setActiveNewMenuFolder(null);
+    console.log(`[Waypoint] Starting session creation for agent: ${agentId} at path: ${path}`);
     try {
       const session = await createAgentSession(agentId, path);
-      const agentName = agents.find((a) => a.id === agentId)?.name || agentId;
-      updateWorkspaceAgentHistory(path, agentId, agentName);
+      console.log(`[Waypoint] Session successfully created:`, session);
+      updateWorkspaceAgentHistory(session.cwd, session.agentId, session.agentName);
       await refreshSessions(session.id);
     } catch (err) {
+      console.error(`[Waypoint] Failed to create agent session:`, err);
       setError(String(err));
+      alert(`无法创建 Agent 会话:\n${String(err)}`);
     } finally {
       setIsLaunching(false);
     }
@@ -299,9 +302,12 @@ function App() {
         const saved = localStorage.getItem("waypoint_pinned_workspaces");
         if (saved) {
           try {
-            setPinnedWorkspaces(JSON.parse(saved));
+            const parsed = JSON.parse(saved);
+            if (Array.isArray(parsed)) {
+              setPinnedWorkspaces(parsed);
+            }
           } catch (e) {
-            console.error(e);
+            console.error("[Waypoint] Failed to parse pinned workspaces:", e);
           }
         } else if (cwd) {
           const defaultFolder: WorkspaceFolder = {
@@ -317,9 +323,12 @@ function App() {
         const savedHistory = localStorage.getItem("waypoint_workspace_agent_history");
         if (savedHistory) {
           try {
-            setWorkspaceAgentHistory(JSON.parse(savedHistory));
+            const parsed = JSON.parse(savedHistory);
+            if (parsed && typeof parsed === "object") {
+              setWorkspaceAgentHistory(parsed);
+            }
           } catch (e) {
-            console.error(e);
+            console.error("[Waypoint] Failed to parse workspace agent history:", e);
           }
         }
       })
@@ -334,10 +343,12 @@ function App() {
 
       <aside className="sidebar">
         <div className="brand">
-          <WptLogo size={24} />
+          <span className="brand-mark" aria-hidden="true">
+            <WptLogo size={24} />
+          </span>
           <div>
-            <h1>waypoint</h1>
-            <span>WP-OS V2.0</span>
+            <h1>Waypoint</h1>
+            <span>AI AGENT</span>
           </div>
         </div>
 
@@ -402,6 +413,7 @@ function App() {
                   <div className="workspace-folder-actions">
                     <div className="popover-wrapper">
                       <button
+                        type="button"
                         className="new-session-btn"
                         onClick={(e) => {
                           e.stopPropagation();
@@ -423,6 +435,7 @@ function App() {
                               .filter((a) => a.available)
                               .map((agent) => (
                                 <button
+                                  type="button"
                                   key={agent.id}
                                   className="agent-option-item"
                                   onClick={() => handleCreateSessionForPath(agent.id, folder.path)}
@@ -467,8 +480,8 @@ function App() {
                     });
 
                     history.forEach((histAgent) => {
-                      const isRunning = folderSessions.some((s) => s.agentId === histAgent.agentId);
-                      if (!isRunning) {
+                      const hasSession = folderSessions.some((s) => s.agentId === histAgent.agentId);
+                      if (!hasSession) {
                         nodes.push({
                           type: "offline",
                           agentId: histAgent.agentId,
@@ -611,7 +624,7 @@ function App() {
           <div className="resume-banner">
             <Info size={14} className="banner-icon" />
             <span>
-              💡 提示：当前 Agent 支持原生会话恢复。您可以在终端中输入 <code>/resume</code> 并回车，来尝试载入上次的历史会话。
+              提示：当前 Agent 支持原生会话恢复。您可以在终端中输入 <code>/resume</code> 并回车，来尝试载入上次的历史会话。
             </span>
           </div>
         )}
@@ -625,8 +638,8 @@ function App() {
             <div className="empty-state">
               <div className="empty-state-inner">
                 <WptLogo size={48} />
-                <p style={{ letterSpacing: "1px", fontWeight: "700", color: "var(--accent-cyan)" }}>[ CORE_INITIALIZATION_REQUIRED ]</p>
-                <p style={{ opacity: 0.6, fontSize: "12px", margin: "0" }}>Select a workspace directory and spin up an agent to mount the terminal console.</p>
+                <p className="empty-state-title">No active session</p>
+                <p className="empty-state-copy">Select a workspace directory and spin up an agent to mount the terminal console.</p>
               </div>
             </div>
           )}

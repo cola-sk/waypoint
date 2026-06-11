@@ -19,26 +19,13 @@ export default function WptLogo({ size = 22, className = "" }: WptLogoProps) {
         verticalAlign: "middle"
       }}
     >
-      {/* Flat Hexagon Outline */}
       <path
-        d="M12 2L20 6.5V17.5L12 22L4 17.5V6.5L12 2Z"
-        stroke="var(--accent-cyan)"
+        d="M12 5.25L17.85 8.62V15.38L12 18.75L6.15 15.38V8.62L12 5.25Z"
+        stroke="currentColor"
         strokeWidth="1.8"
         strokeLinejoin="round"
       />
-      {/* Clean Monospace WPT text */}
-      <text
-        x="12.2"
-        y="15.2"
-        fill="var(--accent-cyan)"
-        fontFamily="var(--font-mono)"
-        fontSize="7.5"
-        fontWeight="900"
-        textAnchor="middle"
-        letterSpacing="-0.2"
-      >
-        WPT
-      </text>
+      <circle cx="12" cy="12" r="1.65" fill="currentColor" />
     </svg>
   );
 }
