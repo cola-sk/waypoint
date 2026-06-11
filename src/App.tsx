@@ -6,13 +6,13 @@ import {
   RefreshCw,
   Send,
   Square,
-  TerminalSquare,
   X,
   Plus,
   Info,
   FolderOpen,
 } from "lucide-react";
 import TerminalView from "./components/TerminalView";
+import WptLogo from "./components/WptLogo";
 import {
   continueSession,
   createAgentSession,
@@ -334,10 +334,10 @@ function App() {
 
       <aside className="sidebar">
         <div className="brand">
-          <TerminalSquare aria-hidden="true" size={22} />
+          <WptLogo size={24} />
           <div>
             <h1>waypoint</h1>
-            <span>MVP-2</span>
+            <span>WP-OS V2.0</span>
           </div>
         </div>
 
@@ -624,8 +624,9 @@ function App() {
           ) : (
             <div className="empty-state">
               <div className="empty-state-inner">
-                <TerminalSquare aria-hidden="true" size={28} />
-                <p>Select an agent and workspace to start a session.</p>
+                <WptLogo size={48} />
+                <p style={{ letterSpacing: "1px", fontWeight: "700", color: "var(--accent-cyan)" }}>[ CORE_INITIALIZATION_REQUIRED ]</p>
+                <p style={{ opacity: 0.6, fontSize: "12px", margin: "0" }}>Select a workspace directory and spin up an agent to mount the terminal console.</p>
               </div>
             </div>
           )}
