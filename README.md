@@ -1,28 +1,35 @@
-# waypoint
+# Waypoint
 
-waypoint 是一个桌面端本地 Agent CLI 会话路由器。它的目标是通过 Tauri + Rust 管理多个本机 PTY 会话，让 Claude Code、Codex、Gemini CLI、GitHub Copilot、Shell 等 agent 会话可以长期存活、随时切换，并支持跨 agent 上下文交接（Handover）。
+<p align="center">
+  <img src="src-tauri/icons/icon.png" alt="Waypoint logo" width="96" height="96">
+</p>
 
-## 技术栈
+<p align="center">
+  <strong>A local desktop router for long-running AI agent CLI sessions.</strong>
+</p>
 
-- **桌面外壳**：Tauri v2 + Rust
-- **前端界面**：React + TypeScript + `@xterm/xterm` + `@xterm/addon-fit`
-- **PTY 托管**：`portable-pty`
-- **构建工具**：Vite
+<p align="center">
+  <a href="README.zh-CN.md">中文文档</a>
+</p>
 
----
+![Waypoint desktop interface](docs/assets/waypoint-screenshot.png)
 
-## 当前 MVP 能力
+Waypoint is a Tauri desktop app for managing multiple local AI agent CLI sessions in one place. It keeps PTY-backed sessions alive, lets you switch between workspaces and agents, and provides a handover flow for passing context from one agent session to another.
 
-当前版本支持：
+It is built for tools like Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, and your regular shell.
 
-- 自动识别本机 Agent CLI。
-- 选择 agent preset 创建 session。
-- 指定 workspace 目录创建 PTY session。
-- 多个 session 并存，切换 UI 时不杀掉已有 PTY 进程。
-- 将一个 session 的上下文转发到另一个 session。
-- Xterm 终端输入、输出和 resize。
+## Highlights
 
-内置识别的 agent：
+- **Local PTY session hosting**: run agent CLIs in real terminal sessions managed by the desktop app.
+- **Multi-agent workspace routing**: pin workspace folders and launch available agents from each folder.
+- **Persistent session switching**: switch between sessions without killing the underlying process.
+- **Agent handover**: continue work by forwarding terminal context, git status, diffs, and a note to another agent session.
+- **Native desktop shell**: Tauri v2 + Rust backend with a React and xterm.js interface.
+- **Automatic CLI detection**: resolves agent commands through the user login shell so the app sees a PATH close to the terminal environment.
+
+## Supported Agents
+
+Waypoint currently detects these presets:
 
 ```text
 Claude Code:
@@ -42,9 +49,7 @@ Shell:
   $SHELL
 ```
 
-检测逻辑会通过用户的 login shell 执行 `command -v`，因此比直接读取桌面进程 PATH 更接近你在 terminal 里的环境。
-
-如果某个 agent 在 terminal 里可用，但 waypoint 里显示 missing，可以先检查：
+If an agent is available in your terminal but appears as missing in Waypoint, verify it with:
 
 ```bash
 command -v claude
@@ -54,41 +59,38 @@ command -v copilot
 command -v gh
 ```
 
-如果 agent 安装在自定义路径，后续版本会提供可编辑 Agent Preset；当前版本先依赖 login shell 的 PATH 自动发现。
+## Tech Stack
 
----
+- **Desktop shell**: Tauri v2 + Rust
+- **Frontend**: React + TypeScript + Vite
+- **Terminal UI**: `@xterm/xterm` + `@xterm/addon-fit`
+- **PTY hosting**: `portable-pty`
 
-## 环境准备与安装
+## Prerequisites
 
-运行 waypoint 需要本地安装有 Node.js 与 Rust 工具链。
+Waypoint requires Node.js, npm, and a Rust toolchain.
 
-### 1. 安装 Xcode Command Line Tools (macOS)
-在终端中执行以下命令检查是否已安装：
+On macOS, make sure Xcode Command Line Tools are installed:
+
 ```bash
 xcode-select -p
 ```
-如未安装，执行：
+
+If they are missing:
+
 ```bash
 xcode-select --install
 ```
 
-### 2. 安装 Rust 工具链
-推荐使用 `rustup` 安装 Rust：
+Install Rust with `rustup`:
+
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-在安装过程中选择默认选项（输入 `1`）。
-安装完成后，使当前终端加载 Cargo 环境变量：
-```bash
-source "$HOME/.cargo/env"
-```
-建议在你的 Shell 配置文件（如 `~/.zshrc`）中添加：
-```bash
 source "$HOME/.cargo/env"
 ```
 
-### 3. 验证环境安装
-确认以下命令均能正常输出版本号：
+Verify the environment:
+
 ```bash
 node --version
 npm --version
@@ -96,156 +98,102 @@ rustc --version
 cargo --version
 ```
 
----
+## Development
 
-## 项目运行与启动
+Install dependencies:
 
-### 1. 安装项目依赖
-在项目根目录下，安装前端依赖：
 ```bash
 npm install
 ```
 
-### 2. 启动开发模式 (桌面窗口)
+Run the desktop app in development mode:
+
 ```bash
 npm run tauri:dev
 ```
-此命令会同时启动 Vite 前端开发服务器与 Tauri 桌面外壳，并自动打开桌面应用窗口。
-> [!IMPORTANT]
-> 由于 PTY 后端运行在 Tauri 桌面进程中，在普通浏览器中（如访问 `http://127.0.0.1:1420/`）只能预览 UI 界面，无法实际创建和使用 PTY 会话。请务必在 Tauri 桌面窗口中进行操作。
 
-### 3. 项目打包与构建 (生产包)
-如果需要打包生成本地可执行的 App 安装包，执行：
+This starts the Vite dev server and opens the Tauri desktop shell.
+
+> [!IMPORTANT]
+> PTY management runs in the Tauri desktop process. Opening `http://127.0.0.1:1420/` in a regular browser is useful for UI preview only; creating and using real PTY sessions requires the Tauri desktop window.
+
+Build the frontend:
+
 ```bash
 npm run build
 ```
 
----
-
-## 常见问题与排查
-
-## 手动验收
-
-启动桌面应用：
+Build the Tauri app without bundling installers:
 
 ```bash
-npm run tauri:dev
+npm run tauri -- build --debug --no-bundle --ci
 ```
 
-然后执行：
+## Manual Acceptance Flow
 
-```text
-1. 打开 waypoint 桌面窗口。
-2. 左侧 Agent 下拉框会显示 Claude Code / Codex / Gemini CLI / GitHub Copilot。
-3. 可用 agent 会显示 resolved command，不可用 agent 会显示 missing。
-4. 在 Workspace 输入本地项目目录，例如：
-   /Users/liuzhe.x/coding/waypoint
-5. 选择一个 available agent。
-6. 点击 Start。
-7. 确认右侧 terminal 启动到该目录下的对应 agent CLI。
-8. 创建第二个 session，切换回来确认第一个 session 没有退出。
-```
+1. Start the desktop app with `npm run tauri:dev`.
+2. Confirm the left-side agent environment list shows available and missing local agents.
+3. Pin or select a local workspace folder.
+4. Start an available agent from that workspace.
+5. Confirm the terminal launches in the selected workspace.
+6. Start a second session and switch back to the first one.
+7. Confirm the first PTY process is still alive.
 
-### Continue / Handover 验收
+## Continue / Handover
 
-创建一个 source session 后执行：
+The Continue flow passes context from the current session to another agent.
 
-```text
-1. 切到源 session。
-2. 点击右上角 Continue。
-3. 默认选择 New Session。
-4. 选择目标 agent。
-5. Workspace 默认使用源 session 的目录，也可以手动修改。
-6. 在 Note 中填写目标 agent 接下来要关注的任务。
-7. 点击 Create & Continue。
-8. waypoint 会创建一个新的目标 session。
-9. waypoint 会收集源 session 最近 terminal context、workspace git status、git diff、staged diff。
-10. waypoint 会生成 handover prompt，并注入新 session。
-11. UI 自动切换到新 session。
-12. 源 session 仍然保持运行，可以随时切回。
-```
+For a new target session:
 
-如果已经有一个目标 session，也可以使用高级模式：
+1. Open a source session.
+2. Click **Continue**.
+3. Choose **New Session**.
+4. Select the target agent and workspace.
+5. Add an optional note describing what the next agent should focus on.
+6. Click **Create & Continue**.
 
-```text
-1. 点击 Continue。
-2. 切换到 Existing Session。
-3. 选择目标 session。
-4. 在 Note 中填写目标 agent 接下来要关注的任务。
-5. 点击 Forward。
-6. waypoint 会把 handover prompt 注入已有目标 session。
-```
+Waypoint collects recent terminal context, workspace git status, git diff, and staged diff. It writes a handover file under `~/.waypoint/<workspace-name>/handover-*.md`, launches the target session, and injects a short instruction pointing the target agent to the handover file.
 
-当前 handover 是 MVP 实现：它使用后端 ring buffer 作为最近上下文，并将完整 prompt 写入 `~/.waypoint/<workspace-name>/handover-*.md`。主流程是创建新 session 并继续上下文；Existing Session 模式作为高级能力保留，会通过 bracketed paste 注入一段指向 handover 文件的短提示。后续版本会加入可预览 prompt、可编辑 prompt、结构化 transcript、session lineage 和 agent-specific adapter。
+Existing sessions can also receive a handover through **Existing Session** mode.
 
-不同 agent 的 Continue 注入策略：
+## Troubleshooting
 
-```text
-Gemini CLI:
-  waypoint 将完整 handover 写入 ~/.waypoint/<workspace-name>/handover-*.md。
-  新 session 使用 gemini --prompt-interactive "Read this exact handover file..."。
-  这样 Gemini 只接收一段很短的启动 prompt，避免长 diff/context 卡住 TUI。
-  Gemini 的 handover 文件使用 compact 模板：只包含 git status、少量最近上下文和操作指令，不内联完整 diff。
+### `cargo` or `rustc` command not found
 
-Codex:
-  使用 codex --no-alt-screen 启动，减少嵌入式 xterm 中的 alternate screen 闪屏。
-  新 session 的启动提示直接包含 handover 文件路径。
+Load Cargo into the current shell:
 
-GitHub Copilot:
-  新 session 使用 copilot -i "Read this exact handover file..."。
-  waypoint 会将 handover 目录通过 --add-dir 加入允许访问范围。
-
-Claude Code:
-  新 session 的启动提示直接包含 handover 文件路径。
-
-Shell / Existing Session:
-  暂时通过 PTY bracketed paste 注入一段指向 handover 文件的短提示。
-```
-
-每次 handover 的目标 session 会记住这次 handover 摘要；如果之后继续从该目标 session 再 handover 到第三个 agent，waypoint 会把上一跳 handover 作为 inherited context 一并写入新的 handover 文件。
-
----
-
-### `cargo` 或 `rustc` command not found
-通常是因为当前 Shell 环境未加载 Cargo 的 PATH。请尝试执行：
 ```bash
 source "$HOME/.cargo/env"
 ```
-并重新检查 `rustc --version`。
 
-### `npm run tauri:dev` 提示 Rust 未安装
-同上，通常是 Tauri 未读取到 Rust 路径。你可以在项目根目录下执行以下命令来确认 Tauri 能够检测到的运行环境：
+Then check:
+
+```bash
+rustc --version
+cargo --version
+```
+
+### `npm run tauri:dev` says Rust is not installed
+
+Check what Tauri can detect:
+
 ```bash
 npm run tauri -- info
 ```
-如果在输出中看到 `rustc: installed` 即代表环境检测成功。
 
-### 浏览器中提示 `Tauri runtime unavailable`
-此报错为预期行为。Tauri 的底层 API（如 PTY 会话管理、本地文件读写等）必须在编译后的桌面外壳容器中才能调用，在普通浏览器中访问会导致该错误，请使用 `npm run tauri:dev` 启动桌面端。
+If `rustc` is not detected, reload your shell environment or add Cargo to your shell profile.
 
-### Continue 时报 `failed to write handover`
+### `Tauri runtime unavailable` in the browser
 
-这通常表示目标 agent CLI 没有进入可交互状态，或者命令启动后很快退出。waypoint 会在新建 target session 后短暂等待并重试注入 handover；如果目标进程已经退出，错误信息会包含 target session 的最近输出。
+This is expected outside the desktop shell. Tauri APIs for PTY sessions, local file access, and native commands only exist inside the Tauri app.
 
-常见原因：
+### Continue fails with `failed to write handover`
 
-```text
-1. 目标 CLI 需要先登录或配置 API key。
-2. 目标 CLI 不是持久交互式 chat 命令，例如某些 Copilot CLI 命令只执行一次就退出。
-3. 目标 CLI 启动后进入权限确认、初始化失败或帮助页后退出。
-```
+The target agent may have exited before Waypoint could inject the handover prompt, or it may be waiting on login/configuration.
 
-排查方式：
+Try starting the target agent directly first. If it immediately exits, resolve its own authentication or CLI setup before using it as a handover target.
 
-```text
-1. 先直接 Start 目标 agent，确认它能保持在可输入状态。
-2. 如果目标 agent 会立即退出，先解决它自己的登录/配置问题。
-3. 如果该 CLI 本身不是持久交互式 agent，暂时用 Shell、Claude Code、Codex 或 Gemini CLI 做 Continue target。
-```
+## Documentation
 
----
-
-## 相关文档
-
-* [AGENTRELAY_TECHNICAL_DESIGN.md](file:///Users/liuzhe.x/coding/waypoint/AGENTRELAY_TECHNICAL_DESIGN.md) - MVP 详细技术设计方案
-* [AGENTRELAY_ARCHITECTURE_SUMMARY.md](file:///Users/liuzhe.x/coding/waypoint/AGENTRELAY_ARCHITECTURE_SUMMARY.md) - 精简版技术架构与流程说明
+- [Technical design](AGENTRELAY_TECHNICAL_DESIGN.md)
+- [Architecture summary](AGENTRELAY_ARCHITECTURE_SUMMARY.md)

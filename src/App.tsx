@@ -344,7 +344,7 @@ function App() {
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">
-            <WptLogo size={24} />
+            <WptLogo size={38} />
           </span>
           <div>
             <h1>Waypoint</h1>

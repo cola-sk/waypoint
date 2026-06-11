@@ -20,12 +20,12 @@ export default function WptLogo({ size = 22, className = "" }: WptLogoProps) {
       }}
     >
       <path
-        d="M12 5.25L17.85 8.62V15.38L12 18.75L6.15 15.38V8.62L12 5.25Z"
+        d="M12 2.75L20.25 7.5V16.5L12 21.25L3.75 16.5V7.5L12 2.75Z"
         stroke="currentColor"
-        strokeWidth="1.8"
+        strokeWidth="1.75"
         strokeLinejoin="round"
       />
-      <circle cx="12" cy="12" r="1.65" fill="currentColor" />
+      <circle cx="12" cy="12" r="2.25" fill="currentColor" />
     </svg>
   );
 }
