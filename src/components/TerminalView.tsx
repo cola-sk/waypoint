@@ -48,6 +48,7 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const [status, setStatus] = useState("connecting");
+  const [isRestoring, setIsRestoring] = useState(false);
 
   useEffect(() => {
     const shell = shellRef.current;
@@ -184,6 +185,7 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
       }
       isActivating = true;
       setStatus("activating");
+      setIsRestoring(true);
       reactivateSession(sessionId)
         .then((session) => {
           if (disposed) return;
@@ -191,6 +193,7 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
           isLive = session.status === "running";
           isActivating = false;
           setStatus(isLive ? "attached" : "readonly");
+          setIsRestoring(false);
           if (isLive) {
             switchReplayToLive();
             flushPendingInput();
@@ -201,6 +204,7 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
           isActivating = false;
           pendingInput = "";
           setStatus("readonly");
+          setIsRestoring(false);
           onActivationFailed?.(sessionId, String(err));
         });
     };
@@ -263,6 +267,7 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
 
     return () => {
       disposed = true;
+      setIsRestoring(false);
       window.clearTimeout(resizeTimeout);
       detachSession(sessionId).catch(() => undefined);
       dataDisposable.dispose();
@@ -281,6 +286,17 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
   return (
     <div className="terminal-shell" data-status={status} onClick={handleContainerClick} ref={shellRef}>
       <div className="terminal-surface" ref={surfaceRef} />
+      {isRestoring ? (
+        <div className="terminal-restore-overlay" role="status" aria-live="polite">
+          <div className="terminal-restore-panel">
+            <span className="terminal-restore-spinner" aria-hidden="true" />
+            <div>
+              <strong>正在恢复会话</strong>
+              <span>正在连接 Agent 原生历史，恢复完成后会继续显示会话内容。</span>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
