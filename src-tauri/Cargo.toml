@@ -19,3 +19,4 @@ portable-pty = "0.9"
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = [] }
 uuid = { version = "1", features = ["v4", "serde"] }
+rfd = "0.14"

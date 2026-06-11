@@ -8,6 +8,9 @@ import {
   Square,
   TerminalSquare,
   X,
+  Plus,
+  Info,
+  FolderOpen,
 } from "lucide-react";
 import TerminalView from "./components/TerminalView";
 import {
@@ -18,8 +21,10 @@ import {
   killSession,
   listAgentPresets,
   listSessions,
+  selectDirectory,
 } from "./api/tauri";
-import type { AgentPresetInfo, SessionInfo } from "./types";
+import type { AgentPresetInfo, SessionInfo, WorkspaceFolder } from "./types";
+
 
 function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -36,6 +41,16 @@ function App() {
   const [handoverNote, setHandoverNote] = useState("");
   const [isForwarding, setIsForwarding] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // New Workspace state variables
+  const [pinnedWorkspaces, setPinnedWorkspaces] = useState<WorkspaceFolder[]>([]);
+  const [newWorkspaceInput, setNewWorkspaceInput] = useState("");
+  const [isAddingWorkspace, setIsAddingWorkspace] = useState(false);
+  const [activeNewMenuFolder, setActiveNewMenuFolder] = useState<string | null>(null);
+  const [workspaceAgentHistory, setWorkspaceAgentHistory] = useState<
+    Record<string, { agentId: string; agentName: string }[]>
+  >({});
+
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === activeSessionId) ?? null,
     [activeSessionId, sessions],
@@ -52,6 +67,44 @@ function App() {
     () => agents.find((agent) => agent.id === continueAgentId) ?? null,
     [agents, continueAgentId],
   );
+
+  // Compute workspaces with nested active sessions
+  const workspacesWithSessions = useMemo(() => {
+    const folderMap: Record<string, { folder: WorkspaceFolder; sessions: SessionInfo[] }> = {};
+    
+    // 1. Add pinned folders
+    pinnedWorkspaces.forEach((w) => {
+      folderMap[w.path] = { folder: w, sessions: [] };
+    });
+
+    // 2. Map running sessions
+    const unpinnedFolders: Record<string, { folder: WorkspaceFolder; sessions: SessionInfo[] }> = {};
+    
+    sessions.forEach((session) => {
+      if (session.status === "running") {
+        if (folderMap[session.cwd]) {
+          folderMap[session.cwd].sessions.push(session);
+        } else {
+          if (!unpinnedFolders[session.cwd]) {
+            unpinnedFolders[session.cwd] = {
+              folder: {
+                path: session.cwd,
+                name: session.cwd.split(/[/\\]/).pop() || session.cwd,
+                isPinned: false,
+              },
+              sessions: [],
+            };
+          }
+          unpinnedFolders[session.cwd].sessions.push(session);
+        }
+      }
+    });
+
+    return [
+      ...Object.values(folderMap),
+      ...Object.values(unpinnedFolders),
+    ];
+  }, [pinnedWorkspaces, sessions]);
 
   async function refreshSessions(nextActiveId?: string) {
     const nextSessions = await listSessions();
@@ -73,6 +126,88 @@ function App() {
     }
     if (!nextAgents.some((agent) => agent.id === continueAgentId)) {
       setContinueAgentId(nextAgents[0]?.id ?? "shell");
+    }
+  }
+
+  // Handle adding workspace folder
+  function handleAddWorkspace(path: string) {
+    const trimmed = path.trim();
+    if (!trimmed) return;
+    if (pinnedWorkspaces.some((w) => w.path === trimmed)) {
+      setError("该目录已存在于工作区中。");
+      return;
+    }
+    const name = trimmed.split(/[/\\]/).pop() || trimmed;
+    const nextFolders = [...pinnedWorkspaces, { path: trimmed, name, isPinned: true }];
+    setPinnedWorkspaces(nextFolders);
+    localStorage.setItem("waypoint_pinned_workspaces", JSON.stringify(nextFolders));
+    setNewWorkspaceInput("");
+    setIsAddingWorkspace(false);
+  }
+
+  // Handle removing workspace folder
+  function handleRemoveWorkspace(path: string) {
+    const nextFolders = pinnedWorkspaces.filter((w) => w.path !== path);
+    setPinnedWorkspaces(nextFolders);
+    localStorage.setItem("waypoint_pinned_workspaces", JSON.stringify(nextFolders));
+  }
+
+  // Update workspace agent history
+  function updateWorkspaceAgentHistory(path: string, agentId: string, agentName: string) {
+    const saved = localStorage.getItem("waypoint_workspace_agent_history");
+    let history: Record<string, { agentId: string; agentName: string }[]> = {};
+    if (saved) {
+      try {
+        history = JSON.parse(saved);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    
+    if (!history[path]) {
+      history[path] = [];
+    }
+    
+    if (!history[path].some(a => a.agentId === agentId)) {
+      history[path].push({ agentId, agentName });
+      setWorkspaceAgentHistory(history);
+      localStorage.setItem("waypoint_workspace_agent_history", JSON.stringify(history));
+    }
+  }
+
+  // Remove agent from history for a folder path
+  function handleRemoveAgentFromHistory(path: string, agentId: string) {
+    const saved = localStorage.getItem("waypoint_workspace_agent_history");
+    if (!saved) return;
+    try {
+      const history = JSON.parse(saved);
+      if (history[path]) {
+        history[path] = history[path].filter((a: any) => a.agentId !== agentId);
+        if (history[path].length === 0) {
+          delete history[path];
+        }
+        setWorkspaceAgentHistory(history);
+        localStorage.setItem("waypoint_workspace_agent_history", JSON.stringify(history));
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  // Create session for a specific agent and path
+  async function handleCreateSessionForPath(agentId: string, path: string) {
+    setError(null);
+    setIsLaunching(true);
+    setActiveNewMenuFolder(null);
+    try {
+      const session = await createAgentSession(agentId, path);
+      const agentName = agents.find((a) => a.id === agentId)?.name || agentId;
+      updateWorkspaceAgentHistory(path, agentId, agentName);
+      await refreshSessions(session.id);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setIsLaunching(false);
     }
   }
 
@@ -154,12 +289,43 @@ function App() {
     Promise.all([refreshSessions(), refreshAgents(), defaultWorkspace()])
       .then(([, , cwd]) => {
         setWorkspacePath(cwd);
+        // Load pinned workspaces
+        const saved = localStorage.getItem("waypoint_pinned_workspaces");
+        if (saved) {
+          try {
+            setPinnedWorkspaces(JSON.parse(saved));
+          } catch (e) {
+            console.error(e);
+          }
+        } else if (cwd) {
+          const defaultFolder: WorkspaceFolder = {
+            path: cwd,
+            name: cwd.split(/[/\\]/).pop() || cwd,
+            isPinned: true,
+          };
+          setPinnedWorkspaces([defaultFolder]);
+          localStorage.setItem("waypoint_pinned_workspaces", JSON.stringify([defaultFolder]));
+        }
+
+        // Load workspace agent history
+        const savedHistory = localStorage.getItem("waypoint_workspace_agent_history");
+        if (savedHistory) {
+          try {
+            setWorkspaceAgentHistory(JSON.parse(savedHistory));
+          } catch (e) {
+            console.error(e);
+          }
+        }
       })
       .catch((err) => setError(String(err)));
   }, []);
 
   return (
     <main className="app-shell">
+      {activeNewMenuFolder && (
+        <div className="popover-backdrop" onClick={() => setActiveNewMenuFolder(null)} />
+      )}
+
       <aside className="sidebar">
         <div className="brand">
           <TerminalSquare aria-hidden="true" size={22} />
@@ -169,81 +335,237 @@ function App() {
           </div>
         </div>
 
-        <section className="launcher" aria-label="Create session">
-          <div className="field">
-            <label htmlFor="agent-select">
-              <Bot aria-hidden="true" size={14} />
-              <span>Agent</span>
-            </label>
-            <select
-              id="agent-select"
-              value={selectedAgentId}
-              onChange={(event) => setSelectedAgentId(event.target.value)}
-            >
-              {agents.map((agent) => (
-                <option key={agent.id} value={agent.id}>
-                  {agent.name}
-                  {agent.available ? "" : " (missing)"}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="agent-status">
-            <span className={`status-dot ${selectedAgent?.available ? "running" : "error"}`} />
-            <span>{selectedAgent?.resolvedCommand ?? selectedAgent?.command ?? "Detecting..."}</span>
-          </div>
-
-          <div className="field">
-            <label htmlFor="workspace-path">
-              <Folder aria-hidden="true" size={14} />
-              <span>Workspace</span>
-            </label>
-            <input
-              id="workspace-path"
-              value={workspacePath}
-              onChange={(event) => setWorkspacePath(event.target.value)}
-              placeholder="/path/to/project"
-              spellCheck={false}
-            />
-          </div>
-
-          <div className="launcher-actions">
+        <section className="workspace-list" aria-label="Workspaces">
+          <div className="section-header">
+            <h3>工作区目录</h3>
             <button
-              className="icon-action"
-              type="button"
+              className="add-workspace-btn"
+              onClick={() => setIsAddingWorkspace(!isAddingWorkspace)}
+              title="固定新工作区目录"
+            >
+              <Plus size={14} />
+            </button>
+          </div>
+
+          {isAddingWorkspace && (
+            <form
+              className="add-workspace-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleAddWorkspace(newWorkspaceInput);
+              }}
+            >
+              <div className="input-group-with-btn">
+                <input
+                  type="text"
+                  placeholder="输入或选择本地路径..."
+                  value={newWorkspaceInput}
+                  onChange={(e) => setNewWorkspaceInput(e.target.value)}
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  className="browse-dir-btn"
+                  onClick={async () => {
+                    const selected = await selectDirectory();
+                    if (selected) {
+                      setNewWorkspaceInput(selected);
+                    }
+                  }}
+                  title="浏览选择文件夹"
+                >
+                  <FolderOpen size={14} />
+                </button>
+              </div>
+              <div className="form-actions">
+                <button type="button" onClick={() => setIsAddingWorkspace(false)}>取消</button>
+                <button type="submit">添加</button>
+              </div>
+            </form>
+          )}
+
+          <div className="workspace-tree">
+            {workspacesWithSessions.map(({ folder, sessions: folderSessions }) => (
+              <div className="workspace-folder-node" key={folder.path}>
+                <div className="workspace-folder-header">
+                  <div className="workspace-folder-info" title={folder.path}>
+                    <Folder size={14} className="folder-icon" />
+                    <span className="folder-name">{folder.name}</span>
+                    {!folder.isPinned && <span className="temp-badge">临时</span>}
+                  </div>
+                  <div className="workspace-folder-actions">
+                    <div className="popover-wrapper">
+                      <button
+                        className="new-session-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setActiveNewMenuFolder(
+                            activeNewMenuFolder === folder.path ? null : folder.path
+                          );
+                        }}
+                        title="在此目录新建会话"
+                      >
+                        <Plus size={12} />
+                        <span>New</span>
+                      </button>
+
+                      {activeNewMenuFolder === folder.path && (
+                        <div className="agent-popover" onClick={(e) => e.stopPropagation()}>
+                          <div className="popover-header">启动 Agent 会话</div>
+                          <div className="agent-options">
+                            {agents
+                              .filter((a) => a.available)
+                              .map((agent) => (
+                                <button
+                                  key={agent.id}
+                                  className="agent-option-item"
+                                  onClick={() => handleCreateSessionForPath(agent.id, folder.path)}
+                                >
+                                  <Bot size={13} />
+                                  <div className="agent-option-text">
+                                    <span className="agent-option-name">{agent.name}</span>
+                                    <span className="agent-option-desc">{agent.description}</span>
+                                  </div>
+                                </button>
+                              ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {folder.isPinned && (
+                      <button
+                        className="remove-folder-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRemoveWorkspace(folder.path);
+                        }}
+                        title="取消固定目录"
+                      >
+                        <X size={12} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="workspace-sessions-list">
+                  {(() => {
+                    const history = workspaceAgentHistory[folder.path] || [];
+                    const nodes: Array<
+                      | { type: "active"; session: SessionInfo }
+                      | { type: "offline"; agentId: string; agentName: string }
+                    > = [];
+
+                    folderSessions.forEach((session) => {
+                      nodes.push({ type: "active", session });
+                    });
+
+                    history.forEach((histAgent) => {
+                      const isRunning = folderSessions.some((s) => s.agentId === histAgent.agentId);
+                      if (!isRunning) {
+                        nodes.push({
+                          type: "offline",
+                          agentId: histAgent.agentId,
+                          agentName: histAgent.agentName,
+                        });
+                      }
+                    });
+
+                    if (nodes.length === 0) {
+                      return <div className="no-sessions">无活跃会话或历史记录</div>;
+                    }
+
+                    return nodes.map((node) => {
+                      if (node.type === "active") {
+                        const session = node.session;
+                        return (
+                          <div
+                            className={`workspace-session-item active-session ${
+                              session.id === activeSessionId ? "active" : ""
+                            }`}
+                            key={`active-${session.id}`}
+                            onClick={() => setActiveSessionId(session.id)}
+                          >
+                            <div className="session-info-left">
+                              <span className={`status-dot ${session.status}`} />
+                              <span className="session-label" title={session.title}>
+                                {session.agentName}
+                              </span>
+                            </div>
+                            <button
+                              className="session-kill-btn"
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                setError(null);
+                                try {
+                                  await killSession(session.id);
+                                  await refreshSessions();
+                                } catch (err) {
+                                  setError(String(err));
+                                }
+                              }}
+                              title="强杀当前会话"
+                            >
+                              <Square size={8} fill="currentColor" />
+                            </button>
+                          </div>
+                        );
+                      } else {
+                        return (
+                          <div
+                            className="workspace-session-item offline-agent"
+                            key={`offline-${node.agentId}`}
+                            onClick={() => handleCreateSessionForPath(node.agentId, folder.path)}
+                            title="点击拉起新终端，在终端输入 /resume 即可恢复上次会话"
+                          >
+                            <div className="session-info-left">
+                              <span className="status-dot offline" />
+                              <span className="session-label offline">
+                                {node.agentName}
+                                <span className="offline-text">（离线 · 点击拉起）</span>
+                              </span>
+                            </div>
+                            <button
+                              className="session-remove-history-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleRemoveAgentFromHistory(folder.path, node.agentId);
+                              }}
+                              title="删除该 Agent 历史记录"
+                            >
+                              <X size={10} />
+                            </button>
+                          </div>
+                        );
+                      }
+                    });
+                  })()}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <div className="agent-status-panel">
+          <div className="panel-title">
+            <span>本地 Agent 环境</span>
+            <button
+              className="refresh-btn"
               onClick={() => refreshAgents().catch((err) => setError(String(err)))}
-              title="Refresh agent detection"
+              title="重新检测本地 Agent"
             >
-              <RefreshCw aria-hidden="true" size={15} />
-              <span>Detect</span>
-            </button>
-            <button
-              className="primary-action"
-              type="button"
-              onClick={handleCreateSession}
-              disabled={!selectedAgent?.available || isLaunching}
-            >
-              <Play aria-hidden="true" size={15} />
-              <span>{isLaunching ? "Starting" : "Start"}</span>
+              <RefreshCw size={11} />
             </button>
           </div>
-        </section>
-
-        <section className="session-list" aria-label="Sessions">
-          {sessions.map((session) => (
-            <button
-              className={`session-item ${session.id === activeSessionId ? "active" : ""}`}
-              key={session.id}
-              type="button"
-              onClick={() => setActiveSessionId(session.id)}
-            >
-              <span className={`status-dot ${session.status}`} />
-              <span className="session-title">{session.title}</span>
-              <span className="session-command">{session.agentName} · {session.cwd}</span>
-            </button>
-          ))}
-        </section>
+          <div className="agent-status-grid">
+            {agents.map((agent) => (
+              <div key={agent.id} className="agent-status-tag" title={agent.resolvedCommand ?? agent.command}>
+                <span className={`status-dot ${agent.available ? "running" : "error"}`} />
+                <span className="agent-tag-name">{agent.name}</span>
+              </div>
+            ))}
+          </div>
+        </div>
       </aside>
 
       <section className="workspace">
@@ -278,6 +600,15 @@ function App() {
             </button>
           </div>
         </header>
+
+        {activeSession && activeSession.agentId !== "shell" && (
+          <div className="resume-banner">
+            <Info size={14} className="banner-icon" />
+            <span>
+              💡 提示：当前 Agent 支持原生会话恢复。您可以在终端中输入 <code>/resume</code> 并回车，来尝试载入上次的历史会话。
+            </span>
+          </div>
+        )}
 
         {error ? <div className="error-banner">{error}</div> : null}
 
@@ -369,13 +700,28 @@ function App() {
                       <Folder aria-hidden="true" size={14} />
                       <span>Workspace</span>
                     </label>
-                    <input
-                      id="continue-workspace"
-                      value={continueWorkspacePath}
-                      onChange={(event) => setContinueWorkspacePath(event.target.value)}
-                      placeholder="/path/to/project"
-                      spellCheck={false}
-                    />
+                    <div className="input-group-with-btn">
+                      <input
+                        id="continue-workspace"
+                        value={continueWorkspacePath}
+                        onChange={(event) => setContinueWorkspacePath(event.target.value)}
+                        placeholder="/path/to/project"
+                        spellCheck={false}
+                      />
+                      <button
+                        type="button"
+                        className="browse-dir-btn"
+                        onClick={async () => {
+                          const selected = await selectDirectory();
+                          if (selected) {
+                            setContinueWorkspacePath(selected);
+                          }
+                        }}
+                        title="浏览选择文件夹"
+                      >
+                        <FolderOpen size={14} />
+                      </button>
+                    </div>
                   </div>
                 </>
               ) : (

@@ -98,128 +98,538 @@ button {
   opacity: 0.5;
 }
 
-.launcher {
+/* ==========================================
+   Workspace & Directories styles
+========================================== */
+.workspace-list {
   display: flex;
+  min-height: 0;
+  flex: 1;
   flex-direction: column;
-  gap: 10px;
-  border: 1px solid #343832;
-  border-radius: 8px;
-  background: #242721;
-  padding: 12px;
+  gap: 12px;
+  overflow: auto;
 }
 
-.field {
+.section-header {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.field label {
-  display: inline-flex;
   align-items: center;
-  gap: 6px;
-  color: #d9d6ca;
-  font-size: 12px;
-  font-weight: 680;
+  justify-content: space-between;
+  padding: 0 4px;
 }
 
-.field input,
-.field select,
-.field textarea {
+.section-header h3 {
+  margin: 0;
+  color: #fffdf4;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.add-workspace-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px dashed #3e423b;
+  border-radius: 4px;
+  background: transparent;
+  color: #a9a89f;
+  cursor: pointer;
+  transition: all 140ms ease;
+}
+
+.add-workspace-btn:hover {
+  border-color: #5eead4;
+  color: #fffdf4;
+  background: rgba(94, 234, 212, 0.08);
+}
+
+.add-workspace-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid #343832;
+  border-radius: 6px;
+  background: #242721;
+  padding: 8px;
+}
+
+.add-workspace-form input {
   width: 100%;
-  min-width: 0;
   border: 1px solid #3e423b;
-  border-radius: 7px;
+  border-radius: 4px;
   background: #171916;
   color: #f3f1e8;
-  font: inherit;
-  font-size: 13px;
+  font-size: 12px;
   outline: none;
+  padding: 6px 8px;
 }
 
-.field input,
-.field select {
-  min-height: 34px;
-  padding: 0 10px;
-}
-
-.field textarea {
-  min-height: 120px;
-  resize: vertical;
-  line-height: 1.45;
-  padding: 10px;
-}
-
-.field input:focus,
-.field select:focus,
-.field textarea:focus {
+.add-workspace-form input:focus {
   border-color: #5eead4;
 }
 
-.agent-status {
-  display: grid;
-  grid-template-columns: 10px minmax(0, 1fr);
-  align-items: center;
-  gap: 8px;
-  color: #a9a89f;
-  font-size: 12px;
+.add-workspace-form .form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
-.agent-status span:last-child {
+.add-workspace-form .form-actions button {
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 4px 8px;
+}
+
+.add-workspace-form .form-actions button[type="button"] {
+  border-color: #3e423b;
+  background: transparent;
+  color: #a9a89f;
+}
+
+.add-workspace-form .form-actions button[type="submit"] {
+  background: #0f766e;
+  color: #fff;
+}
+
+.workspace-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.workspace-folder-node {
+  border: 1px solid #2d302a;
+  border-radius: 8px;
+  background: #20221e;
+  padding: 8px 10px;
+  transition: border-color 140ms ease;
+}
+
+.workspace-folder-node:hover {
+  border-color: #3d4239;
+}
+
+.workspace-folder-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 28px;
+}
+
+.workspace-folder-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   min-width: 0;
+  cursor: default;
+}
+
+.folder-icon {
+  flex-shrink: 0;
+  color: #5eead4;
+}
+
+.folder-name {
+  color: #fffdf4;
+  font-size: 13px;
+  font-weight: 650;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.launcher-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
+.temp-badge {
+  flex-shrink: 0;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 3px;
+  background: rgba(245, 158, 11, 0.08);
+  color: #f59e0b;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 4px;
 }
 
-.session-list {
+.workspace-folder-actions {
   display: flex;
-  min-height: 0;
-  flex: 1;
-  flex-direction: column;
-  gap: 8px;
-  overflow: auto;
+  align-items: center;
+  gap: 6px;
 }
 
-.session-item {
-  display: grid;
-  grid-template-columns: 10px minmax(0, 1fr);
-  grid-template-rows: auto auto;
-  column-gap: 9px;
-  row-gap: 3px;
-  width: 100%;
-  min-height: 54px;
-  border: 1px solid #343832;
-  border-radius: 8px;
-  background: #242721;
-  color: #f3f1e8;
-  padding: 10px;
-  text-align: left;
+.new-session-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid #3e423b;
+  border-radius: 4px;
+  background: #2c3029;
+  color: #e2e0d5;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  transition: all 140ms ease;
 }
 
-.session-item:hover,
-.session-item.active {
+.new-session-btn:hover {
   border-color: #5eead4;
-  background: #29302c;
+  color: #fff;
+  background: #343b32;
+  box-shadow: 0 0 6px rgba(94, 234, 212, 0.2);
+}
+
+.remove-folder-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: transparent;
+  color: #7b7e75;
+  cursor: pointer;
+  transition: color 140ms ease;
+}
+
+.remove-folder-btn:hover {
+  color: #ef4444;
+}
+
+/* ==========================================
+   Agent selection Popover
+========================================== */
+.popover-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 99;
+  background: transparent;
+}
+
+.popover-wrapper {
+  position: relative;
+}
+
+.agent-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 100;
+  width: 240px;
+  border: 1px solid #3d4239;
+  border-radius: 8px;
+  background: rgba(30, 32, 28, 0.92);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  animation: popoverFadeIn 140ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes popoverFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.popover-header {
+  border-bottom: 1px solid #2d302a;
+  color: #a9a89f;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 8px 10px;
+  text-transform: uppercase;
+}
+
+.agent-options {
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+}
+
+.agent-option-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: #e2e0d5;
+  cursor: pointer;
+  padding: 8px;
+  text-align: left;
+  transition: all 120ms ease;
+}
+
+.agent-option-item:hover {
+  background: rgba(94, 234, 212, 0.1);
+  color: #fffdf4;
+}
+
+.agent-option-item svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: #5eead4;
+}
+
+.agent-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.agent-option-name {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.agent-option-desc {
+  color: #888a82;
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ==========================================
+   Workspace active sessions list
+========================================== */
+.workspace-sessions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  border-top: 1px dashed #2d302a;
+  padding-top: 8px;
+}
+
+.workspace-session-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: #191b17;
+  cursor: pointer;
+  padding: 6px 8px;
+  transition: all 120ms ease;
+}
+
+.workspace-session-item:hover {
+  background: #252b22;
+}
+
+.workspace-session-item.active {
+  border-color: rgba(94, 234, 212, 0.3);
+  background: rgba(94, 234, 212, 0.06);
+}
+
+.workspace-session-item.offline-agent {
+  opacity: 0.65;
+  background: transparent;
+  border: 1px dashed #2d302a;
+}
+
+.workspace-session-item.offline-agent:hover {
+  opacity: 0.95;
+  border-color: #3e423b;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.session-info-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.session-info-left .status-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.status-dot.offline {
+  background: #4a4d46;
+}
+
+.session-label {
+  color: #d2d0c5;
+  font-size: 12px;
+  font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-label.offline {
+  color: #888a82;
+}
+
+.offline-text {
+  font-size: 10px;
+  opacity: 0.5;
+  font-weight: 400;
+  margin-left: 4px;
+}
+
+.session-kill-btn,
+.session-remove-history-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: #7b7e75;
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+
+.session-kill-btn:hover {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+}
+
+.session-remove-history-btn:hover {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+}
+
+.no-sessions {
+  color: #656860;
+  font-size: 11px;
+  font-style: italic;
+  padding: 4px 8px;
+}
+
+/* ==========================================
+   Bottom Agent environments summary tag
+========================================== */
+.agent-status-panel {
+  border-top: 1px solid #30332e;
+  padding-top: 12px;
+}
+
+.agent-status-panel .panel-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  color: #a9a89f;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.agent-status-panel .refresh-btn {
+  border: none;
+  background: transparent;
+  color: #7b7e75;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+
+.agent-status-panel .refresh-btn:hover {
+  color: #5eead4;
+}
+
+.agent-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+}
+
+.agent-status-tag {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #2d302a;
+  border-radius: 4px;
+  background: #1d1f1b;
+  padding: 4px 6px;
+}
+
+.agent-status-tag .status-dot {
+  width: 6px;
+  height: 6px;
+}
+
+.agent-tag-name {
+  color: #c0beb3;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ==========================================
+   Terminal /resume notification banner
+========================================== */
+.resume-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border-bottom: 1px solid rgba(94, 234, 212, 0.2);
+  background: rgba(15, 118, 110, 0.15);
+  padding: 8px 18px;
+  animation: bannerSlideDown 200ms ease;
+}
+
+@keyframes bannerSlideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.banner-icon {
+  margin-top: 2px;
+  color: #5eead4;
+}
+
+.resume-banner span {
+  color: #e2e0d5;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.resume-banner code {
+  font-family: monospace;
+  font-weight: 700;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(94, 234, 212, 0.15);
+  color: #5eead4;
 }
 
 .status-dot {
-  grid-row: 1 / span 2;
-  align-self: center;
   width: 8px;
   height: 8px;
-  border-radius: 999px;
-  background: #a9a89f;
+  border-radius: 50%;
 }
 
 .status-dot.running {
   background: #22c55e;
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.45);
 }
 
 .status-dot.exited {
@@ -230,23 +640,6 @@ button {
   background: #ef4444;
 }
 
-.session-title,
-.session-command {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.session-title {
-  font-size: 13px;
-  font-weight: 650;
-}
-
-.session-command {
-  color: #a9a89f;
-  font-size: 12px;
-}
 
 .workspace {
   display: grid;
@@ -520,4 +913,42 @@ button {
   .app-shell {
     grid-template-columns: 230px minmax(0, 1fr);
   }
+}
+
+/* ==========================================
+   Directory Picker input fields
+========================================== */
+.input-group-with-btn {
+  display: flex;
+  align-items: center;
+  position: relative;
+  width: 100%;
+}
+
+.input-group-with-btn input {
+  padding-right: 36px !important;
+}
+
+.browse-dir-btn {
+  position: absolute;
+  right: 1px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: calc(100% - 2px);
+  border: none;
+  border-top-right-radius: 6px;
+  border-bottom-right-radius: 6px;
+  background: transparent;
+  color: #7b7e75;
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+
+.browse-dir-btn:hover {
+  color: #5eead4;
+  background: rgba(94, 234, 212, 0.08);
 }

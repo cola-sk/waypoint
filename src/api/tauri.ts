@@ -153,3 +153,10 @@ export function continueSession(
     cols: 100,
   });
 }
+
+export function selectDirectory(): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve(null);
+  }
+  return invoke("select_directory");
+}

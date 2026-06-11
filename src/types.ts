@@ -49,3 +49,10 @@ export type AgentPresetInfo = {
   command: string;
   resolvedCommand?: string | null;
 };
+
+export type WorkspaceFolder = {
+  path: string;
+  name: string;
+  isPinned: boolean;
+};
+

@@ -22,7 +22,6 @@ const RENDER_RING_LIMIT_BYTES: usize = 400_000;
 const CHAT_HISTORY_LIMIT: usize = 200;
 const CHAT_MESSAGE_CONTENT_LIMIT_CHARS: usize = 120_000;
 const CHAT_STREAM_IDLE_FINALIZE_MS: u64 = 1_200;
-const WAYPOINT_HANDOVER_FILE_ENV: &str = "WAYPOINT_HANDOVER_FILE";
 const HANDOVER_CONTEXT_CHARS: usize = 20_000;
 const HANDOVER_USER_INPUT_CHARS: usize = 4_000;
 const COMPACT_HANDOVER_CONTEXT_CHARS: usize = 4_000;
@@ -869,11 +868,15 @@ impl SessionManager {
             created_at: unix_timestamp(),
             last_active_at: unix_timestamp(),
         };
-        let prompt =
-            self.build_compact_handover_prompt_for(source, &source_info, &planned_target, note.clone());
+        let prompt = self.build_compact_handover_prompt_for(
+            source,
+            &source_info,
+            &planned_target,
+            note.clone(),
+        );
 
         let handover_path = write_handover_file(&cwd, &prompt)?;
-        let startup_prompt = handover_reference_startup_prompt();
+        let startup_prompt = handover_reference_startup_prompt(&handover_path);
 
         let mut args = resolved.args;
         args.push(startup_prompt);
@@ -889,10 +892,7 @@ impl SessionManager {
             cwd,
             rows,
             cols,
-            vec![(
-                WAYPOINT_HANDOVER_FILE_ENV.to_string(),
-                handover_path.to_string_lossy().into_owned(),
-            )],
+            Vec::new(),
         )?;
 
         Ok(HandoverResult {
@@ -940,8 +940,12 @@ impl SessionManager {
             note.clone(),
         );
         let handover_path = write_handover_file(&cwd, &prompt)?;
-        let startup_prompt = handover_reference_startup_prompt();
+        let startup_prompt = handover_reference_startup_prompt(&handover_path);
         let mut args = resolved.args;
+        if let Some(parent) = handover_path.parent() {
+            args.push("--include-directories".to_string());
+            args.push(parent.to_string_lossy().into_owned());
+        }
         args.push("--prompt-interactive".to_string());
         args.push(startup_prompt);
         let target_info = self.spawn_session(
@@ -955,10 +959,7 @@ impl SessionManager {
             cwd,
             rows,
             cols,
-            vec![(
-                WAYPOINT_HANDOVER_FILE_ENV.to_string(),
-                handover_path.to_string_lossy().into_owned(),
-            )],
+            Vec::new(),
         )?;
 
         Ok(HandoverResult {
@@ -1004,7 +1005,7 @@ impl SessionManager {
             self.build_compact_handover_prompt_for(source, &source_info, &planned_target, note);
 
         let handover_path = write_handover_file(&cwd, &prompt)?;
-        let startup_prompt = handover_reference_startup_prompt();
+        let startup_prompt = handover_reference_startup_prompt(&handover_path);
 
         let mut args = resolved.args;
         args.push(startup_prompt);
@@ -1020,10 +1021,7 @@ impl SessionManager {
             cwd,
             rows,
             cols,
-            vec![(
-                WAYPOINT_HANDOVER_FILE_ENV.to_string(),
-                handover_path.to_string_lossy().into_owned(),
-            )],
+            Vec::new(),
         )?;
 
         Ok(HandoverResult {
@@ -1429,7 +1427,7 @@ fn shell_quote(value: &str) -> String {
 }
 
 fn write_handover_file(cwd: &str, prompt: &str) -> Result<PathBuf, String> {
-    let dir = Path::new(cwd).join(".waypoint").join("handovers");
+    let dir = handover_workspace_dir(cwd)?;
     fs::create_dir_all(&dir).map_err(|err| {
         format!(
             "failed to create handover directory {}: {err}",
@@ -1442,9 +1440,21 @@ fn write_handover_file(cwd: &str, prompt: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn handover_reference_startup_prompt() -> String {
+fn handover_workspace_dir(cwd: &str) -> Result<PathBuf, String> {
+    let home = env::var("HOME").map_err(|err| format!("failed to resolve HOME: {err}"))?;
+    let workspace_name = Path::new(cwd)
+        .file_name()
+        .map(|name| name.to_string_lossy().trim().to_string())
+        .filter(|name| !name.is_empty() && name != "." && name != "..")
+        .unwrap_or_else(|| "workspace".to_string());
+
+    Ok(PathBuf::from(home).join(".waypoint").join(workspace_name))
+}
+
+fn handover_reference_startup_prompt(path: &Path) -> String {
     format!(
-        "Initialization step for this new session: read only the exact handover file path from the {WAYPOINT_HANDOVER_FILE_ENV} environment variable now (this single-file read is explicitly allowed). Do not list/search directories, do not use glob patterns, and do not read any other files during initialization (for example, do not scan .waypoint/handovers). After loading that single file, reply exactly: \"Context loaded. Waiting for your instruction.\" Then wait for the next user message. This initialization is one-time only for session start; do not repeat it in later turns."
+        "Initialization step for this new session: read only this exact handover file now: {}. This single-file read is explicitly allowed. Do not list/search directories, do not use glob patterns, and do not read any other files during initialization. After loading that single file, reply exactly: \"Context loaded. Waiting for your instruction.\" Then wait for the next user message. This initialization is one-time only for session start; do not repeat it in later turns.",
+        path.display()
     )
 }
 
@@ -1706,7 +1716,9 @@ fn clean_chat_chunk(raw: &str) -> String {
         cleaned_lines.push(normalized);
     }
 
-    collapse_blank_lines(&cleaned_lines.join("\n"), 2).trim_end().to_string()
+    collapse_blank_lines(&cleaned_lines.join("\n"), 2)
+        .trim_end()
+        .to_string()
 }
 
 fn has_chat_repaint_hint(raw: &str) -> bool {
@@ -1829,8 +1841,8 @@ fn looks_like_tui_noise_line(line: &str) -> bool {
 
     // Box-drawing character dominated lines (TUI borders)
     let box_chars = [
-        '│', '┃', '─', '━', '┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼', '╭', '╮', '╯', '╰',
-        '█', '▌', '▐', '▄', '▀', '■', '□',
+        '│', '┃', '─', '━', '┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼', '╭', '╮', '╯', '╰', '█',
+        '▌', '▐', '▄', '▀', '■', '□',
     ];
     let box_count = trimmed.chars().filter(|c| box_chars.contains(c)).count();
     let has_text = trimmed.chars().any(|c| c.is_alphanumeric());

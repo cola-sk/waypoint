@@ -54,3 +54,4 @@ src-tauri/target/
 src-tauri/gen/
 Cargo.lock.bk
 .claude
+test_inside.txt
