@@ -224,6 +224,7 @@ function App() {
     setIsLaunching(true);
     try {
       const session = await createAgentSession(selectedAgentId, workspacePath.trim());
+      updateWorkspaceAgentHistory(session.cwd, session.agentId, session.agentName);
       await refreshSessions(session.id);
     } catch (err) {
       setError(String(err));
@@ -275,6 +276,11 @@ function App() {
               continueWorkspacePath.trim(),
               handoverNote,
             );
+      updateWorkspaceAgentHistory(
+        result.targetSession.cwd,
+        result.targetSession.agentId,
+        result.targetSession.agentName,
+      );
       setHandoverOpen(false);
       setHandoverNote("");
       await refreshSessions(result.targetSession.id);
