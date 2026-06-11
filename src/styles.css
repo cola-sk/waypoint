@@ -940,6 +940,21 @@ textarea:focus-visible {
   padding: 1px 5px;
 }
 
+.resume-link-btn {
+  background: none;
+  border: none;
+  color: #bd4828;
+  text-decoration: underline;
+  cursor: pointer;
+  font-weight: 700;
+  padding: 0 4px;
+  font-size: 12px;
+}
+
+.resume-link-btn:hover {
+  color: #a33b1e;
+}
+
 .status-dot {
   width: 8px;
   height: 8px;
@@ -1054,6 +1069,7 @@ textarea:focus-visible {
 .terminal-shell {
   position: relative;
   display: flex;
+  flex-direction: column;
   flex: 1;
   width: 100%;
   height: 100%;

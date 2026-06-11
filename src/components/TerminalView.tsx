@@ -49,6 +49,7 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
   const fitAddonRef = useRef<FitAddon | null>(null);
   const [status, setStatus] = useState("connecting");
   const [isRestoring, setIsRestoring] = useState(false);
+  const activateAndQueueRef = useRef<((data: string) => void) | null>(null);
 
   useEffect(() => {
     const shell = shellRef.current;
@@ -57,6 +58,8 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
 
     let disposed = false;
     let unlisten: UnlistenFn | null = null;
+    setIsRestoring(false);
+    setStatus("connecting");
 
     const terminal = new Terminal({
       cursorBlink: true,
@@ -209,6 +212,8 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
         });
     };
 
+    activateAndQueueRef.current = activateAndQueue;
+
     const dataDisposable = terminal.onData((data) => {
       if (isReplaying) {
         return;
@@ -232,6 +237,9 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
         fitAndResize();
         const onWriteComplete = () => {
           isReplaying = false;
+          if (!disposed) {
+            setIsRestoring(false);
+          }
         };
         const replayBytes = snapshot.replayBase64 ? decodeBase64Bytes(snapshot.replayBase64) : null;
         if (replayBytes) {
@@ -252,6 +260,9 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
           }
         });
         setStatus(isLive ? "attached" : "readonly");
+        if (!snapshot.replay && !snapshot.replayBase64) {
+          setIsRestoring(false);
+        }
         setTimeout(() => {
           if (!disposed) {
             terminal.focus();
@@ -259,6 +270,7 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
         }, 150);
       } catch (err) {
         setStatus("error");
+        setIsRestoring(false);
         terminal.writeln(`[waypoint attach error] ${String(err)}`);
       }
     }
@@ -268,6 +280,7 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
     return () => {
       disposed = true;
       setIsRestoring(false);
+      activateAndQueueRef.current = null;
       window.clearTimeout(resizeTimeout);
       detachSession(sessionId).catch(() => undefined);
       dataDisposable.dispose();
@@ -285,8 +298,38 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
 
   return (
     <div className="terminal-shell" data-status={status} onClick={handleContainerClick} ref={shellRef}>
+      {status === "readonly" && !isRestoring && (
+        <div className="resume-banner">
+          <span className="banner-icon">💡</span>
+          <span>
+            当前为历史只读会话。
+            <button
+              type="button"
+              className="resume-link-btn"
+              onClick={(e) => {
+                e.stopPropagation();
+                activateAndQueueRef.current?.("");
+              }}
+            >
+              点击此处
+            </button>
+            或在终端输入任意内容以恢复会话。
+          </span>
+        </div>
+      )}
       <div className="terminal-surface" ref={surfaceRef} />
-      {isRestoring ? (
+      {status === "connecting" ? (
+        <div className="terminal-restore-overlay" role="status" aria-live="polite">
+          <div className="terminal-restore-panel">
+            <span className="terminal-restore-spinner" aria-hidden="true" />
+            <div>
+              <strong>正在加载会话</strong>
+              <span>正在加载终端内容，请稍候...</span>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {isRestoring && status !== "connecting" ? (
         <div className="terminal-restore-overlay" role="status" aria-live="polite">
           <div className="terminal-restore-panel">
             <span className="terminal-restore-spinner" aria-hidden="true" />

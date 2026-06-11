@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   Bot,
   ChevronDown,
@@ -75,6 +76,7 @@ function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [agents, setAgents] = useState<AgentPresetInfo[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [activeTerminalReloadKey, setActiveTerminalReloadKey] = useState(0);
   const [selectedAgentId, setSelectedAgentId] = useState("claude-code");
   const [workspacePath, setWorkspacePath] = useState("");
   const [isLaunching, setIsLaunching] = useState(false);
@@ -398,9 +400,23 @@ function App() {
     }
   }
 
+  function handleSelectSession(session: SessionInfo) {
+    if (session.id === activeSessionId) {
+      if (session.status !== "running") {
+        setActiveTerminalReloadKey((current) => current + 1);
+      }
+      return;
+    }
+    setActiveSessionId(session.id);
+  }
+
   useEffect(() => {
+    let unlistenExited: UnlistenFn | null = null;
+    let unlistenError: UnlistenFn | null = null;
+    let unlistenCreated: UnlistenFn | null = null;
+
     Promise.all([refreshSessions(), refreshAgents(), defaultWorkspace()])
-      .then(([, , cwd]) => {
+      .then(async ([, , cwd]) => {
         setWorkspacePath(cwd);
         // Load pinned workspaces
         const saved = localStorage.getItem("waypoint_pinned_workspaces");
@@ -435,8 +451,39 @@ function App() {
             console.error("[Waypoint] Failed to parse workspace agent history:", e);
           }
         }
+
+        // Listen to session events from Tauri
+        unlistenExited = await listen<{ session: SessionInfo }>("session:exited", (event) => {
+          setSessions((current) =>
+            current.map((item) => (item.id === event.payload.session.id ? event.payload.session : item))
+          );
+        });
+
+        unlistenError = await listen<{ sessionId: string; message: string }>("session:error", (event) => {
+          setSessions((current) =>
+            current.map((item) =>
+              item.id === event.payload.sessionId ? { ...item, status: "error" } : item
+            )
+          );
+        });
+
+        unlistenCreated = await listen<{ session: SessionInfo }>("session:created", (event) => {
+          setSessions((current) => {
+            const exists = current.some((item) => item.id === event.payload.session.id);
+            if (!exists) {
+              return [...current, event.payload.session];
+            }
+            return current.map((item) => (item.id === event.payload.session.id ? event.payload.session : item));
+          });
+        });
       })
       .catch((err) => setError(String(err)));
+
+    return () => {
+      unlistenExited?.();
+      unlistenError?.();
+      unlistenCreated?.();
+    };
   }, []);
 
   return (
@@ -671,7 +718,7 @@ function App() {
 	                                      session.id === activeSessionId ? "active" : ""
 	                                    }`}
 	                                    key={`session-${session.id}`}
-	                                    onClick={() => setActiveSessionId(session.id)}
+	                                    onClick={() => handleSelectSession(session)}
 	                                    title={session.firstUserMessage ?? session.title}
 	                                  >
 	                                    <div className="session-info-left">
@@ -793,7 +840,7 @@ function App() {
         <div className="terminal-frame">
           {activeSessionId ? (
             <TerminalView
-              key={activeSessionId}
+              key={`${activeSessionId}:${activeTerminalReloadKey}`}
               sessionId={activeSessionId}
               onSessionActivated={(session) => {
                 setSessions((current) => {
