@@ -11,6 +11,7 @@ export type SessionInfo = {
   attached: boolean;
   createdAt: number;
   lastActiveAt: number;
+  firstUserMessage?: string | null;
   nativeSessionRef?: NativeSessionRef | null;
 };
 

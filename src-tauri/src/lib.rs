@@ -1,9 +1,9 @@
 mod pty_manager;
 
 use pty_manager::{
-    attach_session, continue_session, create_agent_session, default_workspace, detach_session,
-    forward_session, kill_session, list_agent_presets, list_sessions, reactivate_session,
-    resize_session, write_session, AppState,
+    attach_session, continue_session, create_agent_session, default_workspace, delete_session,
+    detach_session, forward_session, kill_session, list_agent_presets, list_sessions,
+    reactivate_session, resize_session, write_session, AppState,
 };
 
 #[tauri::command]
@@ -27,6 +27,7 @@ pub fn run() {
             write_session,
             resize_session,
             kill_session,
+            delete_session,
             forward_session,
             continue_session,
             select_directory,

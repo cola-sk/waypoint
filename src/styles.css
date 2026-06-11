@@ -166,6 +166,7 @@ textarea:focus-visible {
 }
 
 .primary-action,
+.danger-action,
 .icon-action {
   display: inline-flex;
   align-items: center;
@@ -201,6 +202,26 @@ textarea:focus-visible {
   cursor: not-allowed;
   opacity: 0.48;
   box-shadow: none;
+}
+
+.danger-action {
+  min-height: 38px;
+  min-width: 116px;
+  background: var(--accent-red);
+  color: #ffffff;
+  font-weight: 720;
+  padding: 0 16px;
+}
+
+.danger-action:hover:not(:disabled) {
+  background: #c9443f;
+  box-shadow: 0 10px 22px rgba(217, 83, 79, 0.18);
+  transform: translateY(-1px);
+}
+
+.danger-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
 }
 
 .workspace-list {
@@ -774,6 +795,7 @@ textarea:focus-visible {
 }
 
 .session-kill-btn,
+.session-delete-btn,
 .session-remove-history-btn {
   display: flex;
   align-items: center;
@@ -790,6 +812,7 @@ textarea:focus-visible {
 }
 
 .session-kill-btn:hover,
+.session-delete-btn:hover,
 .session-remove-history-btn:hover {
   background: rgba(217, 83, 79, 0.1);
   color: var(--accent-red);
@@ -1122,6 +1145,11 @@ textarea:focus-visible {
   box-shadow: 0 24px 70px rgba(31, 35, 40, 0.22);
 }
 
+.confirm-modal {
+  grid-template-rows: auto auto auto;
+  width: min(440px, calc(100vw - 48px));
+}
+
 .modal-header,
 .modal-footer {
   display: flex;
@@ -1159,6 +1187,19 @@ textarea:focus-visible {
   width: auto;
   min-width: 132px;
   padding: 0 16px;
+}
+
+.confirm-copy {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.confirm-meta {
+  margin: -6px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .icon-only {

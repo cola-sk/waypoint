@@ -58,10 +58,12 @@ struct PtySession {
     ring: Mutex<String>,
     input_ring: Mutex<String>,
     render_ring: Mutex<Vec<u8>>,
+    pending_user_input: Mutex<String>,
     inherited_handover: Mutex<String>,
     chat_messages: Mutex<Vec<ChatMessage>>,
     open_assistant_index: Mutex<Option<usize>>,
     last_assistant_output_at_ms: Mutex<Option<u64>>,
+    deleted: Mutex<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -77,6 +79,8 @@ struct SessionMeta {
     attached: bool,
     created_at: u64,
     last_active_at: u64,
+    #[serde(default)]
+    first_user_message: Option<String>,
     #[serde(default)]
     native_session_ref: Option<NativeSessionRef>,
 }
@@ -104,6 +108,7 @@ pub struct SessionInfo {
     attached: bool,
     created_at: u64,
     last_active_at: u64,
+    first_user_message: Option<String>,
     native_session_ref: Option<NativeSessionRef>,
 }
 
@@ -326,6 +331,11 @@ pub fn kill_session(state: State<'_, AppState>, session_id: String) -> Result<()
 }
 
 #[tauri::command]
+pub fn delete_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    state.manager.delete_session(&session_id)
+}
+
+#[tauri::command]
 pub fn forward_session(
     state: State<'_, AppState>,
     source_session_id: String,
@@ -449,6 +459,7 @@ impl SessionManager {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -461,7 +472,7 @@ impl SessionManager {
         title: String,
         display_command: String,
         executable: String,
-        args: Vec<String>,
+        mut args: Vec<String>,
         cwd: String,
         rows: Option<u16>,
         cols: Option<u16>,
@@ -469,7 +480,8 @@ impl SessionManager {
         existing_id: Option<String>,
         title_override: Option<String>,
         created_at_override: Option<u64>,
-        native_session_ref: Option<NativeSessionRef>,
+        mut native_session_ref: Option<NativeSessionRef>,
+        first_user_message: Option<String>,
     ) -> Result<SessionInfo, String> {
         let cwd_path = PathBuf::from(&cwd);
         if !cwd_path.is_dir() {
@@ -488,6 +500,20 @@ impl SessionManager {
             )
         })?;
         let transcript_path = session_dir.join("transcript.log");
+
+        if agent_id == "copilot"
+            && native_session_ref.is_none()
+            && !copilot_args_have_session_identity(&args)
+        {
+            append_copilot_cli_option(&mut args, format!("--session-id={id}"));
+            native_session_ref = Some(NativeSessionRef {
+                provider: agent_id.to_string(),
+                id: Some(id.clone()),
+                name: None,
+                resume_command: Some(format!("{} --resume={}", display_command, shell_quote(&id))),
+                discovered_at: now,
+            });
+        }
 
         let pty_system = native_pty_system();
         let initial_rows = rows.unwrap_or(30);
@@ -549,6 +575,7 @@ impl SessionManager {
             attached: false,
             created_at: created_at_override.unwrap_or(now),
             last_active_at: now,
+            first_user_message,
             native_session_ref,
         };
 
@@ -561,10 +588,12 @@ impl SessionManager {
             ring: Mutex::new(String::new()),
             input_ring: Mutex::new(String::new()),
             render_ring: Mutex::new(Vec::new()),
+            pending_user_input: Mutex::new(String::new()),
             inherited_handover: Mutex::new(String::new()),
             chat_messages: Mutex::new(Vec::new()),
             open_assistant_index: Mutex::new(None),
             last_assistant_output_at_ms: Mutex::new(None),
+            deleted: Mutex::new(false),
         });
 
         session.persist_meta();
@@ -729,44 +758,21 @@ impl SessionManager {
             return Err(format!("workspace directory does not exist: {}", meta.cwd));
         }
 
-        if let Some(command) = native_resume_command_for(&meta)? {
-            return self.spawn_session_with_identity(
-                app,
-                &meta.agent_id,
-                &meta.agent_name,
-                meta.agent_name.clone(),
-                command.display_command,
-                command.executable,
-                command.args,
-                meta.cwd,
-                rows,
-                cols,
-                Vec::new(),
-                Some(meta.id),
-                Some(meta.title),
-                Some(meta.created_at),
-                command.native_session_ref,
-            );
-        }
-
-        let definition = agent_definitions()
-            .into_iter()
-            .find(|definition| definition.id == meta.agent_id)
-            .ok_or_else(|| format!("unknown agent preset: {}", meta.agent_id))?;
-        let resolved = resolve_agent_command(&definition).ok_or_else(|| {
+        let command = native_resume_command_for(&meta)?.ok_or_else(|| {
             format!(
-                "{} is not available in PATH. Install it or make sure your login shell can resolve it.",
-                definition.name
+                "{} does not have a saved native resume id. Open a new session and use the agent's resume command manually.",
+                meta.agent_name
             )
         })?;
-        let target_info = self.spawn_session_with_identity(
+
+        self.spawn_session_with_identity(
             app,
-            definition.id,
-            definition.name,
-            definition.name.to_string(),
-            resolved.display,
-            resolved.executable,
-            resolved.args,
+            &meta.agent_id,
+            &meta.agent_name,
+            meta.agent_name.clone(),
+            command.display_command,
+            command.executable,
+            command.args,
             meta.cwd.clone(),
             rows,
             cols,
@@ -774,32 +780,15 @@ impl SessionManager {
             Some(meta.id.clone()),
             Some(meta.title.clone()),
             Some(meta.created_at),
-            meta.native_session_ref.clone(),
-        )?;
-
-        let target = self.get(&target_info.id)?;
-        let prompt = build_offline_handover_prompt(&meta, &target_info)?;
-        let handover_path = write_handover_file(&target_info.cwd, &prompt)?;
-        let display_path = handover_path
-            .strip_prefix(&target_info.cwd)
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|_| handover_path.display().to_string());
-        thread::sleep(Duration::from_millis(handover_startup_delay_ms(
-            &target_info.agent_id,
-        )));
-        inject_with_retry(
-            &target,
-            &format!(
-                "A prior Waypoint session transcript is summarized in {display_path}. Read only this exact file, acknowledge context loaded, then continue with my next instruction."
-            ),
-        )?;
-        self.remember_handover(&target, &prompt);
-        Ok(target_info)
+            command.native_session_ref,
+            meta.first_user_message.clone(),
+        )
     }
 
     fn write_session(&self, session_id: &str, data: String) -> Result<(), String> {
         let session = self.get(session_id)?;
         session.append_input(&data);
+        session.capture_user_input(&data);
         session
             .writer
             .lock()
@@ -825,6 +814,7 @@ impl SessionManager {
             .map_err(|err| format!("failed to write chat message to PTY: {err}"))?;
         session.append_chat_user_message(payload);
         session.append_input(&format!("{payload}\n"));
+        session.remember_first_user_message(payload);
         session.meta.lock().last_active_at = unix_timestamp();
         session.persist_meta();
         Ok(())
@@ -886,6 +876,24 @@ impl SessionManager {
             .map_err(|err| format!("failed to kill session: {err}"))?;
         session.mark_status(SessionStatus::Exited);
         Ok(())
+    }
+
+    fn delete_session(&self, session_id: &str) -> Result<(), String> {
+        let live_session = self.sessions.lock().remove(session_id);
+        if let Some(session) = live_session {
+            *session.deleted.lock() = true;
+            let _ = session.child.lock().kill();
+        }
+
+        let dir = session_dir(session_id)?;
+        match fs::remove_dir_all(&dir) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(format!(
+                "failed to delete session history {}: {err}",
+                dir.display()
+            )),
+        }
     }
 
     fn forward_session(
@@ -1033,6 +1041,7 @@ impl SessionManager {
             attached: false,
             created_at: unix_timestamp(),
             last_active_at: unix_timestamp(),
+            first_user_message: None,
             native_session_ref: None,
         };
         let prompt = self.build_compact_handover_prompt_for(
@@ -1101,6 +1110,7 @@ impl SessionManager {
             attached: false,
             created_at: unix_timestamp(),
             last_active_at: unix_timestamp(),
+            first_user_message: None,
             native_session_ref: None,
         };
         let prompt = self.build_compact_handover_prompt_for(
@@ -1172,6 +1182,7 @@ impl SessionManager {
             attached: false,
             created_at: unix_timestamp(),
             last_active_at: unix_timestamp(),
+            first_user_message: None,
             native_session_ref: None,
         };
         let prompt =
@@ -1237,6 +1248,7 @@ impl SessionManager {
             attached: false,
             created_at: unix_timestamp(),
             last_active_at: unix_timestamp(),
+            first_user_message: None,
             native_session_ref: None,
         };
         let prompt = self.build_compact_handover_prompt_for(
@@ -1250,15 +1262,12 @@ impl SessionManager {
         let startup_prompt = handover_reference_startup_prompt(&handover_path);
 
         let mut args = resolved.args;
-        if args.first().map(|arg| arg.as_str()) == Some("copilot") {
-            args.push("--".to_string());
-        }
         if let Some(parent) = handover_path.parent() {
-            args.push("--add-dir".to_string());
-            args.push(parent.to_string_lossy().into_owned());
+            append_copilot_cli_option(&mut args, "--add-dir".to_string());
+            append_copilot_cli_option(&mut args, parent.to_string_lossy().into_owned());
         }
-        args.push("-i".to_string());
-        args.push(startup_prompt);
+        append_copilot_cli_option(&mut args, "-i".to_string());
+        append_copilot_cli_option(&mut args, startup_prompt);
 
         let target_info = self.spawn_session(
             app,
@@ -1407,6 +1416,9 @@ impl PtySession {
     }
 
     fn persist_meta(&self) {
+        if *self.deleted.lock() {
+            return;
+        }
         let meta = self.meta.lock().clone();
         if let Err(err) = persist_session_meta(&meta) {
             eprintln!("[waypoint] failed to persist session metadata: {err}");
@@ -1450,6 +1462,54 @@ impl PtySession {
             let drop_len = render_ring.len() - RENDER_RING_LIMIT_BYTES;
             render_ring.drain(0..drop_len);
         }
+    }
+
+    fn capture_user_input(&self, data: &str) {
+        let mut pending = self.pending_user_input.lock();
+        let mut ignoring_escape = false;
+        for ch in data.chars() {
+            if ignoring_escape {
+                if ch.is_ascii_alphabetic() || ch == '~' {
+                    ignoring_escape = false;
+                }
+                continue;
+            }
+
+            match ch {
+                '\u{1b}' => {
+                    ignoring_escape = true;
+                }
+                '\r' | '\n' => {
+                    let candidate = pending.trim().to_string();
+                    pending.clear();
+                    drop(pending);
+                    self.remember_first_user_message(&candidate);
+                    return;
+                }
+                '\u{7f}' | '\u{8}' => {
+                    pending.pop();
+                }
+                '\t' => pending.push(' '),
+                _ if !ch.is_control() => pending.push(ch),
+                _ => {}
+            }
+        }
+    }
+
+    fn remember_first_user_message(&self, value: &str) {
+        let normalized = normalize_session_title(value);
+        if normalized.is_empty() {
+            return;
+        }
+
+        let mut meta = self.meta.lock();
+        if meta.first_user_message.is_some() {
+            return;
+        }
+        meta.first_user_message = Some(normalized);
+        meta.last_active_at = unix_timestamp();
+        drop(meta);
+        self.persist_meta();
     }
 
     fn append_chat_user_message(&self, content: &str) {
@@ -1562,6 +1622,7 @@ impl SessionMeta {
             attached: self.attached,
             created_at: self.created_at,
             last_active_at: self.last_active_at,
+            first_user_message: self.first_user_message.clone(),
             native_session_ref: self.native_session_ref.clone(),
         }
     }
@@ -1748,6 +1809,27 @@ fn resolve_candidate(candidate: &CommandCandidate) -> Option<ResolvedAgentComman
     })
 }
 
+fn append_copilot_cli_option(args: &mut Vec<String>, value: String) {
+    if args.first().map(|arg| arg.as_str()) == Some("copilot")
+        && !args.iter().any(|arg| arg == "--")
+    {
+        args.push("--".to_string());
+    }
+    args.push(value);
+}
+
+fn copilot_args_have_session_identity(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg == "--continue"
+            || arg == "--resume"
+            || arg.starts_with("--resume=")
+            || arg == "-r"
+            || arg.starts_with("-r=")
+            || arg == "--session-id"
+            || arg.starts_with("--session-id=")
+    })
+}
+
 fn native_resume_command_for(meta: &SessionMeta) -> Result<Option<NativeResumeCommand>, String> {
     let definition = agent_definitions()
         .into_iter()
@@ -1808,20 +1890,15 @@ fn native_resume_command_for(meta: &SessionMeta) -> Result<Option<NativeResumeCo
             }
         }
         "copilot" => {
-            if !resolved_command_mentions_resume(&resolved) {
+            let Some(native_id) = native_id else {
                 return Ok(None);
-            }
+            };
             let mut args = resolved.args;
-            args.push("resume".to_string());
-            if let Some(native_id) = native_id {
-                args.push(native_id.clone());
-                (
-                    args,
-                    format!("{} resume {}", resolved.display, shell_quote(&native_id)),
-                )
-            } else {
-                (args, format!("{} resume", resolved.display))
-            }
+            append_copilot_cli_option(&mut args, format!("--resume={native_id}"));
+            (
+                args,
+                format!("{} --resume={}", resolved.display, shell_quote(&native_id)),
+            )
         }
         _ => return Ok(None),
     };
@@ -1844,18 +1921,6 @@ fn native_resume_command_for(meta: &SessionMeta) -> Result<Option<NativeResumeCo
             discovered_at: now,
         }),
     }))
-}
-
-fn resolved_command_mentions_resume(resolved: &ResolvedAgentCommand) -> bool {
-    let mut command = shell_quote(&resolved.executable);
-    for arg in &resolved.args {
-        command.push(' ');
-        command.push_str(&shell_quote(arg));
-    }
-    command.push_str(" --help");
-    run_login_shell_output(&command)
-        .map(|output| output.to_ascii_lowercase().contains("resume"))
-        .unwrap_or(false)
 }
 
 fn resolve_executable(executable: &str) -> Option<String> {
@@ -2092,27 +2157,6 @@ Continue from the previous local agent session.
     )
 }
 
-fn build_offline_handover_prompt(
-    source_meta: &SessionMeta,
-    target_info: &SessionInfo,
-) -> Result<String, String> {
-    let replay_bytes = read_persisted_replay(&source_meta.id)?;
-    let replay_text = String::from_utf8_lossy(&replay_bytes);
-    let recent_context = clean_terminal_output(&replay_text, COMPACT_HANDOVER_CONTEXT_CHARS);
-    let git_status = git_command(&source_meta.cwd, &["status", "--short"])
-        .unwrap_or_else(|| "git status unavailable".to_string());
-    let source_info = source_meta.to_info();
-    Ok(build_compact_handover_prompt(
-        &source_info,
-        target_info,
-        "This session was reactivated from a persisted Waypoint terminal transcript after its PTY process exited.",
-        &tail_chars(&git_status, COMPACT_GIT_STATUS_CHARS),
-        "",
-        &recent_context,
-        "",
-    ))
-}
-
 fn inject_with_retry(target: &Arc<PtySession>, prompt: &str) -> Result<(), String> {
     let injection = format!("\x1b[200~{prompt}\x1b[201~\n");
     let mut last_error = None;
@@ -2174,6 +2218,17 @@ fn truncate_tail(value: &str, limit: usize) -> String {
         .into_iter()
         .rev()
         .collect()
+}
+
+fn normalize_session_title(value: &str) -> String {
+    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= 48 {
+        return collapsed;
+    }
+    format!(
+        "{}...",
+        collapsed.chars().take(45).collect::<String>().trim_end()
+    )
 }
 
 fn clean_chat_chunk(raw: &str) -> String {

@@ -14,6 +14,7 @@ import type { PtyDataEvent, SessionInfo } from "../types";
 type TerminalViewProps = {
   sessionId: string;
   onSessionActivated?: (session: SessionInfo) => void;
+  onActivationFailed?: (sessionId: string, reason: string) => Promise<void> | void;
 };
 
 const MIN_ROWS = 5;
@@ -41,7 +42,7 @@ function decodeBase64Bytes(base64: string): Uint8Array | null {
   }
 }
 
-function TerminalView({ sessionId, onSessionActivated }: TerminalViewProps) {
+function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: TerminalViewProps) {
   const shellRef = useRef<HTMLDivElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -140,6 +141,7 @@ function TerminalView({ sessionId, onSessionActivated }: TerminalViewProps) {
     let isLive = false;
     let isActivating = false;
     let wasReplayOnly = false;
+    let shouldClearReplayOnActivation = false;
     let pendingInput = "";
     const queuedLiveOutput: Array<string | Uint8Array> = [];
 
@@ -155,9 +157,11 @@ function TerminalView({ sessionId, onSessionActivated }: TerminalViewProps) {
       if (!wasReplayOnly) {
         return;
       }
-      terminal.reset();
-      terminal.clear();
-      fitAndResize();
+      if (shouldClearReplayOnActivation) {
+        terminal.reset();
+        terminal.clear();
+        fitAndResize();
+      }
       wasReplayOnly = false;
       queuedLiveOutput.splice(0).forEach((payload) => terminal.write(payload));
     };
@@ -196,8 +200,8 @@ function TerminalView({ sessionId, onSessionActivated }: TerminalViewProps) {
           if (disposed) return;
           isActivating = false;
           pendingInput = "";
-          setStatus("error");
-          terminal.writeln(`\r\n[waypoint activate error] ${String(err)}`);
+          setStatus("readonly");
+          onActivationFailed?.(sessionId, String(err));
         });
     };
 
@@ -220,6 +224,7 @@ function TerminalView({ sessionId, onSessionActivated }: TerminalViewProps) {
         if (disposed) return;
         isLive = snapshot.mode === "live" && snapshot.session.status === "running";
         wasReplayOnly = !isLive;
+        shouldClearReplayOnActivation = snapshot.session.agentId === "claude-code";
         fitAndResize();
         const onWriteComplete = () => {
           isReplaying = false;

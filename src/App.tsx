@@ -7,9 +7,9 @@ import {
   RefreshCw,
   Send,
   Square,
+  Trash2,
   X,
   Plus,
-  Info,
   FolderOpen,
 } from "lucide-react";
 import TerminalView from "./components/TerminalView";
@@ -18,6 +18,7 @@ import {
   continueSession,
   createAgentSession,
   defaultWorkspace,
+  deleteSession,
   forwardSession,
   killSession,
   listAgentPresets,
@@ -62,6 +63,14 @@ function sessionStateHint(status: SessionInfo["status"]) {
   return "Needs attention";
 }
 
+function sessionDisplayTitle(session: SessionInfo) {
+  const title = session.firstUserMessage?.trim() || session.title.trim();
+  if (title.length <= 42) {
+    return title;
+  }
+  return `${title.slice(0, 39).trimEnd()}...`;
+}
+
 function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [agents, setAgents] = useState<AgentPresetInfo[]>([]);
@@ -77,6 +86,8 @@ function App() {
   const [handoverNote, setHandoverNote] = useState("");
   const [isForwarding, setIsForwarding] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [deleteSessionId, setDeleteSessionId] = useState<string | null>(null);
+  const [isDeletingSession, setIsDeletingSession] = useState(false);
 
   // New Workspace state variables
   const [pinnedWorkspaces, setPinnedWorkspaces] = useState<WorkspaceFolder[]>([]);
@@ -103,6 +114,10 @@ function App() {
   const continueAgent = useMemo(
     () => agents.find((agent) => agent.id === continueAgentId) ?? null,
     [agents, continueAgentId],
+  );
+  const pendingDeleteSession = useMemo(
+    () => sessions.find((session) => session.id === deleteSessionId) ?? null,
+    [deleteSessionId, sessions],
   );
 
   // Compute workspaces with nested active sessions
@@ -292,6 +307,49 @@ function App() {
       setActiveSessionId(nextSessions[0]?.id ?? null);
     } catch (err) {
       setError(String(err));
+    }
+  }
+
+  function requestDeleteSession(sessionId: string) {
+    setError(null);
+    setDeleteSessionId(sessionId);
+  }
+
+  async function confirmDeleteSession() {
+    if (!deleteSessionId) return;
+    setError(null);
+    setIsDeletingSession(true);
+    try {
+      await deleteSession(deleteSessionId);
+      const nextSessions = await listSessions();
+      setSessions(nextSessions);
+      if (activeSessionId === deleteSessionId) {
+        setActiveSessionId(nextSessions[0]?.id ?? null);
+      }
+      setDeleteSessionId(null);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setIsDeletingSession(false);
+    }
+  }
+
+  async function handleActivationFailed(sessionId: string, reason: string) {
+    const source = sessions.find((session) => session.id === sessionId);
+    if (!source) {
+      setError(`恢复失败：${reason}`);
+      return;
+    }
+
+    try {
+      const nextSession = await createAgentSession(source.agentId, source.cwd);
+      updateWorkspaceAgentHistory(nextSession.cwd, nextSession.agentId, nextSession.agentName);
+      await refreshSessions(nextSession.id);
+      setError(
+        `恢复失败，已打开新的 ${source.agentName} 会话。请在终端中使用该 Agent 的 resume 命令手动恢复历史。`,
+      );
+    } catch (err) {
+      setError(`恢复失败：${reason}；新会话创建失败：${String(err)}`);
     }
   }
 
@@ -607,23 +665,23 @@ function App() {
                                   ) : null}
                                 </div>
                               ) : (
-                                group.sessions.map((session) => (
-                                  <div
-                                    className={`workspace-session-item chat-history-item ${
-                                      session.id === activeSessionId ? "active" : ""
-                                    }`}
-                                    key={`session-${session.id}`}
-                                    onClick={() => setActiveSessionId(session.id)}
-	                                    title={session.title}
+	                                group.sessions.map((session) => (
+	                                  <div
+	                                    className={`workspace-session-item chat-history-item ${
+	                                      session.id === activeSessionId ? "active" : ""
+	                                    }`}
+	                                    key={`session-${session.id}`}
+	                                    onClick={() => setActiveSessionId(session.id)}
+	                                    title={session.firstUserMessage ?? session.title}
 	                                  >
 	                                    <div className="session-info-left">
 	                                      <span className={`status-dot ${session.status}`} />
 	                                      <span className="session-copy">
 	                                        <span className="session-label">
-	                                          {formatSessionTime(session.createdAt)}
+	                                          {sessionDisplayTitle(session)}
 	                                        </span>
 	                                        <span className="session-subtitle">
-	                                          {sessionStateHint(session.status)}
+	                                          {formatSessionTime(session.createdAt)} · {sessionStateHint(session.status)}
 	                                        </span>
 	                                      </span>
 	                                    </div>
@@ -649,6 +707,16 @@ function App() {
 	                                          <Square size={8} fill="currentColor" />
 	                                        </button>
 	                                      ) : null}
+	                                      <button
+	                                        className="session-delete-btn"
+	                                        onClick={(e) => {
+	                                          e.stopPropagation();
+	                                          requestDeleteSession(session.id);
+	                                        }}
+	                                        title="删除本地历史记录"
+	                                      >
+	                                        <Trash2 size={10} />
+	                                      </button>
 	                                    </div>
 	                                  </div>
                                 ))
@@ -720,15 +788,6 @@ function App() {
           </div>
         </header>
 
-        {activeSession && (
-          <div className="resume-banner">
-            <Info size={14} className="banner-icon" />
-            <span>
-              提示：历史会话会先以只读方式回放；开始输入时 Waypoint 会优先尝试当前 Agent 的原生恢复能力。
-            </span>
-          </div>
-        )}
-
         {error ? <div className="error-banner">{error}</div> : null}
 
         <div className="terminal-frame">
@@ -745,6 +804,7 @@ function App() {
                   return current.map((item) => (item.id === session.id ? session : item));
                 });
               }}
+              onActivationFailed={handleActivationFailed}
             />
           ) : (
             <div className="empty-state">
@@ -758,9 +818,9 @@ function App() {
         </div>
       </section>
 
-      {handoverOpen ? (
-        <div className="modal-backdrop" role="presentation">
-          <section className="modal" role="dialog" aria-modal="true" aria-labelledby="handover-title">
+	      {handoverOpen ? (
+	        <div className="modal-backdrop" role="presentation">
+	          <section className="modal" role="dialog" aria-modal="true" aria-labelledby="handover-title">
             <header className="modal-header">
               <div>
                 <p className="eyebrow">Handover</p>
@@ -912,11 +972,60 @@ function App() {
                 </span>
               </button>
             </footer>
-          </section>
-        </div>
-      ) : null}
-    </main>
-  );
-}
+	          </section>
+	        </div>
+	      ) : null}
+
+	      {pendingDeleteSession ? (
+	        <div className="modal-backdrop" role="presentation">
+	          <section className="modal confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-session-title">
+	            <header className="modal-header">
+	              <div>
+	                <p className="eyebrow">Delete History</p>
+	                <h3 id="delete-session-title">删除本地会话历史</h3>
+	              </div>
+	              <button
+	                className="icon-only"
+	                type="button"
+	                onClick={() => setDeleteSessionId(null)}
+	                disabled={isDeletingSession}
+	                title="Close"
+	              >
+	                <X aria-hidden="true" size={16} />
+	              </button>
+	            </header>
+	            <div className="modal-body">
+	              <p className="confirm-copy">
+	                确认删除「{sessionDisplayTitle(pendingDeleteSession)}」的本地历史记录吗？此操作不可恢复。
+	              </p>
+	              <p className="confirm-meta">
+	                {pendingDeleteSession.agentName} · {formatSessionTime(pendingDeleteSession.createdAt)}
+	              </p>
+	            </div>
+	            <footer className="modal-footer">
+	              <button
+	                className="icon-action"
+	                type="button"
+	                onClick={() => setDeleteSessionId(null)}
+	                disabled={isDeletingSession}
+	              >
+	                Cancel
+	              </button>
+	              <button
+	                className="danger-action"
+	                type="button"
+	                onClick={confirmDeleteSession}
+	                disabled={isDeletingSession}
+	              >
+	                <Trash2 aria-hidden="true" size={15} />
+	                <span>{isDeletingSession ? "Deleting" : "Delete"}</span>
+	              </button>
+	            </footer>
+	          </section>
+	        </div>
+	      ) : null}
+	    </main>
+	  );
+	}
 
 export default App;

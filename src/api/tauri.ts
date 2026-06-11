@@ -115,6 +115,11 @@ export function killSession(sessionId: string): Promise<void> {
   return invoke("kill_session", { sessionId });
 }
 
+export function deleteSession(sessionId: string): Promise<void> {
+  assertTauriRuntime();
+  return invoke("delete_session", { sessionId });
+}
+
 export function forwardSession(
   sourceSessionId: string,
   targetSessionId: string,
