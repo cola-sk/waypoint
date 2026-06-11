@@ -1,11 +1,15 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <rect x="96" y="96" width="832" height="832" rx="220" fill="#FBFAF8"/>
-  <rect x="98" y="98" width="828" height="828" rx="218" stroke="#D9D6CE" stroke-width="4"/>
+  <!-- Full-bleed background: macOS Dock applies its own rounded corner mask -->
+  <rect width="1024" height="1024" fill="#FBFAF8"/>
+  <!-- Subtle border inset to visually separate from white backgrounds -->
+  <rect x="1" y="1" width="1022" height="1022" stroke="#E8E4DC" stroke-width="2"/>
+  <!-- Hexagon waypoint mark -->
   <path
-    d="M512 270L722 391V633L512 754L302 633V391L512 270Z"
+    d="M512 260L742 389V647L512 776L282 647V389L512 260Z"
     stroke="#FF6F4C"
-    stroke-width="62"
+    stroke-width="68"
     stroke-linejoin="round"
   />
-  <circle cx="512" cy="512" r="56" fill="#FF6F4C"/>
+  <!-- Center dot -->
+  <circle cx="512" cy="512" r="60" fill="#FF6F4C"/>
 </svg>
