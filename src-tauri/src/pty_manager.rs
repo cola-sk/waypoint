@@ -1,14 +1,15 @@
 use std::{
     collections::HashMap,
-    env,
+    env, fs,
     io::{Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     sync::Arc,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use base64::Engine;
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
@@ -16,11 +17,23 @@ use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 const RING_LIMIT_CHARS: usize = 200_000;
-const HANDOVER_CONTEXT_CHARS: usize = 40_000;
-const GIT_OUTPUT_LIMIT_CHARS: usize = 60_000;
+const INPUT_RING_LIMIT_CHARS: usize = 40_000;
+const RENDER_RING_LIMIT_BYTES: usize = 400_000;
+const CHAT_HISTORY_LIMIT: usize = 200;
+const CHAT_MESSAGE_CONTENT_LIMIT_CHARS: usize = 120_000;
+const CHAT_STREAM_IDLE_FINALIZE_MS: u64 = 1_200;
+const WAYPOINT_HANDOVER_FILE_ENV: &str = "WAYPOINT_HANDOVER_FILE";
+const HANDOVER_CONTEXT_CHARS: usize = 20_000;
+const HANDOVER_USER_INPUT_CHARS: usize = 4_000;
+const COMPACT_HANDOVER_CONTEXT_CHARS: usize = 4_000;
+const COMPACT_USER_INPUT_CHARS: usize = 1_500;
+const COMPACT_GIT_STATUS_CHARS: usize = 4_000;
+const GIT_OUTPUT_LIMIT_CHARS: usize = 30_000;
 const HANDOVER_INJECT_ATTEMPTS: usize = 8;
 const HANDOVER_INJECT_DELAY_MS: u64 = 350;
 const CODEX_HANDOVER_STARTUP_DELAY_MS: u64 = 1_800;
+const MAX_PTY_ROWS: u16 = 240;
+const MAX_PTY_COLS: u16 = 600;
 
 #[derive(Default)]
 pub struct AppState {
@@ -38,6 +51,11 @@ struct PtySession {
     master: Mutex<Box<dyn MasterPty + Send>>,
     child: Mutex<Box<dyn Child + Send>>,
     ring: Mutex<String>,
+    input_ring: Mutex<String>,
+    render_ring: Mutex<Vec<u8>>,
+    chat_messages: Mutex<Vec<ChatMessage>>,
+    open_assistant_index: Mutex<Option<usize>>,
+    last_assistant_output_at_ms: Mutex<Option<u64>>,
 }
 
 #[derive(Clone)]
@@ -82,6 +100,7 @@ enum SessionStatus {
 pub struct SessionSnapshot {
     session: SessionInfo,
     replay: String,
+    replay_base64: String,
 }
 
 #[derive(Serialize)]
@@ -91,6 +110,34 @@ pub struct HandoverResult {
     source_session: SessionInfo,
     target_session: SessionInfo,
     mode: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatRole {
+    User,
+    Assistant,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMessage {
+    id: String,
+    role: ChatRole,
+    content: String,
+    pending: bool,
+    created_at: u64,
+    updated_at: u64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionDiffSnapshot {
+    branch: String,
+    status: String,
+    unstaged_diff: String,
+    staged_diff: String,
+    captured_at: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -138,7 +185,7 @@ struct ResolvedAgentCommand {
 #[serde(rename_all = "camelCase")]
 struct PtyDataEvent {
     session_id: String,
-    data: String,
+    data_base64: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -163,7 +210,9 @@ pub fn create_shell_session(
     rows: Option<u16>,
     cols: Option<u16>,
 ) -> Result<SessionInfo, String> {
-    state.manager.create_shell_session(app, title, cwd, rows, cols)
+    state
+        .manager
+        .create_shell_session(app, title, cwd, rows, cols)
 }
 
 #[tauri::command]
@@ -176,9 +225,13 @@ pub fn create_agent_session(
     cols: Option<u16>,
 ) -> Result<SessionInfo, String> {
     if agent_id == "shell" {
-        return state
-            .manager
-            .create_shell_session(app, Some("Shell".to_string()), Some(cwd), rows, cols);
+        return state.manager.create_shell_session(
+            app,
+            Some("Shell".to_string()),
+            Some(cwd),
+            rows,
+            cols,
+        );
     }
     state
         .manager
@@ -298,6 +351,31 @@ pub fn continue_session(
     )
 }
 
+#[tauri::command]
+pub fn send_chat_message(
+    state: State<'_, AppState>,
+    session_id: String,
+    message: String,
+) -> Result<(), String> {
+    state.manager.send_chat_message(&session_id, &message)
+}
+
+#[tauri::command]
+pub fn list_chat_messages(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Vec<ChatMessage>, String> {
+    state.manager.list_chat_messages(&session_id)
+}
+
+#[tauri::command]
+pub fn get_session_diff_snapshot(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<SessionDiffSnapshot, String> {
+    state.manager.get_session_diff_snapshot(&session_id)
+}
+
 impl SessionManager {
     fn create_shell_session(
         &self,
@@ -324,6 +402,7 @@ impl SessionManager {
             cwd,
             rows,
             cols,
+            Vec::new(),
         )
     }
 
@@ -356,6 +435,7 @@ impl SessionManager {
             cwd,
             rows,
             cols,
+            Vec::new(),
         )
     }
 
@@ -372,6 +452,7 @@ impl SessionManager {
         cwd: String,
         rows: Option<u16>,
         cols: Option<u16>,
+        extra_env: Vec<(String, String)>,
     ) -> Result<SessionInfo, String> {
         let cwd_path = PathBuf::from(&cwd);
         if !cwd_path.is_dir() {
@@ -383,10 +464,22 @@ impl SessionManager {
         let session_title = format!("{title} {}", &id[..8]);
 
         let pty_system = native_pty_system();
+        let initial_rows = rows.unwrap_or(30);
+        let initial_cols = cols.unwrap_or(100);
+        let initial_rows = if initial_rows < 5 {
+            30
+        } else {
+            initial_rows.min(MAX_PTY_ROWS)
+        };
+        let initial_cols = if initial_cols < 10 {
+            100
+        } else {
+            initial_cols.min(MAX_PTY_COLS)
+        };
         let pair = pty_system
             .openpty(PtySize {
-                rows: rows.unwrap_or(30),
-                cols: cols.unwrap_or(100),
+                rows: initial_rows,
+                cols: initial_cols,
                 pixel_width: 0,
                 pixel_height: 0,
             })
@@ -399,6 +492,9 @@ impl SessionManager {
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("WT_SESSION", "waypoint");
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
         cmd.cwd(cwd_path);
 
         let child = pair
@@ -435,6 +531,11 @@ impl SessionManager {
             master: Mutex::new(pair.master),
             child: Mutex::new(child),
             ring: Mutex::new(String::new()),
+            input_ring: Mutex::new(String::new()),
+            render_ring: Mutex::new(Vec::new()),
+            chat_messages: Mutex::new(Vec::new()),
+            open_assistant_index: Mutex::new(None),
+            last_assistant_output_at_ms: Mutex::new(None),
         });
 
         self.sessions.lock().insert(id.clone(), session.clone());
@@ -447,6 +548,7 @@ impl SessionManager {
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {
+                        reader_session.finalize_open_assistant_message();
                         reader_session.mark_status(SessionStatus::Exited);
                         let _ = reader_app.emit(
                             "session:exited",
@@ -458,16 +560,22 @@ impl SessionManager {
                     }
                     Ok(n) => {
                         let data = String::from_utf8_lossy(&buf[..n]).to_string();
+                        let chat_chunk = clean_chat_chunk(&data);
+                        let replace_chat = has_chat_repaint_hint(&data);
+                        let encoded = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
                         reader_session.append_ring(&data);
+                        reader_session.append_render(&buf[..n]);
+                        reader_session.append_chat_assistant_output(&chat_chunk, replace_chat);
                         let _ = reader_app.emit(
                             "pty:data",
                             PtyDataEvent {
                                 session_id: reader_id.clone(),
-                                data,
+                                data_base64: encoded,
                             },
                         );
                     }
                     Err(err) => {
+                        reader_session.finalize_open_assistant_message();
                         reader_session.mark_status(SessionStatus::Error);
                         let _ = reader_app.emit(
                             "session:error",
@@ -512,9 +620,11 @@ impl SessionManager {
             meta.last_active_at = unix_timestamp();
         }
         let replay = session.ring.lock().clone();
+        let replay_bytes = session.render_ring.lock().clone();
         Ok(SessionSnapshot {
             session: session.info(),
             replay,
+            replay_base64: base64::engine::general_purpose::STANDARD.encode(replay_bytes),
         })
     }
 
@@ -528,6 +638,7 @@ impl SessionManager {
 
     fn write_session(&self, session_id: &str, data: String) -> Result<(), String> {
         let session = self.get(session_id)?;
+        session.append_input(&data);
         session
             .writer
             .lock()
@@ -537,7 +648,58 @@ impl SessionManager {
         Ok(())
     }
 
+    fn send_chat_message(&self, session_id: &str, message: &str) -> Result<(), String> {
+        let session = self.get(session_id)?;
+        let payload = message.trim();
+        if payload.is_empty() {
+            return Ok(());
+        }
+        let normalized = payload.replace('\n', "\r");
+        let injected = format!("{normalized}\r");
+        session
+            .writer
+            .lock()
+            .write_all(injected.as_bytes())
+            .map_err(|err| format!("failed to write chat message to PTY: {err}"))?;
+        session.append_chat_user_message(payload);
+        session.append_input(&format!("{payload}\n"));
+        session.meta.lock().last_active_at = unix_timestamp();
+        Ok(())
+    }
+
+    fn list_chat_messages(&self, session_id: &str) -> Result<Vec<ChatMessage>, String> {
+        let session = self.get(session_id)?;
+        session.finalize_open_assistant_message_if_idle(CHAT_STREAM_IDLE_FINALIZE_MS);
+        let messages = session.chat_messages.lock().clone();
+        Ok(messages)
+    }
+
+    fn get_session_diff_snapshot(&self, session_id: &str) -> Result<SessionDiffSnapshot, String> {
+        let session = self.get(session_id)?;
+        let info = session.info();
+        let branch = git_command(&info.cwd, &["branch", "--show-current"])
+            .unwrap_or_else(|| "unknown".to_string());
+        let status = git_command(&info.cwd, &["status", "--short"])
+            .unwrap_or_else(|| "git status unavailable".to_string());
+        let unstaged_diff =
+            git_command(&info.cwd, &["diff"]).unwrap_or_else(|| "git diff unavailable".to_string());
+        let staged_diff = git_command(&info.cwd, &["diff", "--staged"])
+            .unwrap_or_else(|| "git staged diff unavailable".to_string());
+        Ok(SessionDiffSnapshot {
+            branch: empty_fallback(&branch, "unknown").to_string(),
+            status: empty_fallback(&status, "clean or unavailable").to_string(),
+            unstaged_diff: empty_fallback(&unstaged_diff, "No unstaged diff.").to_string(),
+            staged_diff: empty_fallback(&staged_diff, "No staged diff.").to_string(),
+            captured_at: unix_timestamp(),
+        })
+    }
+
     fn resize_session(&self, session_id: &str, rows: u16, cols: u16) -> Result<(), String> {
+        if rows < 5 || cols < 10 {
+            return Ok(());
+        }
+        let rows = rows.min(MAX_PTY_ROWS);
+        let cols = cols.min(MAX_PTY_COLS);
         let session = self.get(session_id)?;
         session
             .master
@@ -578,10 +740,16 @@ impl SessionManager {
         let source_info = source.info();
         let target_info = target.info();
         if !matches!(source_info.status, SessionStatus::Running) {
-            return Err(format!("source session is not running: {}", source_info.title));
+            return Err(format!(
+                "source session is not running: {}",
+                source_info.title
+            ));
         }
         if !matches!(target_info.status, SessionStatus::Running) {
-            return Err(format!("target session is not running: {}", target_info.title));
+            return Err(format!(
+                "target session is not running: {}",
+                target_info.title
+            ));
         }
 
         let prompt = self.inject_handover(&source, &target, note, false)?;
@@ -607,11 +775,38 @@ impl SessionManager {
         let source = self.get(source_session_id)?;
         let source_info = source.info();
         if !matches!(source_info.status, SessionStatus::Running) {
-            return Err(format!("source session is not running: {}", source_info.title));
+            return Err(format!(
+                "source session is not running: {}",
+                source_info.title
+            ));
         }
 
         if target_agent_id == "gemini" {
             return self.continue_gemini_with_initial_prompt(
+                app,
+                &source,
+                source_info,
+                cwd,
+                note,
+                rows,
+                cols,
+            );
+        }
+
+        if target_agent_id == "claude-code" {
+            return self.continue_claude_with_initial_prompt(
+                app,
+                &source,
+                source_info,
+                cwd,
+                note,
+                rows,
+                cols,
+            );
+        }
+
+        if target_agent_id == "codex" {
+            return self.continue_codex_with_initial_prompt(
                 app,
                 &source,
                 source_info,
@@ -644,6 +839,70 @@ impl SessionManager {
         })
     }
 
+    fn continue_claude_with_initial_prompt(
+        &self,
+        app: AppHandle,
+        source: &Arc<PtySession>,
+        source_info: SessionInfo,
+        cwd: String,
+        note: Option<String>,
+        rows: Option<u16>,
+        cols: Option<u16>,
+    ) -> Result<HandoverResult, String> {
+        let definition = agent_definitions()
+            .into_iter()
+            .find(|definition| definition.id == "claude-code")
+            .ok_or_else(|| "Claude Code preset is missing".to_string())?;
+        let resolved = resolve_agent_command(&definition).ok_or_else(|| {
+            "Claude Code is not available in PATH. Install it or make sure your login shell can resolve it."
+                .to_string()
+        })?;
+        let planned_target = SessionInfo {
+            id: "pending".to_string(),
+            agent_id: definition.id.to_string(),
+            agent_name: definition.name.to_string(),
+            title: "Claude Code new session".to_string(),
+            command: "claude <handover>".to_string(),
+            cwd: cwd.clone(),
+            status: SessionStatus::Running,
+            attached: false,
+            created_at: unix_timestamp(),
+            last_active_at: unix_timestamp(),
+        };
+        let prompt =
+            self.build_compact_handover_prompt_for(source, &source_info, &planned_target, note);
+
+        let handover_path = write_handover_file(&cwd, &prompt)?;
+        let startup_prompt = handover_reference_startup_prompt();
+
+        let mut args = resolved.args;
+        args.push(startup_prompt);
+
+        let target_info = self.spawn_session(
+            app,
+            definition.id,
+            definition.name,
+            definition.name.to_string(),
+            "claude <handover>".to_string(),
+            resolved.executable,
+            args,
+            cwd,
+            rows,
+            cols,
+            vec![(
+                WAYPOINT_HANDOVER_FILE_ENV.to_string(),
+                handover_path.to_string_lossy().into_owned(),
+            )],
+        )?;
+
+        Ok(HandoverResult {
+            prompt,
+            source_session: source_info,
+            target_session: target_info,
+            mode: "new-session".to_string(),
+        })
+    }
+
     fn continue_gemini_with_initial_prompt(
         &self,
         app: AppHandle,
@@ -667,28 +926,96 @@ impl SessionManager {
             agent_id: definition.id.to_string(),
             agent_name: definition.name.to_string(),
             title: "Gemini CLI new session".to_string(),
-            command: "gemini --prompt-interactive <handover>".to_string(),
+            command: "gemini --screen-reader --prompt-interactive <handover-inline>".to_string(),
             cwd: cwd.clone(),
             status: SessionStatus::Running,
             attached: false,
             created_at: unix_timestamp(),
             last_active_at: unix_timestamp(),
         };
-        let prompt = self.build_handover_prompt_for(source, &source_info, &planned_target, note);
+        let prompt =
+            self.build_compact_handover_prompt_for(source, &source_info, &planned_target, note);
+        let startup_prompt = handover_inline_startup_prompt(&prompt);
         let mut args = resolved.args;
         args.push("--prompt-interactive".to_string());
-        args.push(prompt.clone());
+        args.push(startup_prompt);
         let target_info = self.spawn_session(
             app,
             definition.id,
             definition.name,
             definition.name.to_string(),
-            "gemini --prompt-interactive <handover>".to_string(),
+            "gemini --screen-reader --prompt-interactive <handover-inline>".to_string(),
             resolved.executable,
             args,
             cwd,
             rows,
             cols,
+            Vec::new(),
+        )?;
+
+        Ok(HandoverResult {
+            prompt,
+            source_session: source_info,
+            target_session: target_info,
+            mode: "new-session".to_string(),
+        })
+    }
+
+    fn continue_codex_with_initial_prompt(
+        &self,
+        app: AppHandle,
+        source: &Arc<PtySession>,
+        source_info: SessionInfo,
+        cwd: String,
+        note: Option<String>,
+        rows: Option<u16>,
+        cols: Option<u16>,
+    ) -> Result<HandoverResult, String> {
+        let definition = agent_definitions()
+            .into_iter()
+            .find(|definition| definition.id == "codex")
+            .ok_or_else(|| "Codex CLI preset is missing".to_string())?;
+        let resolved = resolve_agent_command(&definition).ok_or_else(|| {
+            "Codex CLI is not available in PATH. Install it or make sure your login shell can resolve it."
+                .to_string()
+        })?;
+        let planned_target = SessionInfo {
+            id: "pending".to_string(),
+            agent_id: definition.id.to_string(),
+            agent_name: definition.name.to_string(),
+            title: "Codex new session".to_string(),
+            command: "codex --no-alt-screen --disable terminal_resize_reflow <handover>"
+                .to_string(),
+            cwd: cwd.clone(),
+            status: SessionStatus::Running,
+            attached: false,
+            created_at: unix_timestamp(),
+            last_active_at: unix_timestamp(),
+        };
+        let prompt =
+            self.build_compact_handover_prompt_for(source, &source_info, &planned_target, note);
+
+        let handover_path = write_handover_file(&cwd, &prompt)?;
+        let startup_prompt = handover_reference_startup_prompt();
+
+        let mut args = resolved.args;
+        args.push(startup_prompt);
+
+        let target_info = self.spawn_session(
+            app,
+            definition.id,
+            definition.name,
+            definition.name.to_string(),
+            "codex --no-alt-screen --disable terminal_resize_reflow <handover>".to_string(),
+            resolved.executable,
+            args,
+            cwd,
+            rows,
+            cols,
+            vec![(
+                WAYPOINT_HANDOVER_FILE_ENV.to_string(),
+                handover_path.to_string_lossy().into_owned(),
+            )],
         )?;
 
         Ok(HandoverResult {
@@ -710,12 +1037,25 @@ impl SessionManager {
         let target_info = target.info();
         let prompt = self.build_handover_prompt_for(source, &source_info, &target_info, note);
 
+        let handover_path = write_handover_file(&target_info.cwd, &prompt)?;
+        let display_path = handover_path
+            .strip_prefix(&target_info.cwd)
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| handover_path.display().to_string());
+        let short_instruction = if target_info.agent_id == "shell" {
+            format!("# Handover context saved in {display_path}")
+        } else {
+            format!(
+                "A handover context file is referenced at {display_path}. For now, acknowledge briefly and wait for my next instruction. Before executing any user task, first read the referenced handover file to load context, then continue."
+            )
+        };
+
         if target_is_new {
             thread::sleep(Duration::from_millis(handover_startup_delay_ms(
                 &target_info.agent_id,
             )));
         }
-        inject_with_retry(target, &prompt)?;
+        inject_with_retry(target, &short_instruction)?;
         target.meta.lock().last_active_at = unix_timestamp();
 
         Ok(prompt)
@@ -728,7 +1068,9 @@ impl SessionManager {
         target_info: &SessionInfo,
         note: Option<String>,
     ) -> String {
-        let recent_context = tail_chars(&source.ring.lock(), HANDOVER_CONTEXT_CHARS);
+        let recent_context = clean_terminal_output(&source.ring.lock(), HANDOVER_CONTEXT_CHARS);
+        let recent_user_inputs =
+            clean_terminal_input(&source.input_ring.lock(), HANDOVER_USER_INPUT_CHARS);
         let git_status = git_command(&source_info.cwd, &["status", "--short"])
             .unwrap_or_else(|| "git status unavailable".to_string());
         let git_branch = git_command(&source_info.cwd, &["branch", "--show-current"])
@@ -746,6 +1088,30 @@ impl SessionManager {
             &git_diff,
             &staged_diff,
             &recent_context,
+            &recent_user_inputs,
+        )
+    }
+
+    fn build_compact_handover_prompt_for(
+        &self,
+        source: &Arc<PtySession>,
+        source_info: &SessionInfo,
+        target_info: &SessionInfo,
+        note: Option<String>,
+    ) -> String {
+        let recent_context =
+            clean_terminal_output(&source.ring.lock(), COMPACT_HANDOVER_CONTEXT_CHARS);
+        let recent_user_inputs =
+            clean_terminal_input(&source.input_ring.lock(), COMPACT_USER_INPUT_CHARS);
+        let git_status = git_command(&source_info.cwd, &["status", "--short"])
+            .unwrap_or_else(|| "git status unavailable".to_string());
+        build_compact_handover_prompt(
+            source_info,
+            target_info,
+            note.as_deref().unwrap_or_default(),
+            &tail_chars(&git_status, COMPACT_GIT_STATUS_CHARS),
+            &recent_context,
+            &recent_user_inputs,
         )
     }
 
@@ -782,6 +1148,126 @@ impl PtySession {
                 .rev()
                 .collect();
         }
+    }
+
+    fn append_input(&self, data: &str) {
+        let mut input_ring = self.input_ring.lock();
+        input_ring.push_str(data);
+        if input_ring.chars().count() > INPUT_RING_LIMIT_CHARS {
+            *input_ring = input_ring
+                .chars()
+                .rev()
+                .take(INPUT_RING_LIMIT_CHARS)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+        }
+    }
+
+    fn append_render(&self, data: &[u8]) {
+        let mut render_ring = self.render_ring.lock();
+        render_ring.extend_from_slice(data);
+        if render_ring.len() > RENDER_RING_LIMIT_BYTES {
+            let drop_len = render_ring.len() - RENDER_RING_LIMIT_BYTES;
+            render_ring.drain(0..drop_len);
+        }
+    }
+
+    fn append_chat_user_message(&self, content: &str) {
+        let mut open_assistant_index = self.open_assistant_index.lock();
+        let mut messages = self.chat_messages.lock();
+
+        if let Some(index) = *open_assistant_index {
+            if let Some(message) = messages.get_mut(index) {
+                message.pending = false;
+                message.updated_at = unix_timestamp();
+            }
+            *open_assistant_index = None;
+        }
+
+        let now = unix_timestamp();
+        messages.push(ChatMessage {
+            id: Uuid::new_v4().to_string(),
+            role: ChatRole::User,
+            content: content.to_string(),
+            pending: false,
+            created_at: now,
+            updated_at: now,
+        });
+
+        trim_chat_messages(&mut messages, &mut open_assistant_index);
+    }
+
+    fn append_chat_assistant_output(&self, chunk: &str, replace_existing: bool) {
+        if chunk.is_empty() {
+            return;
+        }
+
+        let mut open_assistant_index = self.open_assistant_index.lock();
+        let mut messages = self.chat_messages.lock();
+        let now = unix_timestamp();
+
+        let index = match *open_assistant_index {
+            Some(existing) => existing,
+            None => {
+                messages.push(ChatMessage {
+                    id: Uuid::new_v4().to_string(),
+                    role: ChatRole::Assistant,
+                    content: String::new(),
+                    pending: true,
+                    created_at: now,
+                    updated_at: now,
+                });
+                let created_index = messages.len() - 1;
+                *open_assistant_index = Some(created_index);
+                created_index
+            }
+        };
+
+        if let Some(message) = messages.get_mut(index) {
+            if replace_existing {
+                message.content = chunk.to_string();
+            } else if !message.content.ends_with(chunk) {
+                message.content.push_str(chunk);
+            }
+            if message.content.chars().count() > CHAT_MESSAGE_CONTENT_LIMIT_CHARS {
+                message.content = truncate_tail(&message.content, CHAT_MESSAGE_CONTENT_LIMIT_CHARS);
+            }
+            message.pending = true;
+            message.updated_at = now;
+            *self.last_assistant_output_at_ms.lock() = Some(unix_timestamp_ms());
+        } else {
+            *open_assistant_index = None;
+        }
+
+        trim_chat_messages(&mut messages, &mut open_assistant_index);
+    }
+
+    fn finalize_open_assistant_message(&self) {
+        let mut open_assistant_index = self.open_assistant_index.lock();
+        let mut messages = self.chat_messages.lock();
+        if let Some(index) = *open_assistant_index {
+            if let Some(message) = messages.get_mut(index) {
+                message.pending = false;
+                message.updated_at = unix_timestamp();
+            }
+            *open_assistant_index = None;
+            *self.last_assistant_output_at_ms.lock() = None;
+        }
+    }
+
+    fn finalize_open_assistant_message_if_idle(&self, idle_ms: u64) {
+        let last_output = *self.last_assistant_output_at_ms.lock();
+        let Some(last_output) = last_output else {
+            return;
+        };
+
+        if unix_timestamp_ms().saturating_sub(last_output) < idle_ms {
+            return;
+        }
+
+        self.finalize_open_assistant_message();
     }
 }
 
@@ -828,8 +1314,8 @@ fn agent_definitions() -> Vec<AgentDefinition> {
             description: "OpenAI Codex CLI",
             candidates: &[CommandCandidate {
                 executable: "codex",
-                args: &["--no-alt-screen"],
-                display: "codex --no-alt-screen",
+                args: &["--no-alt-screen", "--disable", "terminal_resize_reflow"],
+                display: "codex --no-alt-screen --disable terminal_resize_reflow",
                 verify: VerifyStrategy::CommandExists,
             }],
         },
@@ -839,8 +1325,8 @@ fn agent_definitions() -> Vec<AgentDefinition> {
             description: "Google Gemini CLI",
             candidates: &[CommandCandidate {
                 executable: "gemini",
-                args: &[],
-                display: "gemini",
+                args: &["--screen-reader"],
+                display: "gemini --screen-reader",
                 verify: VerifyStrategy::CommandExists,
             }],
         },
@@ -874,10 +1360,9 @@ fn resolve_candidate(candidate: &CommandCandidate) -> Option<ResolvedAgentComman
     let executable_path = resolve_executable(candidate.executable)?;
     let verified = match candidate.verify {
         VerifyStrategy::CommandExists => true,
-        VerifyStrategy::ShellHelp(command) => run_login_shell_status(&format!(
-            "{} >/dev/null 2>&1",
-            command
-        )),
+        VerifyStrategy::ShellHelp(command) => {
+            run_login_shell_status(&format!("{} >/dev/null 2>&1", command))
+        }
     };
     if !verified {
         return None;
@@ -935,6 +1420,32 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+fn write_handover_file(cwd: &str, prompt: &str) -> Result<PathBuf, String> {
+    let dir = Path::new(cwd).join(".waypoint").join("handovers");
+    fs::create_dir_all(&dir).map_err(|err| {
+        format!(
+            "failed to create handover directory {}: {err}",
+            dir.display()
+        )
+    })?;
+    let path = dir.join(format!("handover-{}.md", Uuid::new_v4()));
+    fs::write(&path, prompt)
+        .map_err(|err| format!("failed to write handover file {}: {err}", path.display()))?;
+    Ok(path)
+}
+
+fn handover_reference_startup_prompt() -> String {
+    format!(
+        "Initialization step for this new session: read the handover file path from the {WAYPOINT_HANDOVER_FILE_ENV} environment variable now (this read is explicitly allowed). After loading context, send one brief acknowledgment (max 2-3 sentences) and wait for my next instruction. This initialization is one-time only for session start; do not repeat it in later turns."
+    )
+}
+
+fn handover_inline_startup_prompt(handover: &str) -> String {
+    format!(
+        "Initialization step for this new session: the handover context is provided inline in this message. Do not run tools or shell/file reads during initialization. After loading context, send one brief acknowledgment (max 2-3 sentences) and wait for my next instruction. This initialization is one-time only for session start; do not repeat it in later turns.\n\n{handover}"
+    )
+}
+
 fn handover_startup_delay_ms(agent_id: &str) -> u64 {
     match agent_id {
         "codex" => CODEX_HANDOVER_STARTUP_DELAY_MS,
@@ -951,6 +1462,7 @@ fn build_handover_prompt(
     git_diff: &str,
     staged_diff: &str,
     recent_context: &str,
+    recent_user_inputs: &str,
 ) -> String {
     format!(
         r#"# Handover
@@ -995,12 +1507,18 @@ You are continuing work from another local agent session inside waypoint.
 {recent_context}
 ```
 
+## Recent User Inputs (best effort)
+```text
+{recent_user_inputs}
+```
+
 ## Instructions
-- Continue from the current workspace state.
+- This file is a context snapshot from a previous agent session.
+- Use it to preserve continuity with the current workspace state.
+- Do not treat this file as a standing instruction to pause or re-initialize on every turn.
 - Do not revert unrelated user changes.
 - Preserve existing user edits.
 - Ask before destructive operations.
-- Start by briefly acknowledging what you understand, then continue the next useful step.
 "#,
         source_agent = source.agent_name,
         source_title = source.title,
@@ -1020,6 +1538,69 @@ You are continuing work from another local agent session inside waypoint.
         git_diff = empty_fallback(git_diff, "No unstaged diff."),
         staged_diff = empty_fallback(staged_diff, "No staged diff."),
         recent_context = empty_fallback(recent_context, "No recent terminal context captured."),
+        recent_user_inputs = empty_fallback(recent_user_inputs, "No recent user input captured."),
+    )
+}
+
+fn build_compact_handover_prompt(
+    source: &SessionInfo,
+    target: &SessionInfo,
+    note: &str,
+    git_status: &str,
+    recent_context: &str,
+    recent_user_inputs: &str,
+) -> String {
+    format!(
+        r#"# Waypoint Handover
+
+Continue from the previous local agent session.
+
+## Source
+- Agent: {source_agent}
+- Title: {source_title}
+- Workspace: {source_cwd}
+
+## Target
+- Agent: {target_agent}
+- Workspace: {target_cwd}
+
+## User Note
+{note}
+
+## Current Git Status
+```text
+{git_status}
+```
+
+## Recent Source Context
+```text
+{recent_context}
+```
+
+## Recent User Inputs (best effort)
+```text
+{recent_user_inputs}
+```
+
+## Instructions
+- This file is a context snapshot from a previous agent session.
+- Use it to preserve continuity with the current workspace state.
+- Do not treat this file as a standing instruction to pause or re-initialize on every turn.
+- Do not revert unrelated user changes.
+"#,
+        source_agent = source.agent_name,
+        source_title = source.title,
+        source_cwd = source.cwd,
+        target_agent = target.agent_name,
+        target_cwd = target.cwd,
+        note = if note.trim().is_empty() {
+            "No additional note."
+        } else {
+            note.trim()
+        },
+        git_status = empty_fallback(git_status, "clean or unavailable"),
+        recent_context = empty_fallback(recent_context, "No recent terminal context captured."),
+        recent_user_inputs = empty_fallback(recent_user_inputs, "No recent user input captured."),
     )
 }
 
@@ -1059,8 +1640,246 @@ fn inject_with_retry(target: &Arc<PtySession>, prompt: &str) -> Result<(), Strin
     ))
 }
 
+fn trim_chat_messages(messages: &mut Vec<ChatMessage>, open_assistant_index: &mut Option<usize>) {
+    if messages.len() <= CHAT_HISTORY_LIMIT {
+        return;
+    }
+
+    let drop_count = messages.len() - CHAT_HISTORY_LIMIT;
+    messages.drain(0..drop_count);
+
+    if let Some(index) = *open_assistant_index {
+        *open_assistant_index = index.checked_sub(drop_count);
+    }
+}
+
+fn truncate_tail(value: &str, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        return value.to_string();
+    }
+    value
+        .chars()
+        .rev()
+        .take(limit)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+fn clean_chat_chunk(raw: &str) -> String {
+    let stripped = strip_ansi(raw);
+    // Normalize \r\n -> \n first so that normal PTY newlines don't interfere with
+    // the \r-based cursor-overwrite simulation below.
+    let normalized_newlines = stripped.replace("\r\n", "\n");
+    let mut cleaned_lines = Vec::new();
+
+    for raw_line in normalized_newlines.split('\n') {
+        // For each \n-delimited line, simulate bare \r cursor-return overwriting:
+        // collect all \r-separated segments, apply them sequentially to a buffer,
+        // then use the final visible buffer state.
+        let mut line_buf = String::new();
+        for segment in raw_line.split('\r') {
+            // Each \r resets the virtual cursor to column 0 and overwrites from there.
+            let seg_clean: String = segment
+                .chars()
+                .filter(|c| *c == '\t' || (*c >= ' ' && *c != '\x7f'))
+                .collect();
+            let seg_len = seg_clean.chars().count();
+            let buf_len = line_buf.chars().count();
+            if seg_len >= buf_len {
+                line_buf = seg_clean;
+            } else if seg_len > 0 {
+                // Overwrite only the first seg_len chars
+                let rest: String = line_buf.chars().skip(seg_len).collect();
+                line_buf = format!("{}{}", seg_clean, rest);
+            }
+            // seg_len == 0: bare \r with no content means no-op (cursor reset but nothing written)
+        }
+
+        let normalized = line_buf.trim_end().to_string();
+        if looks_like_tui_noise_line(&normalized) {
+            continue;
+        }
+        cleaned_lines.push(normalized);
+    }
+
+    collapse_blank_lines(&cleaned_lines.join("\n"), 2).trim_end().to_string()
+}
+
+fn has_chat_repaint_hint(raw: &str) -> bool {
+    // Full-screen repaint sequences
+    if raw.contains("\x1b[2J")
+        || raw.contains("\x1b[H")
+        || raw.contains("\x1b[1;1H")
+        || raw.contains("\x1b[?1049h")
+        || raw.contains("\x1b[?1049l")
+    {
+        return true;
+    }
+    // Detect bare \r (not part of \r\n) — these are in-place spinner redraws.
+    // We scan the raw bytes directly to distinguish \r\n (normal PTY newline)
+    // from a lone \r (cursor-return overwrite used by spinner animations).
+    let raw_bytes = raw.as_bytes();
+    for i in 0..raw_bytes.len() {
+        if raw_bytes[i] == b'\r' {
+            let next = raw_bytes.get(i + 1).copied().unwrap_or(0);
+            if next != b'\n' {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn looks_like_tui_noise_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // Filter out simple prompt-only lines
+    if trimmed == ">" || trimmed == "?" || trimmed == "$" || trimmed == "|" {
+        return true;
+    }
+
+    let total_chars = trimmed.chars().count();
+
+    // Filter very short lines (≤4 chars) that have no alphanumeric content — TUI fragments like "G|", "|>"
+    if total_chars <= 4 && !trimmed.chars().any(|c| c.is_alphanumeric()) {
+        return true;
+    }
+
+    // Filter out path prompt lines, including those starting with | (e.g. |~/coding/waypoint/src-tauri||>)
+    // Uses specific patterns to avoid false-positives on code with | operators.
+    let prompt_candidate = trimmed.trim_start_matches('|').trim_start_matches(' ');
+    if (prompt_candidate.starts_with('~')
+        || prompt_candidate.starts_with('/')
+        || prompt_candidate.contains(":\\"))
+        && (trimmed.ends_with('>')
+            || trimmed.ends_with('$')
+            || trimmed.contains('│')
+            || trimmed.contains("||>"))
+    {
+        return true;
+    }
+
+    // Lines starting with a spinner symbol are Claude Code status lines (e.g. "⏺ Thinking...")
+    let spinner_starts: &[char] = &['⏺', '·', '●', '○', '◯'];
+    if let Some(first_char) = trimmed.chars().next() {
+        if spinner_starts.contains(&first_char) {
+            return true;
+        }
+    }
+
+    // Detect animation-artifact lines: high density of * and + mixed with alphanumeric.
+    // These come from spinner frames being concatenated via \r overwriting.
+    if total_chars > 10 {
+        let noise_chars = trimmed
+            .chars()
+            .filter(|c| *c == '*' || *c == '+' || *c == '·' || *c == '●' || *c == '⏺')
+            .count();
+        // If more than ~14% of chars are animation noise markers, treat as TUI artifact
+        if noise_chars * 7 >= total_chars {
+            return true;
+        }
+    }
+
+    // Normalize string to lowercase, keep only alphanumeric for keyword matching
+    let normalized: String = trimmed
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect();
+
+    // Common TUI status / interactive UI keywords
+    if normalized.contains("esctointerrupt")
+        || normalized.contains("forshortcuts")
+        || normalized.contains("swirling")
+        || normalized.contains("thundering")
+        || normalized.contains("releasenotes")
+        || normalized.contains("welcomeback")
+        || normalized.contains("claudecode")
+        || normalized.contains("apiusagebilling")
+        || normalized.contains("whatsnew")
+        || normalized.contains("tipsforgettingstarted")
+        || normalized.contains("alternatescreen")
+        || normalized.contains("ctrlv")
+        || normalized.contains("pasting")
+        || normalized.contains("effort")
+        || normalized.contains("mcpserver")
+        || normalized.contains("mcpneedsauth")
+    {
+        return true;
+    }
+
+    // "thinking" keyword lines that also contain animation punctuation are spinner status lines
+    if normalized.contains("thinking")
+        && (trimmed.contains('*')
+            || trimmed.contains('+')
+            || trimmed.contains('·')
+            || trimmed.contains('●')
+            || trimmed.contains('⏺')
+            || trimmed.contains('>'))
+    {
+        return true;
+    }
+
+    // Box-drawing character dominated lines (TUI borders)
+    let box_chars = [
+        '│', '┃', '─', '━', '┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼', '╭', '╮', '╯', '╰',
+        '█', '▌', '▐', '▄', '▀', '■', '□',
+    ];
+    let box_count = trimmed.chars().filter(|c| box_chars.contains(c)).count();
+    let has_text = trimmed.chars().any(|c| c.is_alphanumeric());
+
+    if box_count * 3 >= total_chars && !has_text {
+        return true;
+    }
+
+    // Long separator lines
+    if total_chars > 30
+        && trimmed
+            .chars()
+            .all(|c| c == '-' || c == '=' || c == '_' || c == '.' || c == ' ' || c == '|')
+    {
+        return true;
+    }
+
+    false
+}
+
+fn collapse_blank_lines(input: &str, max_blank_run: usize) -> String {
+    let mut out = String::new();
+    let mut blank_run = 0;
+
+    for line in input.split('\n') {
+        if line.trim().is_empty() {
+            blank_run += 1;
+            if blank_run <= max_blank_run {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+            }
+            continue;
+        }
+
+        blank_run = 0;
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(line.trim_end());
+    }
+
+    out
+}
+
 fn git_command(cwd: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new("git").args(args).current_dir(cwd).output().ok()?;
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -1096,4 +1915,254 @@ fn unix_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default()
+}
+
+fn unix_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+/// Clean raw PTY output for use in handover context.
+///
+/// Steps:
+/// 1. Strip all ANSI escape sequences (CSI, OSC, etc.)
+/// 2. Simulate carriage return (\r) overwriting: for each line, apply \r
+///    so that text after \r replaces text from the beginning of the line.
+/// 3. Remove common TUI spinner / decoration characters.
+/// 4. Collapse runs of blank or near-blank lines.
+/// 5. Truncate to the last `limit` characters.
+fn clean_terminal_output(raw: &str, limit: usize) -> String {
+    // Step 1: strip ANSI escape sequences
+    let stripped = strip_ansi(raw);
+
+    // Step 2: simulate \r overwriting per line and remove control chars
+    let mut clean_lines: Vec<String> = Vec::new();
+    for raw_line in stripped.split('\n') {
+        let segments: Vec<&str> = raw_line.split('\r').collect();
+        // The last non-empty segment after splitting by \r is what's visible
+        let visible = segments
+            .iter()
+            .rev()
+            .find(|s| !s.is_empty())
+            .copied()
+            .unwrap_or("");
+        // Remove remaining control characters (< 0x20 except tab)
+        let cleaned: String = visible
+            .chars()
+            .filter(|c| *c == '\t' || (*c >= ' ' && *c != '\x7f'))
+            .collect();
+        clean_lines.push(cleaned);
+    }
+
+    // Step 3: remove TUI spinner / decoration characters
+    let spinner_chars: &[char] = &[
+        '✢', '✳', '✶', '✻', '✽', '⏺', '⠂', '⠐',
+        '·', // middle dot used as separator in TUI status bars
+    ];
+    let clean_lines: Vec<String> = clean_lines
+        .into_iter()
+        .map(|line| {
+            let trimmed = line.trim();
+            // If the line is ONLY spinner/decoration chars (possibly with spaces), skip it
+            if !trimmed.is_empty()
+                && trimmed
+                    .chars()
+                    .all(|c| spinner_chars.contains(&c) || c == ' ')
+            {
+                String::new()
+            } else {
+                line
+            }
+        })
+        .collect();
+
+    // Step 4: collapse runs of blank lines (keep at most 1)
+    let mut result = String::new();
+    let mut prev_blank = false;
+    for line in &clean_lines {
+        let is_blank = line.trim().is_empty();
+        if is_blank {
+            if !prev_blank {
+                result.push('\n');
+            }
+            prev_blank = true;
+        } else {
+            if !result.is_empty() && !prev_blank {
+                result.push('\n');
+            }
+            result.push_str(line.trim_end());
+            prev_blank = false;
+        }
+    }
+
+    // Step 5: truncate to last `limit` chars
+    tail_chars(&result, limit)
+}
+
+fn clean_terminal_input(raw: &str, limit: usize) -> String {
+    let stripped = strip_ansi(raw);
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for ch in stripped.chars() {
+        match ch {
+            '\r' | '\n' => {
+                let line = current.trim();
+                if !line.is_empty() {
+                    lines.push(line.to_string());
+                }
+                current.clear();
+            }
+            '\x08' | '\x7f' => {
+                current.pop();
+            }
+            c if c >= ' ' && c != '\x7f' => current.push(c),
+            _ => {}
+        }
+    }
+
+    let trailing = current.trim();
+    if !trailing.is_empty() {
+        lines.push(trailing.to_string());
+    }
+
+    tail_chars(&lines.join("\n"), limit)
+}
+
+fn strip_ansi(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum State {
+        Normal,
+        Esc,
+        Csi,
+        Osc,
+        OscEsc,
+    }
+
+    let mut state = State::Normal;
+
+    while let Some(c) = chars.next() {
+        match state {
+            State::Normal => {
+                if c == '\x1b' {
+                    state = State::Esc;
+                } else {
+                    output.push(c);
+                }
+            }
+            State::Esc => match c {
+                '[' => state = State::Csi,
+                ']' => state = State::Osc,
+                '(' | ')' | '#' | '%' | '*' | '+' | '-' | '.' | '/' => {
+                    chars.next();
+                    state = State::Normal;
+                }
+                _ => {
+                    state = State::Normal;
+                }
+            },
+            State::Csi => {
+                let b = c as u32;
+                if (0x40..=0x7E).contains(&b) {
+                    state = State::Normal;
+                }
+            }
+            State::Osc => {
+                if c == '\x07' {
+                    state = State::Normal;
+                } else if c == '\x1b' {
+                    state = State::OscEsc;
+                }
+            }
+            State::OscEsc => {
+                if c == '\\' {
+                    state = State::Normal;
+                } else {
+                    state = State::Osc;
+                }
+            }
+        }
+    }
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_ansi() {
+        assert_eq!(strip_ansi("\x1b[31mHello\x1b[0m"), "Hello");
+        assert_eq!(strip_ansi("\x1b[22G·\x1b[24GAPI"), "·API");
+        assert_eq!(strip_ansi("Normal Text"), "Normal Text");
+        assert_eq!(strip_ansi("\x1b]0;Claude Code\x07Yes"), "Yes");
+    }
+
+    #[test]
+    fn test_clean_terminal_output_strips_spinner_lines() {
+        let input = "Hello\n✻\n✶\n\nWorld";
+        let result = clean_terminal_output(input, 10000);
+        assert!(result.contains("Hello"));
+        assert!(result.contains("World"));
+        assert!(!result.contains('✻'));
+        assert!(!result.contains('✶'));
+    }
+
+    #[test]
+    fn test_clean_terminal_output_handles_cr_overwrite() {
+        // \r causes the cursor to go back to start of line, overwriting
+        let input = "old text\rnew";
+        let result = clean_terminal_output(input, 10000);
+        // "old text" gets overwritten by "new" which starts at col 0
+        assert!(result.contains("new"));
+        assert!(!result.contains("old text"));
+    }
+
+    #[test]
+    fn test_clean_terminal_output_collapses_blank_lines() {
+        let input = "A\n\n\n\n\n\nB";
+        let result = clean_terminal_output(input, 10000);
+        // Should have at most one blank line between A and B
+        assert!(!result.contains("\n\n\n"));
+        assert!(result.contains('A'));
+        assert!(result.contains('B'));
+    }
+
+    #[test]
+    fn test_clean_terminal_output_truncates() {
+        let input = "A".repeat(500);
+        let result = clean_terminal_output(&input, 100);
+        assert!(result.chars().count() <= 130); // 100 + truncation prefix
+    }
+
+    #[test]
+    fn test_clean_terminal_input_preserves_user_text() {
+        let input = "hi\nfoo\x7f\x7fr\n\x1b[A";
+        let result = clean_terminal_input(input, 10000);
+        assert!(result.contains("hi"));
+        assert!(result.contains("fr"));
+        assert!(!result.contains('\x1b'));
+    }
+
+    #[test]
+    fn test_clean_chat_chunk() {
+        let input = "Hello\r\nWorld\r\n";
+        let result = clean_chat_chunk(input);
+        assert_eq!(result, "Hello\nWorld");
+
+        // test carriage return overwrite in the middle of a line
+        let input_cr = "loading... 50%\rloading... 100%\r\ndone\r\n";
+        let result_cr = clean_chat_chunk(input_cr);
+        assert_eq!(result_cr, "loading... 100%\ndone");
+
+        // test TUI noise filtering
+        let noise_input = "┌───ClaudeCodev2.1.144──────────────────────────┐\n││Tipsforgettingstarted│\n?forshortcuts●high·/effort\n* Swirling...\nesctointerrupt●high·/effort+·+***Sw*Sirwliirn*lig...*ng*..\n~/coding/waypoint/src-tauri││>\n>\n?\n";
+        let noise_result = clean_chat_chunk(noise_input);
+        assert_eq!(noise_result, "");
+    }
 }

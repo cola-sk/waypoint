@@ -182,8 +182,10 @@ npm run tauri:dev
 
 ```text
 Gemini CLI:
-  新 session 使用 gemini --prompt-interactive <handover>。
-  这样 Gemini 会先执行 handover prompt，然后继续留在交互模式。
+  waypoint 将完整 handover 写入 .waypoint/handovers/*.md。
+  新 session 使用 gemini --prompt-interactive "Read this handover file..."。
+  这样 Gemini 只接收一段很短的启动 prompt，避免长 diff/context 卡住 TUI。
+  Gemini 的 handover 文件使用 compact 模板：只包含 git status、少量最近上下文和操作指令，不内联完整 diff。
 
 Codex:
   使用 codex --no-alt-screen 启动，减少嵌入式 xterm 中的 alternate screen 闪屏。

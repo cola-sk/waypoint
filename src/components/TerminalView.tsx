@@ -14,15 +14,26 @@ type TerminalViewProps = {
   sessionId: string;
 };
 
+const MIN_ROWS = 5;
+const MIN_COLS = 10;
+const MAX_ROWS = 240;
+const MAX_COLS = 600;
+
+function clampDimension(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
 function TerminalView({ sessionId }: TerminalViewProps) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  const shellRef = useRef<HTMLDivElement | null>(null);
+  const surfaceRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const [status, setStatus] = useState("connecting");
 
   useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
+    const shell = shellRef.current;
+    const surface = surfaceRef.current;
+    if (!shell || !surface) return;
 
     let disposed = false;
     let unlisten: UnlistenFn | null = null;
@@ -34,7 +45,7 @@ function TerminalView({ sessionId }: TerminalViewProps) {
         'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
       fontSize: 13,
       lineHeight: 1.25,
-      convertEol: true,
+      convertEol: false,
       scrollback: 8000,
       theme: {
         background: "#111312",
@@ -62,20 +73,50 @@ function TerminalView({ sessionId }: TerminalViewProps) {
     const fitAddon = new FitAddon();
 
     terminal.loadAddon(fitAddon);
-    terminal.open(container);
+    terminal.open(surface);
     terminal.focus();
 
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
 
+    let lastWidth = 0;
+    let lastHeight = 0;
+
     const fitAndResize = () => {
       if (disposed) return;
-      fitAddon.fit();
-      resizeSession(sessionId, terminal.rows, terminal.cols).catch(() => undefined);
+      if (shell.clientWidth < 100 || shell.clientHeight < 50) {
+        return;
+      }
+
+      const width = shell.clientWidth;
+      const height = shell.clientHeight;
+      if (width === lastWidth && height === lastHeight) {
+        return;
+      }
+
+      try {
+        const dims = fitAddon.proposeDimensions();
+        if (dims) {
+          const rows = clampDimension(dims.rows, MIN_ROWS, MAX_ROWS);
+          const cols = clampDimension(dims.cols, MIN_COLS, MAX_COLS);
+          if (rows !== terminal.rows || cols !== terminal.cols) {
+            terminal.resize(cols, rows);
+            resizeSession(sessionId, rows, cols).catch(() => undefined);
+          }
+        }
+        lastWidth = width;
+        lastHeight = height;
+      } catch (err) {
+        console.warn("Failed to fit terminal:", err);
+      }
+    };
+    let resizeTimeout = 0;
+    const debouncedFitAndResize = () => {
+      window.clearTimeout(resizeTimeout);
+      resizeTimeout = window.setTimeout(fitAndResize, 100);
     };
 
-    const resizeObserver = new ResizeObserver(fitAndResize);
-    resizeObserver.observe(container);
+    window.addEventListener("resize", debouncedFitAndResize);
 
     const dataDisposable = terminal.onData((data) => {
       writeSession(sessionId, data).catch((err) => {
@@ -95,6 +136,11 @@ function TerminalView({ sessionId }: TerminalViewProps) {
           }
         });
         setStatus("attached");
+        setTimeout(() => {
+          if (!disposed) {
+            terminal.focus();
+          }
+        }, 150);
       } catch (err) {
         setStatus("error");
         terminal.writeln(`[waypoint attach error] ${String(err)}`);
@@ -105,9 +151,10 @@ function TerminalView({ sessionId }: TerminalViewProps) {
 
     return () => {
       disposed = true;
+      window.clearTimeout(resizeTimeout);
       detachSession(sessionId).catch(() => undefined);
       dataDisposable.dispose();
-      resizeObserver.disconnect();
+      window.removeEventListener("resize", debouncedFitAndResize);
       unlisten?.();
       terminal.dispose();
       terminalRef.current = null;
@@ -115,9 +162,13 @@ function TerminalView({ sessionId }: TerminalViewProps) {
     };
   }, [sessionId]);
 
+  const handleContainerClick = () => {
+    terminalRef.current?.focus();
+  };
+
   return (
-    <div className="terminal-shell" data-status={status}>
-      <div className="terminal-surface" ref={containerRef} />
+    <div className="terminal-shell" data-status={status} onClick={handleContainerClick} ref={shellRef}>
+      <div className="terminal-surface" ref={surfaceRef} />
     </div>
   );
 }

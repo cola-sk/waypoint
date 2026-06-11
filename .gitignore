@@ -1,5 +1,6 @@
 # Logs and Runtime
 *.log
+.waypoint/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -52,3 +53,4 @@ Desktop.ini
 src-tauri/target/
 src-tauri/gen/
 Cargo.lock.bk
+.claude
