@@ -905,6 +905,109 @@ button {
   opacity: 0.45;
 }
 
+.field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.field label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #d6d3c8;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.field label svg {
+  color: #a9a89f;
+}
+
+.field select,
+.field input,
+.field textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #3e423b;
+  border-radius: 6px;
+  background: #171916;
+  color: #f3f1e8;
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease,
+    background 140ms ease;
+}
+
+.field select,
+.field input {
+  height: 36px;
+  padding: 0 10px;
+}
+
+.field select {
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, #a9a89f 50%),
+    linear-gradient(135deg, #a9a89f 50%, transparent 50%);
+  background-position:
+    calc(100% - 15px) 15px,
+    calc(100% - 10px) 15px;
+  background-repeat: no-repeat;
+  background-size: 5px 5px;
+  padding-right: 34px;
+}
+
+.field textarea {
+  min-height: 104px;
+  resize: vertical;
+  padding: 10px;
+  line-height: 1.45;
+}
+
+.field select:focus,
+.field input:focus,
+.field textarea:focus {
+  border-color: #5eead4;
+  background: #191c18;
+  box-shadow: 0 0 0 3px rgb(94 234 212 / 0.12);
+}
+
+.field textarea::placeholder,
+.field input::placeholder {
+  color: #74786f;
+}
+
+.agent-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid #343832;
+  border-radius: 6px;
+  background: #171916;
+  color: #b9b7ad;
+  font-family:
+    "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 9px 10px;
+}
+
+.agent-status .status-dot {
+  flex: 0 0 auto;
+  margin-top: 5px;
+}
+
+.agent-status span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 980px) {
   body {
     min-width: 760px;

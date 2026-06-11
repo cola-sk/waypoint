@@ -191,12 +191,18 @@ Codex:
   使用 codex --no-alt-screen 启动，减少嵌入式 xterm 中的 alternate screen 闪屏。
   新 session 的启动提示直接包含 handover 文件路径。
 
+GitHub Copilot:
+  新 session 使用 copilot -i "Read this exact handover file..."。
+  waypoint 会将 handover 目录通过 --add-dir 加入允许访问范围。
+
 Claude Code:
   新 session 的启动提示直接包含 handover 文件路径。
 
 Shell / Existing Session:
   暂时通过 PTY bracketed paste 注入一段指向 handover 文件的短提示。
 ```
+
+每次 handover 的目标 session 会记住这次 handover 摘要；如果之后继续从该目标 session 再 handover 到第三个 agent，waypoint 会把上一跳 handover 作为 inherited context 一并写入新的 handover 文件。
 
 ---
 

@@ -27,6 +27,9 @@ const HANDOVER_USER_INPUT_CHARS: usize = 4_000;
 const COMPACT_HANDOVER_CONTEXT_CHARS: usize = 4_000;
 const COMPACT_USER_INPUT_CHARS: usize = 1_500;
 const COMPACT_GIT_STATUS_CHARS: usize = 4_000;
+const HANDOVER_INHERITED_CONTEXT_CHARS: usize = 12_000;
+const COMPACT_HANDOVER_INHERITED_CONTEXT_CHARS: usize = 6_000;
+const HANDOVER_INHERITED_STORE_CHARS: usize = 24_000;
 const GIT_OUTPUT_LIMIT_CHARS: usize = 30_000;
 const HANDOVER_INJECT_ATTEMPTS: usize = 8;
 const HANDOVER_INJECT_DELAY_MS: u64 = 350;
@@ -52,6 +55,7 @@ struct PtySession {
     ring: Mutex<String>,
     input_ring: Mutex<String>,
     render_ring: Mutex<Vec<u8>>,
+    inherited_handover: Mutex<String>,
     chat_messages: Mutex<Vec<ChatMessage>>,
     open_assistant_index: Mutex<Option<usize>>,
     last_assistant_output_at_ms: Mutex<Option<u64>>,
@@ -532,6 +536,7 @@ impl SessionManager {
             ring: Mutex::new(String::new()),
             input_ring: Mutex::new(String::new()),
             render_ring: Mutex::new(Vec::new()),
+            inherited_handover: Mutex::new(String::new()),
             chat_messages: Mutex::new(Vec::new()),
             open_assistant_index: Mutex::new(None),
             last_assistant_output_at_ms: Mutex::new(None),
@@ -816,6 +821,18 @@ impl SessionManager {
             );
         }
 
+        if target_agent_id == "copilot" {
+            return self.continue_copilot_with_initial_prompt(
+                app,
+                &source,
+                source_info,
+                cwd,
+                note,
+                rows,
+                cols,
+            );
+        }
+
         let target_info = if target_agent_id == "shell" {
             self.create_shell_session(
                 app,
@@ -894,6 +911,8 @@ impl SessionManager {
             cols,
             Vec::new(),
         )?;
+        let target = self.get(&target_info.id)?;
+        self.remember_handover(&target, &prompt);
 
         Ok(HandoverResult {
             prompt,
@@ -961,6 +980,8 @@ impl SessionManager {
             cols,
             Vec::new(),
         )?;
+        let target = self.get(&target_info.id)?;
+        self.remember_handover(&target, &prompt);
 
         Ok(HandoverResult {
             prompt,
@@ -1023,6 +1044,84 @@ impl SessionManager {
             cols,
             Vec::new(),
         )?;
+        let target = self.get(&target_info.id)?;
+        self.remember_handover(&target, &prompt);
+
+        Ok(HandoverResult {
+            prompt,
+            source_session: source_info,
+            target_session: target_info,
+            mode: "new-session".to_string(),
+        })
+    }
+
+    fn continue_copilot_with_initial_prompt(
+        &self,
+        app: AppHandle,
+        source: &Arc<PtySession>,
+        source_info: SessionInfo,
+        cwd: String,
+        note: Option<String>,
+        rows: Option<u16>,
+        cols: Option<u16>,
+    ) -> Result<HandoverResult, String> {
+        let definition = agent_definitions()
+            .into_iter()
+            .find(|definition| definition.id == "copilot")
+            .ok_or_else(|| "GitHub Copilot preset is missing".to_string())?;
+        let resolved = resolve_agent_command(&definition).ok_or_else(|| {
+            "GitHub Copilot CLI is not available in PATH. Install it or make sure your login shell can resolve it."
+                .to_string()
+        })?;
+        let display_command = format!("{} -i <handover>", resolved.display);
+        let planned_target = SessionInfo {
+            id: "pending".to_string(),
+            agent_id: definition.id.to_string(),
+            agent_name: definition.name.to_string(),
+            title: "GitHub Copilot new session".to_string(),
+            command: display_command.clone(),
+            cwd: cwd.clone(),
+            status: SessionStatus::Running,
+            attached: false,
+            created_at: unix_timestamp(),
+            last_active_at: unix_timestamp(),
+        };
+        let prompt = self.build_compact_handover_prompt_for(
+            source,
+            &source_info,
+            &planned_target,
+            note.clone(),
+        );
+
+        let handover_path = write_handover_file(&cwd, &prompt)?;
+        let startup_prompt = handover_reference_startup_prompt(&handover_path);
+
+        let mut args = resolved.args;
+        if args.first().map(|arg| arg.as_str()) == Some("copilot") {
+            args.push("--".to_string());
+        }
+        if let Some(parent) = handover_path.parent() {
+            args.push("--add-dir".to_string());
+            args.push(parent.to_string_lossy().into_owned());
+        }
+        args.push("-i".to_string());
+        args.push(startup_prompt);
+
+        let target_info = self.spawn_session(
+            app,
+            definition.id,
+            definition.name,
+            definition.name.to_string(),
+            display_command,
+            resolved.executable,
+            args,
+            cwd,
+            rows,
+            cols,
+            Vec::new(),
+        )?;
+        let target = self.get(&target_info.id)?;
+        self.remember_handover(&target, &prompt);
 
         Ok(HandoverResult {
             prompt,
@@ -1062,9 +1161,14 @@ impl SessionManager {
             )));
         }
         inject_with_retry(target, &short_instruction)?;
+        self.remember_handover(target, &prompt);
         target.meta.lock().last_active_at = unix_timestamp();
 
         Ok(prompt)
+    }
+
+    fn remember_handover(&self, target: &Arc<PtySession>, prompt: &str) {
+        *target.inherited_handover.lock() = tail_chars(prompt, HANDOVER_INHERITED_STORE_CHARS);
     }
 
     fn build_handover_prompt_for(
@@ -1077,6 +1181,10 @@ impl SessionManager {
         let recent_context = clean_terminal_output(&source.ring.lock(), HANDOVER_CONTEXT_CHARS);
         let recent_user_inputs =
             clean_terminal_input(&source.input_ring.lock(), HANDOVER_USER_INPUT_CHARS);
+        let inherited_handover = tail_chars(
+            &source.inherited_handover.lock(),
+            HANDOVER_INHERITED_CONTEXT_CHARS,
+        );
         let git_status = git_command(&source_info.cwd, &["status", "--short"])
             .unwrap_or_else(|| "git status unavailable".to_string());
         let git_branch = git_command(&source_info.cwd, &["branch", "--show-current"])
@@ -1093,6 +1201,7 @@ impl SessionManager {
             &git_status,
             &git_diff,
             &staged_diff,
+            &inherited_handover,
             &recent_context,
             &recent_user_inputs,
         )
@@ -1109,6 +1218,10 @@ impl SessionManager {
             clean_terminal_output(&source.ring.lock(), COMPACT_HANDOVER_CONTEXT_CHARS);
         let recent_user_inputs =
             clean_terminal_input(&source.input_ring.lock(), COMPACT_USER_INPUT_CHARS);
+        let inherited_handover = tail_chars(
+            &source.inherited_handover.lock(),
+            COMPACT_HANDOVER_INHERITED_CONTEXT_CHARS,
+        );
         let git_status = git_command(&source_info.cwd, &["status", "--short"])
             .unwrap_or_else(|| "git status unavailable".to_string());
         build_compact_handover_prompt(
@@ -1116,6 +1229,7 @@ impl SessionManager {
             target_info,
             note.as_deref().unwrap_or_default(),
             &tail_chars(&git_status, COMPACT_GIT_STATUS_CHARS),
+            &inherited_handover,
             &recent_context,
             &recent_user_inputs,
         )
@@ -1453,7 +1567,7 @@ fn handover_workspace_dir(cwd: &str) -> Result<PathBuf, String> {
 
 fn handover_reference_startup_prompt(path: &Path) -> String {
     format!(
-        "Initialization step for this new session: read only this exact handover file now: {}. This single-file read is explicitly allowed. Do not list/search directories, do not use glob patterns, and do not read any other files during initialization. After loading that single file, reply exactly: \"Context loaded. Waiting for your instruction.\" Then wait for the next user message. This initialization is one-time only for session start; do not repeat it in later turns.",
+        "Initialization step for this new session: read only this exact handover file now: {}. This single-file read is explicitly allowed. Do not list/search directories, do not use glob patterns, and do not read any other files during this initialization turn. After loading that single file, reply exactly: \"Context loaded. Waiting for your instruction.\" and wait for the next user message. Crucially, this constraint applies ONLY to this first startup turn; in all subsequent turns, you must fully use your normal tools, file reading, and directory search capabilities to assist the user.",
         path.display()
     )
 }
@@ -1473,6 +1587,7 @@ fn build_handover_prompt(
     git_status: &str,
     git_diff: &str,
     staged_diff: &str,
+    inherited_handover: &str,
     recent_context: &str,
     recent_user_inputs: &str,
 ) -> String {
@@ -1514,6 +1629,9 @@ You are continuing work from another local agent session inside waypoint.
 {staged_diff}
 ```
 
+## Inherited Handover Context
+{inherited_handover}
+
 ## Recent Source Terminal Context
 ```text
 {recent_context}
@@ -1549,6 +1667,7 @@ You are continuing work from another local agent session inside waypoint.
         git_status = empty_fallback(git_status, "clean or unavailable"),
         git_diff = empty_fallback(git_diff, "No unstaged diff."),
         staged_diff = empty_fallback(staged_diff, "No staged diff."),
+        inherited_handover = empty_fallback(inherited_handover, "No inherited handover context."),
         recent_context = empty_fallback(recent_context, "No recent terminal context captured."),
         recent_user_inputs = empty_fallback(recent_user_inputs, "No recent user input captured."),
     )
@@ -1559,6 +1678,7 @@ fn build_compact_handover_prompt(
     target: &SessionInfo,
     note: &str,
     git_status: &str,
+    inherited_handover: &str,
     recent_context: &str,
     recent_user_inputs: &str,
 ) -> String {
@@ -1583,6 +1703,9 @@ Continue from the previous local agent session.
 ```text
 {git_status}
 ```
+
+## Inherited Handover Context
+{inherited_handover}
 
 ## Recent Source Context
 ```text
@@ -1611,6 +1734,7 @@ Continue from the previous local agent session.
             note.trim()
         },
         git_status = empty_fallback(git_status, "clean or unavailable"),
+        inherited_handover = empty_fallback(inherited_handover, "No inherited handover context."),
         recent_context = empty_fallback(recent_context, "No recent terminal context captured."),
         recent_user_inputs = empty_fallback(recent_user_inputs, "No recent user input captured."),
     )
