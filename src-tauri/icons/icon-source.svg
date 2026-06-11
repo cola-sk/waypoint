@@ -1,15 +1,15 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- Full-bleed background: macOS Dock applies its own rounded corner mask -->
-  <rect width="1024" height="1024" fill="#FBFAF8"/>
-  <!-- Subtle border inset to visually separate from white backgrounds -->
-  <rect x="1" y="1" width="1022" height="1022" stroke="#E8E4DC" stroke-width="2"/>
+  <!-- Full-bleed solid background – macOS applies the squircle mask itself -->
+  <rect width="1024" height="1024" fill="#1A1814"/>
+  <!-- Subtle inner glow ring -->
+  <rect x="1" y="1" width="1022" height="1022" stroke="#FF6F4C" stroke-width="4" stroke-opacity="0.15"/>
   <!-- Hexagon waypoint mark -->
   <path
-    d="M512 260L742 389V647L512 776L282 647V389L512 260Z"
+    d="M512 256L756 393V667L512 804L268 667V393L512 256Z"
     stroke="#FF6F4C"
-    stroke-width="68"
+    stroke-width="72"
     stroke-linejoin="round"
   />
   <!-- Center dot -->
-  <circle cx="512" cy="512" r="60" fill="#FF6F4C"/>
+  <circle cx="512" cy="512" r="64" fill="#FF6F4C"/>
 </svg>
