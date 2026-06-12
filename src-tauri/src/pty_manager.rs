@@ -637,6 +637,17 @@ impl SessionManager {
                             },
                         );
                     }
+                    Err(err) if err.raw_os_error() == Some(5) => {
+                        reader_session.finalize_open_assistant_message();
+                        reader_session.mark_status(SessionStatus::Exited);
+                        let _ = reader_app.emit(
+                            "session:exited",
+                            SessionEvent {
+                                session: reader_session.info(),
+                            },
+                        );
+                        break;
+                    }
                     Err(err) => {
                         reader_session.finalize_open_assistant_message();
                         reader_session.mark_status(SessionStatus::Error);
@@ -787,6 +798,9 @@ impl SessionManager {
 
     fn write_session(&self, session_id: &str, data: String) -> Result<(), String> {
         let session = self.get(session_id)?;
+        if !matches!(session.info().status, SessionStatus::Running) {
+            return Err("session is not running".to_string());
+        }
         session.append_input(&data);
         session.capture_user_input(&data);
         session
@@ -801,6 +815,9 @@ impl SessionManager {
 
     fn send_chat_message(&self, session_id: &str, message: &str) -> Result<(), String> {
         let session = self.get(session_id)?;
+        if !matches!(session.info().status, SessionStatus::Running) {
+            return Err("session is not running".to_string());
+        }
         let payload = message.trim();
         if payload.is_empty() {
             return Ok(());
@@ -874,6 +891,9 @@ impl SessionManager {
         let rows = rows.min(MAX_PTY_ROWS);
         let cols = cols.min(MAX_PTY_COLS);
         let session = self.get(session_id)?;
+        if !matches!(session.info().status, SessionStatus::Running) {
+            return Ok(());
+        }
         session
             .master
             .lock()

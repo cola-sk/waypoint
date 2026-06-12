@@ -9,7 +9,7 @@ import {
   resizeSession,
   writeSession,
 } from "../api/tauri";
-import type { PtyDataEvent, SessionInfo } from "../types";
+import type { PtyDataEvent, SessionErrorEvent, SessionEvent, SessionInfo } from "../types";
 
 type TerminalViewProps = {
   sessionId: string;
@@ -21,6 +21,7 @@ const MIN_ROWS = 5;
 const MIN_COLS = 10;
 const MAX_ROWS = 240;
 const MAX_COLS = 600;
+const SCROLLBAR_GUTTER_COLS = 2;
 
 function clampDimension(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -66,7 +67,9 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
     if (!shell || !surface) return;
 
     let disposed = false;
-    let unlisten: UnlistenFn | null = null;
+    let unlistenPtyData: UnlistenFn | null = null;
+    let unlistenSessionExited: UnlistenFn | null = null;
+    let unlistenSessionError: UnlistenFn | null = null;
     setIsRestoring(false);
     setStatus("connecting");
 
@@ -119,7 +122,16 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
     let lastWidth = 0;
     let lastHeight = 0;
 
-    const fitAndResize = () => {
+    const refreshTerminal = () => {
+      if (disposed) return;
+      try {
+        terminal.refresh(0, Math.max(0, terminal.rows - 1));
+      } catch (err) {
+        console.warn("Failed to refresh terminal:", err);
+      }
+    };
+
+    const fitAndResize = (force = false) => {
       if (disposed) return;
       if (shell.clientWidth < 100 || shell.clientHeight < 50) {
         return;
@@ -127,7 +139,7 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
 
       const width = shell.clientWidth;
       const height = shell.clientHeight;
-      if (width === lastWidth && height === lastHeight) {
+      if (!force && width === lastWidth && height === lastHeight) {
         return;
       }
 
@@ -135,7 +147,7 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
         const dims = fitAddon.proposeDimensions();
         if (dims) {
           const rows = clampDimension(dims.rows, MIN_ROWS, MAX_ROWS);
-          const cols = clampDimension(dims.cols, MIN_COLS, MAX_COLS);
+          const cols = clampDimension(dims.cols - SCROLLBAR_GUTTER_COLS, MIN_COLS, MAX_COLS);
           if (rows !== terminal.rows || cols !== terminal.cols) {
             terminal.resize(cols, rows);
             resizeSession(sessionId, rows, cols).catch(() => undefined);
@@ -143,17 +155,44 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
         }
         lastWidth = width;
         lastHeight = height;
+        refreshTerminal();
       } catch (err) {
         console.warn("Failed to fit terminal:", err);
       }
     };
     let resizeTimeout = 0;
-    const debouncedFitAndResize = () => {
+    const debouncedFitAndResize = (force = false) => {
       window.clearTimeout(resizeTimeout);
-      resizeTimeout = window.setTimeout(fitAndResize, 100);
+      resizeTimeout = window.setTimeout(() => fitAndResize(force), 100);
     };
+    const refreshAfterWindowRestore = () => {
+      if (document.visibilityState === "hidden") {
+        return;
+      }
+      window.requestAnimationFrame(() => {
+        fitAndResize(true);
+        refreshTerminal();
+      });
+      window.setTimeout(() => {
+        fitAndResize(true);
+        refreshTerminal();
+      }, 120);
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refreshAfterWindowRestore();
+      }
+    };
+    const handleWindowResize = () => debouncedFitAndResize();
+    const handleObservedResize: ResizeObserverCallback = () => debouncedFitAndResize();
 
-    window.addEventListener("resize", debouncedFitAndResize);
+    window.addEventListener("resize", handleWindowResize);
+    window.addEventListener("focus", refreshAfterWindowRestore);
+    window.addEventListener("pageshow", refreshAfterWindowRestore);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    const resizeObserver = new ResizeObserver(handleObservedResize);
+    resizeObserver.observe(shell);
+    resizeObserver.observe(surface);
 
     let isReplaying = true;
     let isLive = false;
@@ -162,6 +201,23 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
     let shouldClearReplayOnActivation = false;
     let pendingInput = "";
     const queuedLiveOutput: Array<string | Uint8Array> = [];
+
+    const markSessionNotLive = (nextStatus: "readonly" | "error") => {
+      if (disposed) return;
+      isLive = false;
+      isActivating = false;
+      pendingInput = "";
+      queuedLiveOutput.splice(0);
+      setStatus(nextStatus);
+      setIsRestoring(false);
+      refreshAfterWindowRestore();
+    };
+
+    const handleWriteFailure = (err: unknown) => {
+      if (disposed) return;
+      console.warn("Failed to write to PTY:", err);
+      markSessionNotLive("readonly");
+    };
 
     const writePtyPayload = (payload: string | Uint8Array) => {
       if (wasReplayOnly && isActivating && !isLive) {
@@ -190,9 +246,7 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
       }
       const data = pendingInput;
       pendingInput = "";
-      writeSession(sessionId, data).catch((err) => {
-        terminal.writeln(`\r\n[waypoint write error] ${String(err)}`);
-      });
+      writeSession(sessionId, data).catch(handleWriteFailure);
     };
 
     const activateAndQueue = (data: string) => {
@@ -239,9 +293,31 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
         activateAndQueue(data);
         return;
       }
-      writeSession(sessionId, data).catch((err) => {
-        terminal.writeln(`\r\n[waypoint write error] ${String(err)}`);
-      });
+      writeSession(sessionId, data).catch(handleWriteFailure);
+    });
+
+    listen<SessionEvent>("session:exited", (event) => {
+      if (event.payload.session.id === sessionId) {
+        markSessionNotLive("readonly");
+      }
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+        return;
+      }
+      unlistenSessionExited = unlisten;
+    });
+
+    listen<SessionErrorEvent>("session:error", (event) => {
+      if (event.payload.sessionId === sessionId) {
+        markSessionNotLive("error");
+      }
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+        return;
+      }
+      unlistenSessionError = unlisten;
     });
 
     async function connect() {
@@ -264,7 +340,7 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
         } else {
           terminal.write(snapshot.replay, onWriteComplete);
         }
-        unlisten = await listen<PtyDataEvent>("pty:data", (event) => {
+        unlistenPtyData = await listen<PtyDataEvent>("pty:data", (event) => {
           if (event.payload.sessionId === sessionId) {
             if (event.payload.dataBase64) {
               const bytes = decodeBase64Bytes(event.payload.dataBase64);
@@ -301,8 +377,14 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
       window.clearTimeout(resizeTimeout);
       detachSession(sessionId).catch(() => undefined);
       dataDisposable.dispose();
-      window.removeEventListener("resize", debouncedFitAndResize);
-      unlisten?.();
+      window.removeEventListener("resize", handleWindowResize);
+      window.removeEventListener("focus", refreshAfterWindowRestore);
+      window.removeEventListener("pageshow", refreshAfterWindowRestore);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      resizeObserver.disconnect();
+      unlistenPtyData?.();
+      unlistenSessionExited?.();
+      unlistenSessionError?.();
       terminal.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;

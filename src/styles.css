@@ -78,10 +78,17 @@
 
 body {
   margin: 0;
-  min-width: 900px;
-  min-height: 640px;
+  width: 100vw;
+  height: 100vh;
   overflow: hidden;
   background: var(--bg-primary);
+}
+
+html,
+#root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
 }
 
 button,
@@ -106,15 +113,20 @@ textarea:focus-visible {
 .app-shell {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr);
+  width: 100vw;
   height: 100vh;
+  overflow: hidden;
   background: var(--bg-primary);
 }
 
 .sidebar {
   display: flex;
   min-width: 0;
+  min-height: 0;
+  height: 100vh;
   flex-direction: column;
   gap: 18px;
+  overflow: hidden;
   border-right: 1px solid #d9d7d0;
   background: var(--bg-secondary);
   padding: 22px 16px 16px;
@@ -257,11 +269,37 @@ textarea:focus-visible {
 .workspace-list {
   display: flex;
   min-height: 0;
-  flex: 1;
+  flex: 1 1 0;
   flex-direction: column;
   gap: 12px;
-  overflow: auto;
-  padding: 0 2px 4px;
+  overflow-x: hidden;
+  overflow-y: scroll;
+  overscroll-behavior: contain;
+  padding: 0 8px 4px 2px;
+  scrollbar-color: #aaa69d rgba(31, 35, 40, 0.06);
+  scrollbar-gutter: stable;
+}
+
+.workspace-list::-webkit-scrollbar {
+  width: 10px;
+}
+
+.workspace-list::-webkit-scrollbar-track {
+  border-radius: 999px;
+  background: rgba(31, 35, 40, 0.06);
+}
+
+.workspace-list::-webkit-scrollbar-thumb {
+  min-height: 36px;
+  border: 2px solid var(--bg-secondary);
+  border-radius: 999px;
+  background: #aaa69d;
+  background-clip: padding-box;
+}
+
+.workspace-list::-webkit-scrollbar-thumb:hover {
+  background: #8f8a82;
+  background-clip: padding-box;
 }
 
 .section-header {
@@ -1078,6 +1116,7 @@ textarea:focus-visible {
   display: flex;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
   flex-direction: column;
   background: var(--bg-primary);
 }
@@ -1095,12 +1134,19 @@ textarea:focus-visible {
   padding: 14px 20px;
 }
 
+.topbar > div:first-child {
+  min-width: 0;
+}
+
 .topbar h2 {
   margin: 3px 0 0;
   color: var(--text-primary);
   font-size: 18px;
   font-weight: 760;
   line-height: 1.15;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .session-path {
@@ -1124,6 +1170,7 @@ textarea:focus-visible {
 
 .topbar-actions {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: flex-end;
   flex-wrap: wrap;
@@ -1161,12 +1208,14 @@ textarea:focus-visible {
 
 .output-layout {
   display: grid;
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
   gap: 14px;
   padding: 16px 30px;
   grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .output-layout .terminal-frame {
@@ -1183,6 +1232,7 @@ textarea:focus-visible {
   flex: 1;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
 }
 
 .terminal-view {
@@ -1194,24 +1244,12 @@ textarea:focus-visible {
   min-height: 0;
 }
 
-.output-layout .terminal-view {
-  width: calc(100% + 60px);
-  margin: -16px -30px 0;
-}
-
-.output-layout .terminal-view > .terminal-shell {
-  width: auto;
-  height: auto;
-  margin: 16px 30px 0;
-}
-
 .terminal-shell {
   position: relative;
   display: flex;
   flex-direction: column;
   flex: 1;
   width: 100%;
-  height: 100%;
   min-height: 0;
   overflow: hidden;
   border: 1px solid #24211d;
@@ -1221,19 +1259,25 @@ textarea:focus-visible {
 }
 
 .terminal-surface {
+  --terminal-inline-padding: clamp(18px, 2.8vw, 38px);
+  --terminal-scrollbar-gutter: 14px;
   flex: 1;
   width: 100%;
   height: 100%;
   min-height: 0;
   overflow: hidden;
-  padding: 22px clamp(18px, 2.8vw, 38px);
+  scrollbar-gutter: stable;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 18%),
     linear-gradient(0deg, rgba(255, 255, 255, 0.015), transparent 16%);
 }
 
 .terminal-surface .xterm {
+  width: 100%;
   height: 100%;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 22px calc(var(--terminal-inline-padding) + var(--terminal-scrollbar-gutter)) 22px var(--terminal-inline-padding);
   font-variant-ligatures: contextual;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -1241,6 +1285,9 @@ textarea:focus-visible {
 }
 
 .terminal-surface .xterm-viewport {
+  right: 0;
+  max-width: 100%;
+  overflow-x: hidden !important;
   scrollbar-color: rgba(255, 255, 255, 0.28) transparent;
 }
 
@@ -1249,7 +1296,9 @@ textarea:focus-visible {
 }
 
 .terminal-surface .xterm-screen {
+  max-width: 100%;
   margin: 0;
+  overflow: hidden;
 }
 
 .terminal-restore-overlay {
@@ -1677,9 +1726,6 @@ textarea:focus-visible {
 }
 
 @media (max-width: 980px) {
-  body {
-    min-width: 760px;
-  }
 
   .app-shell {
     grid-template-columns: 238px minmax(0, 1fr);
