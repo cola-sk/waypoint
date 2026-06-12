@@ -1222,6 +1222,103 @@ textarea:focus-visible {
   color: var(--accent-red);
 }
 
+/* Custom split button and dropdown layout */
+.custom-editor-dropdown {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  border-radius: 8px;
+  overflow: visible;
+}
+
+.open-in-editor-btn--main {
+  border-top-right-radius: 0 !important;
+  border-bottom-right-radius: 0 !important;
+  border-right: none !important;
+}
+
+.editor-dropdown-toggle {
+  border-top-left-radius: 0 !important;
+  border-bottom-left-radius: 0 !important;
+  padding: 0 8px !important;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-left: 1px solid var(--border-color);
+  background: #ffffff;
+  color: var(--text-primary);
+  box-shadow: 0 1px 2px rgba(31, 35, 40, 0.04);
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease, color 140ms ease;
+}
+
+.editor-dropdown-toggle:hover {
+  border-color: #ecc9bc !important;
+  border-left-color: #ecc9bc !important;
+  background: #fff4ef;
+  color: #bd4828;
+  box-shadow: var(--glow-cyan);
+}
+
+.editor-dropdown-toggle:focus-visible {
+  outline: none;
+  border-color: var(--border-color-glow);
+  box-shadow: 0 0 0 3px var(--accent-cyan-dim);
+}
+
+/* Dropdown menu container */
+.editor-dropdown-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  background: #ffffff;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: var(--shadow-panel);
+  z-index: 1000;
+  min-width: 200px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Individual dropdown items */
+.editor-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.editor-dropdown-item:hover {
+  background: #fff4ef;
+  color: #bd4828;
+}
+
+.editor-dropdown-item.active {
+  background: var(--bg-hover);
+  color: #bd4828;
+}
+
+.editor-dropdown-item svg {
+  flex-shrink: 0;
+}
+
+
+
 .error-banner {
   border-bottom: 1px solid rgba(217, 83, 79, 0.22);
   background: #fff0f0;

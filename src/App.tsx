@@ -168,12 +168,108 @@ function SingleEditorButton({ editor, cwd }: { editor: EditorInfo; cwd: string }
 
 function OpenInEditorButton({ cwd, editors }: { cwd: string; editors: EditorInfo[] }) {
   if (editors.length === 0) return null;
+
+  const [selectedEditorId, setSelectedEditorId] = useState<string>(() => {
+    const saved = localStorage.getItem("waypoint_selected_editor_id");
+    if (saved && editors.some((e) => e.id === saved)) {
+      return saved;
+    }
+    // Prioritize vscode, otherwise use the first detected editor
+    if (editors.some((e) => e.id === "vscode")) {
+      return "vscode";
+    }
+    return editors[0]?.id || "";
+  });
+
+  const [isOpen, setIsOpen] = useState(false);
+  const [btnState, setBtnState] = useState<EditorBtnState>("idle");
+
+  useEffect(() => {
+    if (!editors.some((e) => e.id === selectedEditorId)) {
+      if (editors.some((e) => e.id === "vscode")) {
+        setSelectedEditorId("vscode");
+      } else {
+        setSelectedEditorId(editors[0]?.id || "");
+      }
+    }
+  }, [editors, selectedEditorId]);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleOutsideClick = () => setIsOpen(false);
+    window.addEventListener("click", handleOutsideClick);
+    return () => window.removeEventListener("click", handleOutsideClick);
+  }, [isOpen]);
+
+  const selectedEditor = editors.find((e) => e.id === selectedEditorId) || editors[0];
+
+  async function handleOpenClick() {
+    if (btnState === "opening") return;
+    setBtnState("opening");
+    try {
+      await openInEditor(cwd, selectedEditor.bin);
+      setBtnState("done");
+    } catch {
+      setBtnState("done");
+    } finally {
+      setTimeout(() => setBtnState("idle"), 1800);
+    }
+  }
+
+  if (editors.length === 1) {
+    return <SingleEditorButton editor={editors[0]} cwd={cwd} />;
+  }
+
+  const label =
+    btnState === "opening"
+      ? "打开中…"
+      : btnState === "done"
+      ? "已打开"
+      : `在 ${selectedEditor.name} 中打开`;
+
   return (
-    <>
-      {editors.map((editor) => (
-        <SingleEditorButton key={editor.id} editor={editor} cwd={cwd} />
-      ))}
-    </>
+    <div className="custom-editor-dropdown" onClick={(e) => e.stopPropagation()}>
+      <button
+        className={`icon-action open-in-editor-btn open-in-editor-btn--main open-in-editor-btn--${btnState}`}
+        type="button"
+        onClick={handleOpenClick}
+        disabled={btnState === "opening"}
+        title={`在 ${selectedEditor.name} 中打开: ${cwd}`}
+      >
+        <EditorIcon editorId={selectedEditor.id} />
+        <span>{label}</span>
+      </button>
+
+      <button
+        className="icon-action editor-dropdown-toggle"
+        type="button"
+        onClick={() => setIsOpen(!isOpen)}
+        title="选择其他编辑器"
+      >
+        <ChevronDown size={14} />
+      </button>
+
+      {isOpen && (
+        <div className="editor-dropdown-menu">
+          {editors.map((editor) => (
+            <button
+              key={editor.id}
+              type="button"
+              className={`editor-dropdown-item ${editor.id === selectedEditorId ? "active" : ""}`}
+              onClick={() => {
+                setSelectedEditorId(editor.id);
+                localStorage.setItem("waypoint_selected_editor_id", editor.id);
+                setIsOpen(false);
+              }}
+            >
+              <EditorIcon editorId={editor.id} />
+              <span>{editor.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 // ────────────────────────────────────────────────────────────────────────────
