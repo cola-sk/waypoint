@@ -66,3 +66,14 @@ export type WorkspaceFolder = {
   name: string;
   isPinned: boolean;
 };
+
+export type ChatRole = "user" | "assistant";
+
+export type ChatMessage = {
+  id: string;
+  role: ChatRole;
+  content: string;
+  pending: boolean;
+  createdAt: number;
+  updatedAt: number;
+};

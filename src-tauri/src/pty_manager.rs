@@ -821,10 +821,30 @@ impl SessionManager {
     }
 
     fn list_chat_messages(&self, session_id: &str) -> Result<Vec<ChatMessage>, String> {
-        let session = self.get(session_id)?;
-        session.finalize_open_assistant_message_if_idle(CHAT_STREAM_IDLE_FINALIZE_MS);
-        let messages = session.chat_messages.lock().clone();
-        Ok(messages)
+        if let Some(session) = self.sessions.lock().get(session_id).cloned() {
+            session.finalize_open_assistant_message_if_idle(CHAT_STREAM_IDLE_FINALIZE_MS);
+            let messages = session.chat_messages.lock().clone();
+            return Ok(messages);
+        }
+
+        // Fallback for historical sessions loaded from persisted metadata:
+        // synthesize a readable assistant message from the persisted replay log.
+        let meta = load_session_meta(session_id)?;
+        let replay_bytes = read_persisted_replay(session_id)?;
+        let replay_text = String::from_utf8_lossy(&replay_bytes).to_string();
+        let cleaned = clean_terminal_output(&replay_text, CHAT_MESSAGE_CONTENT_LIMIT_CHARS);
+        if cleaned.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        Ok(vec![ChatMessage {
+            id: format!("replay-{session_id}"),
+            role: ChatRole::Assistant,
+            content: cleaned,
+            pending: false,
+            created_at: meta.created_at,
+            updated_at: meta.last_active_at.max(meta.created_at),
+        }])
     }
 
     fn get_session_diff_snapshot(&self, session_id: &str) -> Result<SessionDiffSnapshot, String> {

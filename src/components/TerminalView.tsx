@@ -42,6 +42,15 @@ function decodeBase64Bytes(base64: string): Uint8Array | null {
   }
 }
 
+function isFocusOrMouseSequence(data: string): boolean {
+  return (
+    data === "\x1b[I" ||
+    data === "\x1b[O" ||
+    data.startsWith("\x1b[M") ||
+    data.startsWith("\x1b[<")
+  );
+}
+
 function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: TerminalViewProps) {
   const shellRef = useRef<HTMLDivElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
@@ -65,31 +74,35 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
       cursorBlink: true,
       cursorStyle: "bar",
       fontFamily:
-        'JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
-      fontSize: 13,
-      lineHeight: 1.25,
+        'JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "PingFang SC", "Microsoft YaHei", "Liberation Mono", monospace',
+      fontSize: 14.5,
+      lineHeight: 1.52,
+      letterSpacing: 0.16,
+      fontWeight: 430,
+      fontWeightBold: 700,
+      minimumContrastRatio: 4.5,
       convertEol: false,
-      scrollback: 8000,
+      scrollback: 12000,
       theme: {
-        background: "#11100e",
-        foreground: "#eee8dc",
+        background: "#101318",
+        foreground: "#edf2f7",
         cursor: "#ff6f4c",
         selectionBackground: "rgba(255, 111, 76, 0.24)",
-        black: "#11100e",
-        red: "#ff6b62",
-        green: "#60d394",
-        yellow: "#e9b44c",
-        blue: "#7aa2f7",
-        magenta: "#c7a0ff",
-        cyan: "#68c6c1",
-        white: "#eee8dc",
-        brightBlack: "#6f6a60",
+        black: "#0f1117",
+        red: "#ff7875",
+        green: "#7bd88f",
+        yellow: "#f2c572",
+        blue: "#85b7ff",
+        magenta: "#d2a8ff",
+        cyan: "#7ed1d8",
+        white: "#edf2f7",
+        brightBlack: "#7f8a9a",
         brightRed: "#f87171",
         brightGreen: "#86efac",
-        brightYellow: "#fbbf24",
-        brightBlue: "#7dd3fc",
+        brightYellow: "#f7d67c",
+        brightBlue: "#9dc4ff",
         brightMagenta: "#d8b4fe",
-        brightCyan: "#99f6e4",
+        brightCyan: "#a7edf1",
         brightWhite: "#ffffff",
       },
     });
@@ -219,6 +232,9 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
         return;
       }
       if (!isLive) {
+        if (isFocusOrMouseSequence(data)) {
+          return;
+        }
         activateAndQueue(data);
         return;
       }

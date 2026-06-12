@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AgentPresetInfo, HandoverResult, SessionInfo, SessionSnapshot } from "../types";
+import type { AgentPresetInfo, ChatMessage, HandoverResult, SessionInfo, SessionSnapshot } from "../types";
 
 declare global {
   interface Window {
@@ -148,6 +148,11 @@ export function continueSession(
     rows: 30,
     cols: 100,
   });
+}
+
+export function listChatMessages(sessionId: string): Promise<ChatMessage[]> {
+  assertTauriRuntime();
+  return invoke("list_chat_messages", { sessionId });
 }
 
 export function selectDirectory(): Promise<string | null> {
