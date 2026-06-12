@@ -164,3 +164,21 @@ export function selectDirectory(): Promise<string | null> {
   }
   return invoke("select_directory");
 }
+
+export function openInEditor(path: string, editorBin: string): Promise<void> {
+  assertTauriRuntime();
+  return invoke("open_in_editor", { path, editorBin });
+}
+
+export interface EditorInfo {
+  id: string;
+  name: string;
+  bin: string;
+}
+
+export function detectEditors(): Promise<EditorInfo[]> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve([]);
+  }
+  return invoke("detect_editors");
+}

@@ -21,13 +21,16 @@ import {
   createAgentSession,
   defaultWorkspace,
   deleteSession,
+  detectEditors,
   forwardSession,
   killSession,
   listAgentPresets,
   listSessions,
+  openInEditor,
   selectDirectory,
 } from "./api/tauri";
 import type { AgentPresetInfo, SessionInfo, WorkspaceFolder } from "./types";
+import type { EditorInfo } from "./api/tauri";
 
 function agentTreeKey(folderPath: string, agentId: string) {
   return `${folderPath}::${agentId}`;
@@ -77,6 +80,97 @@ const NONE_WORKSPACE_STORAGE_KEY = "waypoint_none_workspace_session_ids";
 const NONE_WORKSPACE_VALUE = "__none_workspace__";
 const CUSTOM_WORKSPACE_VALUE = "__custom_workspace__";
 
+// ── Open-in-editor button ────────────────────────────────────────────────────
+
+/** Tiny SVG logos for each supported editor */
+function EditorIcon({ editorId }: { editorId: string }) {
+  if (editorId === "vscode") {
+    // VS Code logo (simplified)
+    return (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path
+          d="M17.5 1.5L8.9 10.7 4 6.3 1.5 7.9v8.2l2.5 1.6 4.9-4.4 8.6 9.2L22.5 20V4L17.5 1.5z"
+          fill="#007ACC"
+        />
+        <path
+          d="M17.5 1.5v21L22.5 20V4L17.5 1.5zM1.5 16.1L4 17.7l4.9-4.4-4.9-4.4-2.5 1.6v5.6z"
+          fill="#1F9CF0"
+          opacity="0.8"
+        />
+      </svg>
+    );
+  }
+  if (editorId === "antigravity") {
+    // Antigravity IDE logo (stylised "A" / star shape)
+    return (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <polygon
+          points="12,2 15.09,8.26 22,9.27 17,14.14 18.18,21.02 12,17.77 5.82,21.02 7,14.14 2,9.27 8.91,8.26"
+          fill="#FF6B3D"
+          stroke="#FF6B3D"
+          strokeWidth="1"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
+  // Generic open-external icon fallback
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+      <polyline points="15 3 21 3 21 9" />
+      <line x1="10" y1="14" x2="21" y2="3" />
+    </svg>
+  );
+}
+
+type EditorBtnState = "idle" | "opening" | "done";
+
+function SingleEditorButton({ editor, cwd }: { editor: EditorInfo; cwd: string }) {
+  const [btnState, setBtnState] = useState<EditorBtnState>("idle");
+
+  async function handleClick() {
+    if (btnState === "opening") return;
+    setBtnState("opening");
+    try {
+      await openInEditor(cwd, editor.bin);
+      setBtnState("done");
+    } catch {
+      setBtnState("done");
+    } finally {
+      setTimeout(() => setBtnState("idle"), 1800);
+    }
+  }
+
+  const label = btnState === "opening" ? "打开中…" : btnState === "done" ? "已打开" : editor.name;
+
+  return (
+    <button
+      className={`icon-action open-in-editor-btn open-in-editor-btn--${btnState}`}
+      type="button"
+      onClick={handleClick}
+      disabled={btnState === "opening"}
+      title={`在 ${editor.name} 中打开: ${cwd}`}
+    >
+      <EditorIcon editorId={editor.id} />
+      <span>{label}</span>
+    </button>
+  );
+}
+
+function OpenInEditorButton({ cwd, editors }: { cwd: string; editors: EditorInfo[] }) {
+  if (editors.length === 0) return null;
+  return (
+    <>
+      {editors.map((editor) => (
+        <SingleEditorButton key={editor.id} editor={editor} cwd={cwd} />
+      ))}
+    </>
+  );
+}
+// ────────────────────────────────────────────────────────────────────────────
+
+
 function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [agents, setAgents] = useState<AgentPresetInfo[]>([]);
@@ -105,6 +199,7 @@ function App() {
   const [pinnedWorkspaces, setPinnedWorkspaces] = useState<WorkspaceFolder[]>([]);
   const [newWorkspaceInput, setNewWorkspaceInput] = useState("");
   const [isAddingWorkspace, setIsAddingWorkspace] = useState(false);
+  const [detectedEditors, setDetectedEditors] = useState<EditorInfo[]>([]);
   const [activeNewMenuFolder, setActiveNewMenuFolder] = useState<string | null>(null);
   const [expandedAgents, setExpandedAgents] = useState<Record<string, boolean>>({});
   const [workspaceAgentHistory, setWorkspaceAgentHistory] = useState<
@@ -558,6 +653,8 @@ function App() {
     let unlistenError: UnlistenFn | null = null;
     let unlistenCreated: UnlistenFn | null = null;
 
+    detectEditors().then(setDetectedEditors).catch(console.error);
+
     Promise.all([refreshSessions(), refreshAgents(), defaultWorkspace()])
       .then(async ([, , cwd]) => {
         setWorkspacePath(cwd);
@@ -723,7 +820,6 @@ function App() {
                   <div className="workspace-folder-info" title="none">
                     <Folder size={14} className="folder-icon" />
                     <span className="folder-name">无工作区会话</span>
-                    <span className="temp-badge">None</span>
                   </div>
                 </div>
                 <div className="workspace-sessions-list">
@@ -738,7 +834,6 @@ function App() {
                   <div className="workspace-folder-info" title={folder.path}>
                     <Folder size={14} className="folder-icon" />
                     <span className="folder-name">{folder.name}</span>
-                    {!folder.isPinned && <span className="temp-badge">临时</span>}
                   </div>
                   <div className="workspace-folder-actions">
                     <div className="popover-wrapper">
@@ -962,6 +1057,9 @@ function App() {
             ) : null}
           </div>
           <div className="topbar-actions">
+            {activeSession?.cwd && (
+              <OpenInEditorButton cwd={activeSession.cwd} editors={detectedEditors} />
+            )}
             <button
               className="icon-action"
               type="button"

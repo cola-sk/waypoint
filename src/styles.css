@@ -476,16 +476,6 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
-.temp-badge {
-  flex-shrink: 0;
-  border: 1px solid rgba(200, 135, 35, 0.22);
-  border-radius: 6px;
-  background: rgba(200, 135, 35, 0.1);
-  color: var(--accent-amber);
-  font-size: 10px;
-  font-weight: 700;
-  padding: 1px 5px;
-}
 
 .workspace-folder-actions {
   display: flex;
@@ -505,11 +495,20 @@ textarea:focus-visible {
   font-size: 11px;
   font-weight: 700;
   padding: 4px 7px;
+  opacity: 0;
+  pointer-events: none;
   transition:
     background 140ms ease,
     border-color 140ms ease,
     color 140ms ease,
-    box-shadow 140ms ease;
+    box-shadow 140ms ease,
+    opacity 140ms ease;
+}
+
+.workspace-folder-header:hover .new-session-btn,
+.workspace-folder-header:focus-within .new-session-btn {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .new-session-btn:hover {
@@ -1207,6 +1206,19 @@ textarea:focus-visible {
 .icon-action:disabled {
   cursor: not-allowed;
   opacity: 0.46;
+}
+
+/* Open-in-editor button state variants */
+.open-in-editor-btn--success:not(:disabled) {
+  border-color: rgba(40, 167, 80, 0.35);
+  background: rgba(40, 167, 80, 0.08);
+  color: #1a7f3c;
+}
+
+.open-in-editor-btn--error:not(:disabled) {
+  border-color: rgba(217, 83, 79, 0.35);
+  background: rgba(217, 83, 79, 0.08);
+  color: var(--accent-red);
 }
 
 .error-banner {
