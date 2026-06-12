@@ -1,12 +1,12 @@
 mod pty_manager;
 
-use std::process::Command;
 use pty_manager::{
     attach_session, continue_session, create_agent_session, default_workspace, delete_session,
-    detach_session, forward_session, kill_session, list_agent_presets, list_chat_messages,
-    list_sessions, reactivate_session, resize_session, write_session, AppState,
+    detach_session, forward_session, get_handover_preview, kill_session, list_agent_presets,
+    list_chat_messages, list_sessions, reactivate_session, resize_session, write_session, AppState,
 };
 use serde::Serialize;
+use std::process::Command;
 
 #[tauri::command]
 fn select_directory() -> Option<String> {
@@ -21,30 +21,70 @@ struct EditorInfo {
     bin: String,
 }
 
+struct EditorCandidate {
+    id: &'static str,
+    name: &'static str,
+    bins: &'static [&'static str],
+    macos_paths: &'static [&'static str],
+}
+
 /// Returns the list of supported editors that are currently installed.
 #[tauri::command]
 fn detect_editors() -> Vec<EditorInfo> {
-    let candidates: &[(&str, &str, &str)] = &[
-        ("antigravity", "Antigravity IDE", "antigravity"),
-        ("vscode", "Visual Studio Code", "code"),
+    let candidates = &[
+        EditorCandidate {
+            id: "antigravity",
+            name: "Antigravity IDE",
+            bins: &["antigravity-ide", "antigravity"],
+            macos_paths: &[
+                "/Applications/Antigravity IDE.app/Contents/Resources/app/bin/antigravity-ide",
+                "/Applications/Antigravity.app/Contents/Resources/app/bin/antigravity-ide",
+            ],
+        },
+        EditorCandidate {
+            id: "vscode",
+            name: "Visual Studio Code",
+            bins: &["code"],
+            macos_paths: &[
+                "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+            ],
+        },
     ];
 
     candidates
         .iter()
-        .filter_map(|(id, name, bin)| {
-            let probe = Command::new("sh")
-                .arg("-c")
-                .arg(format!("command -v {bin}"))
-                .output();
-            if let Ok(out) = probe {
-                if out.status.success() {
-                    return Some(EditorInfo {
-                        id: id.to_string(),
-                        name: name.to_string(),
-                        bin: bin.to_string(),
-                    });
+        .filter_map(|cand| {
+            // 1. Check in PATH
+            for bin in cand.bins {
+                let probe = Command::new("sh")
+                    .arg("-c")
+                    .arg(format!("command -v {bin}"))
+                    .output();
+                if let Ok(out) = probe {
+                    if out.status.success() {
+                        return Some(EditorInfo {
+                            id: cand.id.to_string(),
+                            name: cand.name.to_string(),
+                            bin: bin.to_string(),
+                        });
+                    }
                 }
             }
+
+            // 2. Check macOS app package paths
+            #[cfg(target_os = "macos")]
+            {
+                for path in cand.macos_paths {
+                    if std::path::Path::new(path).exists() {
+                        return Some(EditorInfo {
+                            id: cand.id.to_string(),
+                            name: cand.name.to_string(),
+                            bin: path.to_string(),
+                        });
+                    }
+                }
+            }
+
             None
         })
         .collect()
@@ -79,6 +119,7 @@ pub fn run() {
             delete_session,
             forward_session,
             continue_session,
+            get_handover_preview,
             list_chat_messages,
             select_directory,
             detect_editors,

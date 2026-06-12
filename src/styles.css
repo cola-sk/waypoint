@@ -1038,6 +1038,7 @@ textarea:focus-visible {
   align-items: flex-start;
   gap: 8px;
   flex: 0 0 auto;
+  width: 100%;
   border-bottom: 1px solid #efd6cc;
   background: #fff3ee;
   padding: 9px 18px;
@@ -1244,6 +1245,7 @@ textarea:focus-visible {
 
 .output-layout .terminal-frame {
   width: 100%;
+  overflow: visible;
   padding: 0;
 }
 
@@ -1266,6 +1268,17 @@ textarea:focus-visible {
   width: 100%;
   min-width: 0;
   min-height: 0;
+}
+
+.output-layout .terminal-view {
+  width: calc(100% + 60px);
+  margin: -16px -30px 0;
+}
+
+.output-layout .terminal-view > .terminal-shell {
+  width: auto;
+  height: auto;
+  margin: 16px 30px 0;
 }
 
 .terminal-shell {
@@ -1600,6 +1613,116 @@ textarea:focus-visible {
 .mode-toggle button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
+}
+
+.handover-context-panel {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border-color-muted);
+  border-radius: 8px;
+  background: #fffdf8;
+  padding: 12px;
+}
+
+.handover-context-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.handover-context-heading div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.handover-context-heading span,
+.handover-context-heading small,
+.handover-size-grid {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.handover-context-heading strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.handover-context-heading small {
+  flex: 0 0 auto;
+  border: 1px solid var(--border-color-muted);
+  border-radius: 999px;
+  background: #ffffff;
+  padding: 3px 8px;
+}
+
+.handover-context-heading small.warning {
+  border-color: #efc9bb;
+  background: #fff4ef;
+  color: #bd4828;
+}
+
+.handover-size-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.handover-size-grid span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.handover-content-options {
+  display: grid;
+  gap: 6px;
+}
+
+.handover-content-options label {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 9px 10px;
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.handover-content-options label.active {
+  border-color: #efc9bb;
+  background: #fff8f4;
+  box-shadow: 0 4px 12px rgba(31, 35, 40, 0.07);
+}
+
+.handover-content-options input {
+  margin: 2px 0 0;
+  accent-color: #bd4828;
+}
+
+.handover-content-options span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.handover-content-options strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.handover-content-options small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .field {

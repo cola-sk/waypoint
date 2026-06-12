@@ -1,5 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AgentPresetInfo, ChatMessage, HandoverResult, SessionInfo, SessionSnapshot } from "../types";
+import type {
+  AgentPresetInfo,
+  ChatMessage,
+  HandoverContentMode,
+  HandoverPreview,
+  HandoverResult,
+  SessionInfo,
+  SessionSnapshot,
+} from "../types";
 
 declare global {
   interface Window {
@@ -127,12 +135,14 @@ export function forwardSession(
   sourceSessionId: string,
   targetSessionId: string,
   note: string,
+  handoverMode: HandoverContentMode,
 ): Promise<HandoverResult> {
   assertTauriRuntime();
   return invoke("forward_session", {
     sourceSessionId,
     targetSessionId,
     note,
+    handoverMode,
   });
 }
 
@@ -141,6 +151,7 @@ export function continueSession(
   targetAgentId: string,
   cwd: string,
   note: string,
+  handoverMode: HandoverContentMode,
 ): Promise<HandoverResult> {
   assertTauriRuntime();
   return invoke("continue_session", {
@@ -148,9 +159,15 @@ export function continueSession(
     targetAgentId,
     cwd,
     note,
+    handoverMode,
     rows: DEFAULT_TERMINAL_ROWS,
     cols: DEFAULT_TERMINAL_COLS,
   });
+}
+
+export function getHandoverPreview(sourceSessionId: string): Promise<HandoverPreview> {
+  assertTauriRuntime();
+  return invoke("get_handover_preview", { sourceSessionId });
 }
 
 export function listChatMessages(sessionId: string): Promise<ChatMessage[]> {

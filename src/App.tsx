@@ -23,13 +23,14 @@ import {
   deleteSession,
   detectEditors,
   forwardSession,
+  getHandoverPreview,
   killSession,
   listAgentPresets,
   listSessions,
   openInEditor,
   selectDirectory,
 } from "./api/tauri";
-import type { AgentPresetInfo, SessionInfo, WorkspaceFolder } from "./types";
+import type { AgentPresetInfo, HandoverContentMode, HandoverPreview, SessionInfo, WorkspaceFolder } from "./types";
 import type { EditorInfo } from "./api/tauri";
 
 function agentTreeKey(folderPath: string, agentId: string) {
@@ -46,6 +47,13 @@ function formatSessionTime(timestamp: number) {
   const hour = String(date.getHours()).padStart(2, "0");
   const minute = String(date.getMinutes()).padStart(2, "0");
   return `${month}/${day} ${hour}:${minute}`;
+}
+
+function formatHandoverChars(value: number) {
+  if (value >= 1000) {
+    return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k chars`;
+  }
+  return `${value} chars`;
 }
 
 function sessionStateLabel(status: SessionInfo["status"]) {
@@ -185,6 +193,9 @@ function App() {
   const [continueAgentId, setContinueAgentId] = useState("codex");
   const [continueWorkspacePath, setContinueWorkspacePath] = useState("");
   const [handoverNote, setHandoverNote] = useState("");
+  const [handoverContentMode, setHandoverContentMode] = useState<HandoverContentMode>("recommended");
+  const [handoverPreview, setHandoverPreview] = useState<HandoverPreview | null>(null);
+  const [isHandoverPreviewLoading, setIsHandoverPreviewLoading] = useState(false);
   const [isForwarding, setIsForwarding] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleteSessionId, setDeleteSessionId] = useState<string | null>(null);
@@ -242,6 +253,10 @@ function App() {
     () => agents.find((agent) => agent.id === continueAgentId) ?? null,
     [agents, continueAgentId],
   );
+  const effectiveHandoverMode =
+    handoverContentMode === "recommended"
+      ? (handoverPreview?.recommendedMode ?? "full")
+      : handoverContentMode;
   const pendingDeleteSession = useMemo(
     () => sessions.find((session) => session.id === deleteSessionId) ?? null,
     [deleteSessionId, sessions],
@@ -480,19 +495,6 @@ function App() {
     }
   }
 
-  async function handleKill() {
-    if (!activeSessionId) return;
-    setError(null);
-    try {
-      await killSession(activeSessionId);
-      const nextSessions = await listSessions();
-      setSessions(nextSessions);
-      setActiveSessionId(nextSessions[0]?.id ?? null);
-    } catch (err) {
-      setError(String(err));
-    }
-  }
-
   function requestDeleteSession(sessionId: string) {
     setError(null);
     setDeleteSessionId(sessionId);
@@ -543,6 +545,14 @@ function App() {
 
   function openHandover() {
     setError(null);
+    if (activeSessionId) {
+      setIsHandoverPreviewLoading(true);
+      setHandoverPreview(null);
+      void getHandoverPreview(activeSessionId)
+        .then((preview) => setHandoverPreview(preview))
+        .catch((err) => setError(String(err)))
+        .finally(() => setIsHandoverPreviewLoading(false));
+    }
     const firstTarget = handoverTargets[0]?.id ?? "";
     const firstAvailableAgent =
       agents.find((agent) => agent.id !== activeSession?.agentId && agent.available)?.id ??
@@ -552,6 +562,7 @@ function App() {
     setContinueAgentId(firstAvailableAgent);
     setContinueWorkspacePath(activeSession?.cwd ?? workspacePath);
     setHandoverMode("new");
+    setHandoverContentMode("recommended");
     setHandoverOpen(true);
   }
 
@@ -564,12 +575,13 @@ function App() {
     try {
       const result =
         handoverMode === "existing"
-          ? await forwardSession(activeSessionId, handoverTargetId, handoverNote)
+          ? await forwardSession(activeSessionId, handoverTargetId, handoverNote, handoverContentMode)
           : await continueSession(
               activeSessionId,
               continueAgentId,
               continueWorkspacePath.trim(),
               handoverNote,
+              handoverContentMode,
             );
       updateWorkspaceAgentHistory(
         result.targetSession.cwd,
@@ -1057,9 +1069,6 @@ function App() {
             ) : null}
           </div>
           <div className="topbar-actions">
-            {activeSession?.cwd && (
-              <OpenInEditorButton cwd={activeSession.cwd} editors={detectedEditors} />
-            )}
             <button
               className="icon-action"
               type="button"
@@ -1068,18 +1077,11 @@ function App() {
               title="Continue from session"
             >
               <Send aria-hidden="true" size={15} />
-              <span>Continue</span>
+              <span>Handover</span>
             </button>
-            <button
-              className="icon-action"
-              type="button"
-              onClick={handleKill}
-              disabled={!activeSessionId}
-              title="Kill session"
-            >
-              <Square aria-hidden="true" size={15} />
-              <span>Kill</span>
-            </button>
+            {activeSession?.cwd && (
+              <OpenInEditorButton cwd={activeSession.cwd} editors={detectedEditors} />
+            )}
           </div>
         </header>
 
@@ -1286,6 +1288,80 @@ function App() {
                 >
                   Existing Session
                 </button>
+              </div>
+
+              <div className="handover-context-panel">
+                <div className="handover-context-heading">
+                  <div>
+                    <span>Context package</span>
+                    <strong>
+                      {isHandoverPreviewLoading
+                        ? "Estimating..."
+                        : handoverPreview
+                          ? `${formatHandoverChars(handoverPreview.estimatedChars)} estimated`
+                          : "Estimate unavailable"}
+                    </strong>
+                  </div>
+                  {handoverPreview ? (
+                    <small className={handoverPreview.isLarge ? "warning" : ""}>
+                      {handoverPreview.isLarge ? "Large handover" : "Normal size"}
+                    </small>
+                  ) : null}
+                </div>
+
+                {handoverPreview ? (
+                  <div className="handover-size-grid" aria-label="Handover size details">
+                    <span>Terminal {formatHandoverChars(handoverPreview.terminalContextChars)}</span>
+                    <span>Inputs {formatHandoverChars(handoverPreview.userInputChars)}</span>
+                    <span>Diffs {formatHandoverChars(handoverPreview.unstagedDiffChars + handoverPreview.stagedDiffChars)}</span>
+                  </div>
+                ) : null}
+
+                <div className="handover-content-options" role="radiogroup" aria-label="Context package mode">
+                  <label className={handoverContentMode === "recommended" ? "active" : ""}>
+                    <input
+                      type="radio"
+                      name="handover-content-mode"
+                      value="recommended"
+                      checked={handoverContentMode === "recommended"}
+                      onChange={() => setHandoverContentMode("recommended")}
+                    />
+                    <span>
+                      <strong>Recommended</strong>
+                      <small>
+                        {effectiveHandoverMode === "compact"
+                          ? "Compact first, full evidence saved"
+                          : "Full structured handover"}
+                      </small>
+                    </span>
+                  </label>
+                  <label className={handoverContentMode === "compact" ? "active" : ""}>
+                    <input
+                      type="radio"
+                      name="handover-content-mode"
+                      value="compact"
+                      checked={handoverContentMode === "compact"}
+                      onChange={() => setHandoverContentMode("compact")}
+                    />
+                    <span>
+                      <strong>Compact + evidence</strong>
+                      <small>Main file stays concise; full evidence is linked</small>
+                    </span>
+                  </label>
+                  <label className={handoverContentMode === "full" ? "active" : ""}>
+                    <input
+                      type="radio"
+                      name="handover-content-mode"
+                      value="full"
+                      checked={handoverContentMode === "full"}
+                      onChange={() => setHandoverContentMode("full")}
+                    />
+                    <span>
+                      <strong>Full context</strong>
+                      <small>Larger startup context, fewer automatic omissions</small>
+                    </span>
+                  </label>
+                </div>
               </div>
 
               {handoverMode === "new" ? (

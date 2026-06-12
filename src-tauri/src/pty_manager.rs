@@ -29,10 +29,16 @@ const HANDOVER_USER_INPUT_CHARS: usize = 4_000;
 const COMPACT_HANDOVER_CONTEXT_CHARS: usize = 4_000;
 const COMPACT_USER_INPUT_CHARS: usize = 1_500;
 const COMPACT_GIT_STATUS_CHARS: usize = 4_000;
+const HANDOVER_DIFF_PREVIEW_CHARS: usize = 12_000;
+const HANDOVER_DIFF_STAT_CHARS: usize = 6_000;
+const HANDOVER_DIFF_FILES_CHARS: usize = 6_000;
+const COMPACT_HANDOVER_DIFF_STAT_CHARS: usize = 2_000;
+const COMPACT_HANDOVER_DIFF_FILES_CHARS: usize = 2_000;
 const HANDOVER_INHERITED_CONTEXT_CHARS: usize = 12_000;
 const COMPACT_HANDOVER_INHERITED_CONTEXT_CHARS: usize = 6_000;
 const HANDOVER_INHERITED_STORE_CHARS: usize = 24_000;
 const GIT_OUTPUT_LIMIT_CHARS: usize = 30_000;
+const HANDOVER_LARGE_THRESHOLD_CHARS: usize = 32_000;
 const HANDOVER_INJECT_ATTEMPTS: usize = 8;
 const HANDOVER_INJECT_DELAY_MS: u64 = 350;
 const CODEX_HANDOVER_STARTUP_DELAY_MS: u64 = 1_800;
@@ -136,6 +142,38 @@ pub struct HandoverResult {
     source_session: SessionInfo,
     target_session: SessionInfo,
     mode: String,
+    handover_mode: String,
+    handover_path: Option<String>,
+    evidence_path: Option<String>,
+}
+
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum HandoverContentMode {
+    Recommended,
+    Compact,
+    Full,
+}
+
+impl Default for HandoverContentMode {
+    fn default() -> Self {
+        Self::Recommended
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandoverPreview {
+    estimated_chars: usize,
+    large_threshold_chars: usize,
+    is_large: bool,
+    recommended_mode: String,
+    terminal_context_chars: usize,
+    user_input_chars: usize,
+    inherited_context_chars: usize,
+    git_status_chars: usize,
+    unstaged_diff_chars: usize,
+    staged_diff_chars: usize,
 }
 
 #[derive(Clone, Serialize)]
@@ -341,10 +379,14 @@ pub fn forward_session(
     source_session_id: String,
     target_session_id: String,
     note: Option<String>,
+    handover_mode: Option<HandoverContentMode>,
 ) -> Result<HandoverResult, String> {
-    state
-        .manager
-        .forward_session(&source_session_id, &target_session_id, note)
+    state.manager.forward_session(
+        &source_session_id,
+        &target_session_id,
+        note,
+        handover_mode.unwrap_or_default(),
+    )
 }
 
 #[tauri::command]
@@ -355,6 +397,7 @@ pub fn continue_session(
     target_agent_id: String,
     cwd: String,
     note: Option<String>,
+    handover_mode: Option<HandoverContentMode>,
     rows: Option<u16>,
     cols: Option<u16>,
 ) -> Result<HandoverResult, String> {
@@ -364,9 +407,18 @@ pub fn continue_session(
         &target_agent_id,
         cwd,
         note,
+        handover_mode.unwrap_or_default(),
         rows,
         cols,
     )
+}
+
+#[tauri::command]
+pub fn get_handover_preview(
+    state: State<'_, AppState>,
+    source_session_id: String,
+) -> Result<HandoverPreview, String> {
+    state.manager.get_handover_preview(&source_session_id)
 }
 
 #[tauri::command]
@@ -941,6 +993,7 @@ impl SessionManager {
         source_session_id: &str,
         target_session_id: &str,
         note: Option<String>,
+        handover_mode: HandoverContentMode,
     ) -> Result<HandoverResult, String> {
         if source_session_id == target_session_id {
             return Err("source and target sessions must be different".to_string());
@@ -963,13 +1016,18 @@ impl SessionManager {
             ));
         }
 
-        let prompt = self.inject_handover(&source, &target, note, false)?;
+        let handover = self.inject_handover(&source, &target, note, handover_mode, false)?;
 
         Ok(HandoverResult {
-            prompt,
+            prompt: handover.prompt,
             source_session: source_info,
             target_session: target_info,
             mode: "existing-session".to_string(),
+            handover_mode: handover.effective_mode,
+            handover_path: Some(handover.main_path.display().to_string()),
+            evidence_path: handover
+                .evidence_path
+                .map(|path| path.display().to_string()),
         })
     }
 
@@ -980,6 +1038,7 @@ impl SessionManager {
         target_agent_id: &str,
         cwd: String,
         note: Option<String>,
+        handover_mode: HandoverContentMode,
         rows: Option<u16>,
         cols: Option<u16>,
     ) -> Result<HandoverResult, String> {
@@ -999,6 +1058,7 @@ impl SessionManager {
                 source_info,
                 cwd,
                 note,
+                handover_mode,
                 rows,
                 cols,
             );
@@ -1011,6 +1071,7 @@ impl SessionManager {
                 source_info,
                 cwd,
                 note,
+                handover_mode,
                 rows,
                 cols,
             );
@@ -1023,6 +1084,7 @@ impl SessionManager {
                 source_info,
                 cwd,
                 note,
+                handover_mode,
                 rows,
                 cols,
             );
@@ -1035,6 +1097,7 @@ impl SessionManager {
                 source_info,
                 cwd,
                 note,
+                handover_mode,
                 rows,
                 cols,
             );
@@ -1042,13 +1105,18 @@ impl SessionManager {
 
         let target_info = self.create_agent_session(app, target_agent_id, cwd, rows, cols)?;
         let target = self.get(&target_info.id)?;
-        let prompt = self.inject_handover(&source, &target, note, true)?;
+        let handover = self.inject_handover(&source, &target, note, handover_mode, true)?;
 
         Ok(HandoverResult {
-            prompt,
+            prompt: handover.prompt,
             source_session: source_info,
             target_session: target_info,
             mode: "new-session".to_string(),
+            handover_mode: handover.effective_mode,
+            handover_path: Some(handover.main_path.display().to_string()),
+            evidence_path: handover
+                .evidence_path
+                .map(|path| path.display().to_string()),
         })
     }
 
@@ -1059,6 +1127,7 @@ impl SessionManager {
         source_info: SessionInfo,
         cwd: String,
         note: Option<String>,
+        handover_mode: HandoverContentMode,
         rows: Option<u16>,
         cols: Option<u16>,
     ) -> Result<HandoverResult, String> {
@@ -1084,15 +1153,15 @@ impl SessionManager {
             first_user_message: None,
             native_session_ref: None,
         };
-        let prompt = self.build_compact_handover_prompt_for(
+        let handover = self.write_handover_for(
             source,
             &source_info,
             &planned_target,
             note.clone(),
-        );
-
-        let handover_path = write_handover_file(&cwd, &prompt)?;
-        let startup_prompt = handover_reference_startup_prompt(&handover_path);
+            handover_mode,
+            &cwd,
+        )?;
+        let startup_prompt = handover_reference_startup_prompt(&handover.main_path);
 
         let mut args = resolved.args;
         args.push(startup_prompt);
@@ -1111,13 +1180,18 @@ impl SessionManager {
             Vec::new(),
         )?;
         let target = self.get(&target_info.id)?;
-        self.remember_handover(&target, &prompt);
+        self.remember_handover(&target, &handover.prompt);
 
         Ok(HandoverResult {
-            prompt,
+            prompt: handover.prompt,
             source_session: source_info,
             target_session: target_info,
             mode: "new-session".to_string(),
+            handover_mode: handover.effective_mode,
+            handover_path: Some(handover.main_path.display().to_string()),
+            evidence_path: handover
+                .evidence_path
+                .map(|path| path.display().to_string()),
         })
     }
 
@@ -1128,6 +1202,7 @@ impl SessionManager {
         source_info: SessionInfo,
         cwd: String,
         note: Option<String>,
+        handover_mode: HandoverContentMode,
         rows: Option<u16>,
         cols: Option<u16>,
     ) -> Result<HandoverResult, String> {
@@ -1153,16 +1228,17 @@ impl SessionManager {
             first_user_message: None,
             native_session_ref: None,
         };
-        let prompt = self.build_compact_handover_prompt_for(
+        let handover = self.write_handover_for(
             source,
             &source_info,
             &planned_target,
             note.clone(),
-        );
-        let handover_path = write_handover_file(&cwd, &prompt)?;
-        let startup_prompt = handover_reference_startup_prompt(&handover_path);
+            handover_mode,
+            &cwd,
+        )?;
+        let startup_prompt = handover_reference_startup_prompt(&handover.main_path);
         let mut args = resolved.args;
-        if let Some(parent) = handover_path.parent() {
+        if let Some(parent) = handover.main_path.parent() {
             args.push("--include-directories".to_string());
             args.push(parent.to_string_lossy().into_owned());
         }
@@ -1182,13 +1258,18 @@ impl SessionManager {
             Vec::new(),
         )?;
         let target = self.get(&target_info.id)?;
-        self.remember_handover(&target, &prompt);
+        self.remember_handover(&target, &handover.prompt);
 
         Ok(HandoverResult {
-            prompt,
+            prompt: handover.prompt,
             source_session: source_info,
             target_session: target_info,
             mode: "new-session".to_string(),
+            handover_mode: handover.effective_mode,
+            handover_path: Some(handover.main_path.display().to_string()),
+            evidence_path: handover
+                .evidence_path
+                .map(|path| path.display().to_string()),
         })
     }
 
@@ -1199,6 +1280,7 @@ impl SessionManager {
         source_info: SessionInfo,
         cwd: String,
         note: Option<String>,
+        handover_mode: HandoverContentMode,
         rows: Option<u16>,
         cols: Option<u16>,
     ) -> Result<HandoverResult, String> {
@@ -1224,11 +1306,15 @@ impl SessionManager {
             first_user_message: None,
             native_session_ref: None,
         };
-        let prompt =
-            self.build_compact_handover_prompt_for(source, &source_info, &planned_target, note);
-
-        let handover_path = write_handover_file(&cwd, &prompt)?;
-        let startup_prompt = handover_reference_startup_prompt(&handover_path);
+        let handover = self.write_handover_for(
+            source,
+            &source_info,
+            &planned_target,
+            note,
+            handover_mode,
+            &cwd,
+        )?;
+        let startup_prompt = handover_reference_startup_prompt(&handover.main_path);
 
         let mut args = resolved.args;
         args.push(startup_prompt);
@@ -1247,13 +1333,18 @@ impl SessionManager {
             Vec::new(),
         )?;
         let target = self.get(&target_info.id)?;
-        self.remember_handover(&target, &prompt);
+        self.remember_handover(&target, &handover.prompt);
 
         Ok(HandoverResult {
-            prompt,
+            prompt: handover.prompt,
             source_session: source_info,
             target_session: target_info,
             mode: "new-session".to_string(),
+            handover_mode: handover.effective_mode,
+            handover_path: Some(handover.main_path.display().to_string()),
+            evidence_path: handover
+                .evidence_path
+                .map(|path| path.display().to_string()),
         })
     }
 
@@ -1264,6 +1355,7 @@ impl SessionManager {
         source_info: SessionInfo,
         cwd: String,
         note: Option<String>,
+        handover_mode: HandoverContentMode,
         rows: Option<u16>,
         cols: Option<u16>,
     ) -> Result<HandoverResult, String> {
@@ -1290,18 +1382,18 @@ impl SessionManager {
             first_user_message: None,
             native_session_ref: None,
         };
-        let prompt = self.build_compact_handover_prompt_for(
+        let handover = self.write_handover_for(
             source,
             &source_info,
             &planned_target,
             note.clone(),
-        );
-
-        let handover_path = write_handover_file(&cwd, &prompt)?;
-        let startup_prompt = handover_reference_startup_prompt(&handover_path);
+            handover_mode,
+            &cwd,
+        )?;
+        let startup_prompt = handover_reference_startup_prompt(&handover.main_path);
 
         let mut args = resolved.args;
-        if let Some(parent) = handover_path.parent() {
+        if let Some(parent) = handover.main_path.parent() {
             append_copilot_cli_option(&mut args, "--add-dir".to_string());
             append_copilot_cli_option(&mut args, parent.to_string_lossy().into_owned());
         }
@@ -1322,13 +1414,18 @@ impl SessionManager {
             Vec::new(),
         )?;
         let target = self.get(&target_info.id)?;
-        self.remember_handover(&target, &prompt);
+        self.remember_handover(&target, &handover.prompt);
 
         Ok(HandoverResult {
-            prompt,
+            prompt: handover.prompt,
             source_session: source_info,
             target_session: target_info,
             mode: "new-session".to_string(),
+            handover_mode: handover.effective_mode,
+            handover_path: Some(handover.main_path.display().to_string()),
+            evidence_path: handover
+                .evidence_path
+                .map(|path| path.display().to_string()),
         })
     }
 
@@ -1337,17 +1434,24 @@ impl SessionManager {
         source: &Arc<PtySession>,
         target: &Arc<PtySession>,
         note: Option<String>,
+        handover_mode: HandoverContentMode,
         target_is_new: bool,
-    ) -> Result<String, String> {
+    ) -> Result<WrittenHandover, String> {
         let source_info = source.info();
         let target_info = target.info();
-        let prompt = self.build_handover_prompt_for(source, &source_info, &target_info, note);
-
-        let handover_path = write_handover_file(&target_info.cwd, &prompt)?;
-        let display_path = handover_path
+        let handover = self.write_handover_for(
+            source,
+            &source_info,
+            &target_info,
+            note,
+            handover_mode,
+            &target_info.cwd,
+        )?;
+        let display_path = handover
+            .main_path
             .strip_prefix(&target_info.cwd)
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|_| handover_path.display().to_string());
+            .unwrap_or_else(|_| handover.main_path.display().to_string());
         let short_instruction = format!(
             "A handover context file is referenced at {display_path}. Read only this exact file (no directory listing or glob scanning), acknowledge context loaded, then wait for my next instruction."
         );
@@ -1358,17 +1462,196 @@ impl SessionManager {
             )));
         }
         inject_with_retry(target, &short_instruction)?;
-        self.remember_handover(target, &prompt);
+        self.remember_handover(target, &handover.prompt);
         target.meta.lock().last_active_at = unix_timestamp();
 
-        Ok(prompt)
+        Ok(handover)
     }
 
     fn remember_handover(&self, target: &Arc<PtySession>, prompt: &str) {
         *target.inherited_handover.lock() = tail_chars(prompt, HANDOVER_INHERITED_STORE_CHARS);
     }
 
+    fn get_handover_preview(&self, source_session_id: &str) -> Result<HandoverPreview, String> {
+        let source = self.get(source_session_id)?;
+        Ok(self.build_handover_preview_for(&source))
+    }
+
+    fn build_handover_preview_for(&self, source: &Arc<PtySession>) -> HandoverPreview {
+        let source_info = source.info();
+        let terminal_context_chars =
+            clean_terminal_output(&source.ring.lock(), HANDOVER_CONTEXT_CHARS)
+                .chars()
+                .count();
+        let user_input_chars =
+            clean_terminal_input(&source.input_ring.lock(), HANDOVER_USER_INPUT_CHARS)
+                .chars()
+                .count();
+        let inherited_context_chars = tail_chars(
+            &source.inherited_handover.lock(),
+            HANDOVER_INHERITED_CONTEXT_CHARS,
+        )
+        .chars()
+        .count();
+        let git_status_chars = git_command(&source_info.cwd, &["status", "--short"])
+            .unwrap_or_default()
+            .chars()
+            .count();
+        let unstaged_diff_chars = git_command(&source_info.cwd, &["diff"])
+            .unwrap_or_default()
+            .chars()
+            .count();
+        let staged_diff_chars = git_command(&source_info.cwd, &["diff", "--staged"])
+            .unwrap_or_default()
+            .chars()
+            .count();
+        let estimated_chars = terminal_context_chars
+            + user_input_chars
+            + inherited_context_chars
+            + git_status_chars
+            + unstaged_diff_chars
+            + staged_diff_chars;
+        let is_large = estimated_chars > HANDOVER_LARGE_THRESHOLD_CHARS;
+
+        HandoverPreview {
+            estimated_chars,
+            large_threshold_chars: HANDOVER_LARGE_THRESHOLD_CHARS,
+            is_large,
+            recommended_mode: if is_large { "compact" } else { "full" }.to_string(),
+            terminal_context_chars,
+            user_input_chars,
+            inherited_context_chars,
+            git_status_chars,
+            unstaged_diff_chars,
+            staged_diff_chars,
+        }
+    }
+
+    fn write_handover_for(
+        &self,
+        source: &Arc<PtySession>,
+        source_info: &SessionInfo,
+        target_info: &SessionInfo,
+        note: Option<String>,
+        requested_mode: HandoverContentMode,
+        cwd: &str,
+    ) -> Result<WrittenHandover, String> {
+        let preview = self.build_handover_preview_for(source);
+        let effective_mode = resolve_handover_mode(requested_mode, preview.is_large);
+        let paths = reserve_handover_paths(cwd)?;
+        let evidence_path_display = if matches!(effective_mode, EffectiveHandoverMode::Compact) {
+            Some(paths.evidence_path.display().to_string())
+        } else {
+            None
+        };
+        let prompt = match effective_mode {
+            EffectiveHandoverMode::Compact => self.build_compact_handover_prompt_for(
+                source,
+                source_info,
+                target_info,
+                note.clone(),
+                evidence_path_display.as_deref(),
+            ),
+            EffectiveHandoverMode::Full => {
+                let diff_preview_limit = if matches!(requested_mode, HandoverContentMode::Full) {
+                    GIT_OUTPUT_LIMIT_CHARS
+                } else {
+                    HANDOVER_DIFF_PREVIEW_CHARS
+                };
+                self.build_handover_prompt_for(
+                    source,
+                    source_info,
+                    target_info,
+                    note.clone(),
+                    diff_preview_limit,
+                )
+            }
+        };
+        let evidence = if matches!(effective_mode, EffectiveHandoverMode::Compact) {
+            Some(self.build_full_handover_evidence_for(source, source_info, target_info, note))
+        } else {
+            None
+        };
+
+        write_handover_files(&paths, &prompt, evidence.as_deref())?;
+
+        Ok(WrittenHandover {
+            prompt,
+            main_path: paths.main_path,
+            evidence_path: evidence.map(|_| paths.evidence_path),
+            effective_mode: effective_mode.as_str().to_string(),
+        })
+    }
+
     fn build_handover_prompt_for(
+        &self,
+        source: &Arc<PtySession>,
+        source_info: &SessionInfo,
+        target_info: &SessionInfo,
+        note: Option<String>,
+        diff_preview_limit: usize,
+    ) -> String {
+        let recent_context = clean_terminal_output(&source.ring.lock(), HANDOVER_CONTEXT_CHARS);
+        let recent_user_inputs =
+            clean_terminal_input(&source.input_ring.lock(), HANDOVER_USER_INPUT_CHARS);
+        let inherited_handover = tail_chars(
+            &source.inherited_handover.lock(),
+            HANDOVER_INHERITED_CONTEXT_CHARS,
+        );
+        let git_context = build_git_handover_context(
+            &source_info.cwd,
+            diff_preview_limit,
+            HANDOVER_DIFF_STAT_CHARS,
+            HANDOVER_DIFF_FILES_CHARS,
+            GIT_OUTPUT_LIMIT_CHARS,
+        );
+        build_handover_prompt(
+            &source_info,
+            &target_info,
+            note.as_deref().unwrap_or_default(),
+            &git_context,
+            &inherited_handover,
+            &recent_context,
+            &recent_user_inputs,
+        )
+    }
+
+    fn build_compact_handover_prompt_for(
+        &self,
+        source: &Arc<PtySession>,
+        source_info: &SessionInfo,
+        target_info: &SessionInfo,
+        note: Option<String>,
+        evidence_path: Option<&str>,
+    ) -> String {
+        let recent_context =
+            clean_terminal_output(&source.ring.lock(), COMPACT_HANDOVER_CONTEXT_CHARS);
+        let recent_user_inputs =
+            clean_terminal_input(&source.input_ring.lock(), COMPACT_USER_INPUT_CHARS);
+        let inherited_handover = tail_chars(
+            &source.inherited_handover.lock(),
+            COMPACT_HANDOVER_INHERITED_CONTEXT_CHARS,
+        );
+        let git_context = build_git_handover_context(
+            &source_info.cwd,
+            0,
+            COMPACT_HANDOVER_DIFF_STAT_CHARS,
+            COMPACT_HANDOVER_DIFF_FILES_CHARS,
+            COMPACT_GIT_STATUS_CHARS,
+        );
+        build_compact_handover_prompt(
+            source_info,
+            target_info,
+            note.as_deref().unwrap_or_default(),
+            &git_context,
+            &inherited_handover,
+            &recent_context,
+            &recent_user_inputs,
+            evidence_path,
+        )
+    }
+
+    fn build_full_handover_evidence_for(
         &self,
         source: &Arc<PtySession>,
         source_info: &SessionInfo,
@@ -1382,50 +1665,23 @@ impl SessionManager {
             &source.inherited_handover.lock(),
             HANDOVER_INHERITED_CONTEXT_CHARS,
         );
-        let git_status = git_command(&source_info.cwd, &["status", "--short"])
-            .unwrap_or_else(|| "git status unavailable".to_string());
         let git_branch = git_command(&source_info.cwd, &["branch", "--show-current"])
             .unwrap_or_else(|| "unknown".to_string());
+        let git_status = git_command(&source_info.cwd, &["status", "--short"])
+            .unwrap_or_else(|| "git status unavailable".to_string());
         let git_diff = git_command(&source_info.cwd, &["diff"])
             .unwrap_or_else(|| "git diff unavailable".to_string());
         let staged_diff = git_command(&source_info.cwd, &["diff", "--staged"])
             .unwrap_or_else(|| "git staged diff unavailable".to_string());
-        build_handover_prompt(
-            &source_info,
-            &target_info,
+
+        build_full_handover_evidence(
+            source_info,
+            target_info,
             note.as_deref().unwrap_or_default(),
             &git_branch,
             &git_status,
             &git_diff,
             &staged_diff,
-            &inherited_handover,
-            &recent_context,
-            &recent_user_inputs,
-        )
-    }
-
-    fn build_compact_handover_prompt_for(
-        &self,
-        source: &Arc<PtySession>,
-        source_info: &SessionInfo,
-        target_info: &SessionInfo,
-        note: Option<String>,
-    ) -> String {
-        let recent_context =
-            clean_terminal_output(&source.ring.lock(), COMPACT_HANDOVER_CONTEXT_CHARS);
-        let recent_user_inputs =
-            clean_terminal_input(&source.input_ring.lock(), COMPACT_USER_INPUT_CHARS);
-        let inherited_handover = tail_chars(
-            &source.inherited_handover.lock(),
-            COMPACT_HANDOVER_INHERITED_CONTEXT_CHARS,
-        );
-        let git_status = git_command(&source_info.cwd, &["status", "--short"])
-            .unwrap_or_else(|| "git status unavailable".to_string());
-        build_compact_handover_prompt(
-            source_info,
-            target_info,
-            note.as_deref().unwrap_or_default(),
-            &tail_chars(&git_status, COMPACT_GIT_STATUS_CHARS),
             &inherited_handover,
             &recent_context,
             &recent_user_inputs,
@@ -1996,7 +2252,46 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn write_handover_file(cwd: &str, prompt: &str) -> Result<PathBuf, String> {
+struct HandoverPaths {
+    main_path: PathBuf,
+    evidence_path: PathBuf,
+}
+
+struct WrittenHandover {
+    prompt: String,
+    main_path: PathBuf,
+    evidence_path: Option<PathBuf>,
+    effective_mode: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EffectiveHandoverMode {
+    Compact,
+    Full,
+}
+
+impl EffectiveHandoverMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            EffectiveHandoverMode::Compact => "compact",
+            EffectiveHandoverMode::Full => "full",
+        }
+    }
+}
+
+fn resolve_handover_mode(
+    requested_mode: HandoverContentMode,
+    is_large: bool,
+) -> EffectiveHandoverMode {
+    match requested_mode {
+        HandoverContentMode::Recommended if is_large => EffectiveHandoverMode::Compact,
+        HandoverContentMode::Recommended => EffectiveHandoverMode::Full,
+        HandoverContentMode::Compact => EffectiveHandoverMode::Compact,
+        HandoverContentMode::Full => EffectiveHandoverMode::Full,
+    }
+}
+
+fn reserve_handover_paths(cwd: &str) -> Result<HandoverPaths, String> {
     let dir = handover_workspace_dir(cwd)?;
     fs::create_dir_all(&dir).map_err(|err| {
         format!(
@@ -2004,10 +2299,33 @@ fn write_handover_file(cwd: &str, prompt: &str) -> Result<PathBuf, String> {
             dir.display()
         )
     })?;
-    let path = dir.join(format!("handover-{}.md", Uuid::new_v4()));
-    fs::write(&path, prompt)
-        .map_err(|err| format!("failed to write handover file {}: {err}", path.display()))?;
-    Ok(path)
+    let id = Uuid::new_v4();
+    Ok(HandoverPaths {
+        main_path: dir.join(format!("handover-{id}.md")),
+        evidence_path: dir.join(format!("handover-{id}-full-evidence.md")),
+    })
+}
+
+fn write_handover_files(
+    paths: &HandoverPaths,
+    prompt: &str,
+    evidence: Option<&str>,
+) -> Result<(), String> {
+    if let Some(evidence) = evidence {
+        fs::write(&paths.evidence_path, evidence).map_err(|err| {
+            format!(
+                "failed to write handover evidence file {}: {err}",
+                paths.evidence_path.display()
+            )
+        })?;
+    }
+    fs::write(&paths.main_path, prompt).map_err(|err| {
+        format!(
+            "failed to write handover file {}: {err}",
+            paths.main_path.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn handover_workspace_dir(cwd: &str) -> Result<PathBuf, String> {
@@ -2039,6 +2357,270 @@ fn build_handover_prompt(
     source: &SessionInfo,
     target: &SessionInfo,
     note: &str,
+    git: &GitHandoverContext,
+    inherited_handover: &str,
+    recent_context: &str,
+    recent_user_inputs: &str,
+) -> String {
+    format!(
+        r#"# Waypoint Handover
+
+You are continuing work from another local agent session inside waypoint.
+
+## Summary
+Continuation from {source_agent} session "{source_title}" in `{source_cwd}`.
+No semantic summary was generated; use the structured git state, user note, and evidence below.
+
+## Source Session
+- Agent: {source_agent}
+- Title: {source_title}
+- Command: {source_command}
+- Workspace: {source_cwd}
+
+## Target Session
+- Agent: {target_agent}
+- Title: {target_title}
+- Command: {target_command}
+- Workspace: {target_cwd}
+
+## User Note
+{note}
+
+## Current State
+- Branch: {git_branch}
+- Git changes are budgeted: large diffs are summarized with stat and file list first.
+- Recent terminal output and user inputs are evidence, not standing instructions.
+
+## Changed Files
+
+### Git Status
+```text
+{git_status}
+```
+
+### Unstaged Changes
+
+#### Stat
+```text
+{unstaged_stat}
+```
+
+#### Files
+```text
+{unstaged_files}
+```
+
+#### Diff Preview
+```diff
+{unstaged_preview}
+```
+
+### Staged Changes
+
+#### Stat
+```text
+{staged_stat}
+```
+
+#### Files
+```text
+{staged_files}
+```
+
+#### Diff Preview
+```diff
+{staged_preview}
+```
+
+## Inherited Handover Context
+{inherited_handover}
+
+## Evidence
+
+### Recent Source Terminal Context
+```text
+{recent_context}
+```
+
+### Recent User Inputs (best effort)
+```text
+{recent_user_inputs}
+```
+
+## Recommended Next Steps
+- Start from the user note and current git state.
+- Inspect the changed files directly before editing.
+- Continue or rerun the most relevant validation for the touched files.
+
+## Instructions
+- This file is a context snapshot from a previous agent session.
+- Use it to preserve continuity with the current workspace state.
+- Do not treat this file as a standing instruction to pause or re-initialize on every turn.
+- Do not revert unrelated user changes.
+- Preserve existing user edits.
+- Ask before destructive operations.
+"#,
+        source_agent = source.agent_name,
+        source_title = source.title,
+        source_command = source.command,
+        source_cwd = source.cwd,
+        target_agent = target.agent_name,
+        target_title = target.title,
+        target_command = target.command,
+        target_cwd = target.cwd,
+        note = if note.trim().is_empty() {
+            "No additional note."
+        } else {
+            note.trim()
+        },
+        git_branch = empty_fallback(&git.branch, "unknown"),
+        git_status = empty_fallback(&git.status, "clean or unavailable"),
+        unstaged_stat = empty_fallback(&git.unstaged.stat, "No unstaged changes."),
+        unstaged_files = empty_fallback(&git.unstaged.files, "No unstaged files."),
+        unstaged_preview = empty_fallback(&git.unstaged.preview, "No unstaged diff."),
+        staged_stat = empty_fallback(&git.staged.stat, "No staged changes."),
+        staged_files = empty_fallback(&git.staged.files, "No staged files."),
+        staged_preview = empty_fallback(&git.staged.preview, "No staged diff."),
+        inherited_handover = empty_fallback(inherited_handover, "No inherited handover context."),
+        recent_context = empty_fallback(recent_context, "No recent terminal context captured."),
+        recent_user_inputs = empty_fallback(recent_user_inputs, "No recent user input captured."),
+    )
+}
+
+fn build_compact_handover_prompt(
+    source: &SessionInfo,
+    target: &SessionInfo,
+    note: &str,
+    git: &GitHandoverContext,
+    inherited_handover: &str,
+    recent_context: &str,
+    recent_user_inputs: &str,
+    evidence_path: Option<&str>,
+) -> String {
+    format!(
+        r#"# Waypoint Handover
+
+Continue from the previous local agent session.
+
+## Summary
+Continuation from {source_agent} session "{source_title}" in `{source_cwd}`.
+This compact handover includes git status, diff stats, file lists, and short evidence.
+
+## Source
+- Agent: {source_agent}
+- Title: {source_title}
+- Workspace: {source_cwd}
+
+## Target
+- Agent: {target_agent}
+- Workspace: {target_cwd}
+
+## User Note
+{note}
+
+## Current State
+- Branch: {git_branch}
+- Full diffs are omitted in compact handover; inspect listed files directly if needed.
+
+## Changed Files
+
+### Git Status
+```text
+{git_status}
+```
+
+### Unstaged Changes
+
+#### Stat
+```text
+{unstaged_stat}
+```
+
+#### Files
+```text
+{unstaged_files}
+```
+
+#### Diff Preview
+```diff
+{unstaged_preview}
+```
+
+### Staged Changes
+
+#### Stat
+```text
+{staged_stat}
+```
+
+#### Files
+```text
+{staged_files}
+```
+
+#### Diff Preview
+```diff
+{staged_preview}
+```
+
+## Inherited Handover Context
+{inherited_handover}
+
+## Full Evidence
+{full_evidence}
+
+## Evidence
+
+### Recent Source Context
+```text
+{recent_context}
+```
+
+### Recent User Inputs (best effort)
+```text
+{recent_user_inputs}
+```
+
+## Recommended Next Steps
+- Start from the user note and changed file list.
+- Inspect changed files directly before editing.
+- Continue or rerun the most relevant validation for the touched files.
+
+## Instructions
+- This file is a context snapshot from a previous agent session.
+- Use it to preserve continuity with the current workspace state.
+- Do not treat this file as a standing instruction to pause or re-initialize on every turn.
+- Do not revert unrelated user changes.
+"#,
+        source_agent = source.agent_name,
+        source_title = source.title,
+        source_cwd = source.cwd,
+        target_agent = target.agent_name,
+        target_cwd = target.cwd,
+        note = if note.trim().is_empty() {
+            "No additional note."
+        } else {
+            note.trim()
+        },
+        git_branch = empty_fallback(&git.branch, "unknown"),
+        git_status = empty_fallback(&git.status, "clean or unavailable"),
+        unstaged_stat = empty_fallback(&git.unstaged.stat, "No unstaged changes."),
+        unstaged_files = empty_fallback(&git.unstaged.files, "No unstaged files."),
+        unstaged_preview = empty_fallback(&git.unstaged.preview, "No unstaged diff."),
+        staged_stat = empty_fallback(&git.staged.stat, "No staged changes."),
+        staged_files = empty_fallback(&git.staged.files, "No staged files."),
+        staged_preview = empty_fallback(&git.staged.preview, "No staged diff."),
+        full_evidence = format_full_evidence_reference(evidence_path),
+        inherited_handover = empty_fallback(inherited_handover, "No inherited handover context."),
+        recent_context = empty_fallback(recent_context, "No recent terminal context captured."),
+        recent_user_inputs = empty_fallback(recent_user_inputs, "No recent user input captured."),
+    )
+}
+
+fn build_full_handover_evidence(
+    source: &SessionInfo,
+    target: &SessionInfo,
+    note: &str,
     git_branch: &str,
     git_status: &str,
     git_diff: &str,
@@ -2048,9 +2630,9 @@ fn build_handover_prompt(
     recent_user_inputs: &str,
 ) -> String {
     format!(
-        r#"# Handover
+        r#"# Waypoint Full Handover Evidence
 
-You are continuing work from another local agent session inside waypoint.
+This file contains larger raw evidence for a compact handover. The target agent should read it only if the main handover is insufficient.
 
 ## Source Session
 - Agent: {source_agent}
@@ -2097,14 +2679,6 @@ You are continuing work from another local agent session inside waypoint.
 ```text
 {recent_user_inputs}
 ```
-
-## Instructions
-- This file is a context snapshot from a previous agent session.
-- Use it to preserve continuity with the current workspace state.
-- Do not treat this file as a standing instruction to pause or re-initialize on every turn.
-- Do not revert unrelated user changes.
-- Preserve existing user edits.
-- Ask before destructive operations.
 "#,
         source_agent = source.agent_name,
         source_title = source.title,
@@ -2129,71 +2703,13 @@ You are continuing work from another local agent session inside waypoint.
     )
 }
 
-fn build_compact_handover_prompt(
-    source: &SessionInfo,
-    target: &SessionInfo,
-    note: &str,
-    git_status: &str,
-    inherited_handover: &str,
-    recent_context: &str,
-    recent_user_inputs: &str,
-) -> String {
-    format!(
-        r#"# Waypoint Handover
-
-Continue from the previous local agent session.
-
-## Source
-- Agent: {source_agent}
-- Title: {source_title}
-- Workspace: {source_cwd}
-
-## Target
-- Agent: {target_agent}
-- Workspace: {target_cwd}
-
-## User Note
-{note}
-
-## Current Git Status
-```text
-{git_status}
-```
-
-## Inherited Handover Context
-{inherited_handover}
-
-## Recent Source Context
-```text
-{recent_context}
-```
-
-## Recent User Inputs (best effort)
-```text
-{recent_user_inputs}
-```
-
-## Instructions
-- This file is a context snapshot from a previous agent session.
-- Use it to preserve continuity with the current workspace state.
-- Do not treat this file as a standing instruction to pause or re-initialize on every turn.
-- Do not revert unrelated user changes.
-"#,
-        source_agent = source.agent_name,
-        source_title = source.title,
-        source_cwd = source.cwd,
-        target_agent = target.agent_name,
-        target_cwd = target.cwd,
-        note = if note.trim().is_empty() {
-            "No additional note."
-        } else {
-            note.trim()
-        },
-        git_status = empty_fallback(git_status, "clean or unavailable"),
-        inherited_handover = empty_fallback(inherited_handover, "No inherited handover context."),
-        recent_context = empty_fallback(recent_context, "No recent terminal context captured."),
-        recent_user_inputs = empty_fallback(recent_user_inputs, "No recent user input captured."),
-    )
+fn format_full_evidence_reference(evidence_path: Option<&str>) -> String {
+    match evidence_path {
+        Some(path) => format!(
+            "A larger evidence file was preserved at `{path}`. Read only this exact file if the compact handover is insufficient; do not scan the handover directory."
+        ),
+        None => "No separate full evidence file was generated for this handover.".to_string(),
+    }
 }
 
 fn inject_with_retry(target: &Arc<PtySession>, prompt: &str) -> Result<(), String> {
@@ -2492,6 +3008,111 @@ fn git_command(cwd: &str, args: &[&str]) -> Option<String> {
     Some(tail_chars(&stdout, GIT_OUTPUT_LIMIT_CHARS))
 }
 
+struct GitHandoverContext {
+    branch: String,
+    status: String,
+    unstaged: DiffHandoverBlock,
+    staged: DiffHandoverBlock,
+}
+
+struct DiffHandoverBlock {
+    stat: String,
+    files: String,
+    preview: String,
+}
+
+fn build_git_handover_context(
+    cwd: &str,
+    diff_preview_limit: usize,
+    diff_stat_limit: usize,
+    diff_files_limit: usize,
+    status_limit: usize,
+) -> GitHandoverContext {
+    let branch =
+        git_command(cwd, &["branch", "--show-current"]).unwrap_or_else(|| "unknown".to_string());
+    let status = git_command(cwd, &["status", "--short"])
+        .unwrap_or_else(|| "git status unavailable".to_string());
+
+    GitHandoverContext {
+        branch: empty_fallback(&branch, "unknown").to_string(),
+        status: tail_chars(
+            empty_fallback(&status, "clean or unavailable"),
+            status_limit,
+        ),
+        unstaged: build_diff_handover_block(
+            cwd,
+            &["diff"],
+            "unstaged",
+            diff_preview_limit,
+            diff_stat_limit,
+            diff_files_limit,
+        ),
+        staged: build_diff_handover_block(
+            cwd,
+            &["diff", "--staged"],
+            "staged",
+            diff_preview_limit,
+            diff_stat_limit,
+            diff_files_limit,
+        ),
+    }
+}
+
+fn build_diff_handover_block(
+    cwd: &str,
+    diff_args: &[&str],
+    label: &str,
+    diff_preview_limit: usize,
+    diff_stat_limit: usize,
+    diff_files_limit: usize,
+) -> DiffHandoverBlock {
+    let mut stat_args = diff_args.to_vec();
+    stat_args.push("--stat");
+    let stat = git_command(cwd, &stat_args)
+        .unwrap_or_else(|| format!("git {label} diff stat unavailable"));
+
+    let mut files_args = diff_args.to_vec();
+    files_args.push("--name-only");
+    let files = git_command(cwd, &files_args)
+        .unwrap_or_else(|| format!("git {label} diff file list unavailable"));
+
+    let diff =
+        git_command(cwd, diff_args).unwrap_or_else(|| format!("git {label} diff unavailable"));
+
+    DiffHandoverBlock {
+        stat: tail_chars(
+            empty_fallback(&stat, &format!("No {label} changes.")),
+            diff_stat_limit,
+        ),
+        files: tail_chars(
+            empty_fallback(&files, &format!("No {label} files.")),
+            diff_files_limit,
+        ),
+        preview: format_budgeted_diff_preview(label, &diff, diff_preview_limit),
+    }
+}
+
+fn format_budgeted_diff_preview(label: &str, diff: &str, limit: usize) -> String {
+    if limit == 0 {
+        return format!(
+            "Full {label} diff omitted in compact handover. Use the stat and file list above, then inspect files directly if needed."
+        );
+    }
+
+    let trimmed = diff.trim();
+    if trimmed.is_empty() {
+        return format!("No {label} diff.");
+    }
+
+    if trimmed.starts_with("[truncated to last") || trimmed.chars().count() > limit {
+        return format!(
+            "Full {label} diff omitted because it exceeds the {limit}-character handover budget. Use the stat and file list above, then inspect files directly if needed."
+        );
+    }
+
+    trimmed.to_string()
+}
+
 fn tail_chars(value: &str, limit: usize) -> String {
     if value.chars().count() <= limit {
         return value.to_string();
@@ -2752,6 +3373,94 @@ mod tests {
         assert!(result.contains("hi"));
         assert!(result.contains("fr"));
         assert!(!result.contains('\x1b'));
+    }
+
+    #[test]
+    fn test_format_budgeted_diff_preview_keeps_small_diff() {
+        let diff = "diff --git a/a.rs b/a.rs\n+let value = 1;";
+        let result = format_budgeted_diff_preview("unstaged", diff, 1000);
+        assert_eq!(result, diff);
+    }
+
+    #[test]
+    fn test_format_budgeted_diff_preview_omits_large_diff() {
+        let diff = "a".repeat(100);
+        let result = format_budgeted_diff_preview("unstaged", &diff, 10);
+        assert!(result.contains("Full unstaged diff omitted"));
+        assert!(result.contains("10-character handover budget"));
+    }
+
+    #[test]
+    fn test_format_budgeted_diff_preview_omits_compact_diff() {
+        let result = format_budgeted_diff_preview("staged", "diff --git", 0);
+        assert!(result.contains("Full staged diff omitted in compact handover"));
+    }
+
+    #[test]
+    fn test_compact_handover_prompt_is_structured_manifest() {
+        let source = SessionInfo {
+            id: "source".to_string(),
+            agent_id: "codex".to_string(),
+            agent_name: "Codex".to_string(),
+            title: "Source Session".to_string(),
+            command: "codex".to_string(),
+            cwd: "/tmp/workspace".to_string(),
+            status: SessionStatus::Running,
+            attached: false,
+            created_at: 1,
+            last_active_at: 1,
+            first_user_message: None,
+            native_session_ref: None,
+        };
+        let target = SessionInfo {
+            id: "target".to_string(),
+            agent_id: "claude-code".to_string(),
+            agent_name: "Claude Code".to_string(),
+            title: "Target Session".to_string(),
+            command: "claude".to_string(),
+            cwd: "/tmp/workspace".to_string(),
+            status: SessionStatus::Running,
+            attached: false,
+            created_at: 2,
+            last_active_at: 2,
+            first_user_message: None,
+            native_session_ref: None,
+        };
+        let git = GitHandoverContext {
+            branch: "feature/handover".to_string(),
+            status: " M src-tauri/src/pty_manager.rs".to_string(),
+            unstaged: DiffHandoverBlock {
+                stat: "src-tauri/src/pty_manager.rs | 10 +++++".to_string(),
+                files: "src-tauri/src/pty_manager.rs".to_string(),
+                preview: "Full unstaged diff omitted in compact handover.".to_string(),
+            },
+            staged: DiffHandoverBlock {
+                stat: "No staged changes.".to_string(),
+                files: "No staged files.".to_string(),
+                preview: "No staged diff.".to_string(),
+            },
+        };
+
+        let result = build_compact_handover_prompt(
+            &source,
+            &target,
+            "finish P0",
+            &git,
+            "",
+            "log",
+            "input",
+            None,
+        );
+
+        assert!(result.contains("## Summary"));
+        assert!(result.contains("## Current State"));
+        assert!(result.contains("## Changed Files"));
+        assert!(result.contains("### Unstaged Changes"));
+        assert!(result.contains("#### Files"));
+        assert!(result.contains("## Evidence"));
+        assert!(result.contains("## Recommended Next Steps"));
+        assert!(result.contains("finish P0"));
+        assert!(result.contains("src-tauri/src/pty_manager.rs"));
     }
 
     #[test]

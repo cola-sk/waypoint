@@ -50,6 +50,24 @@ export type HandoverResult = {
   sourceSession: SessionInfo;
   targetSession: SessionInfo;
   mode: string;
+  handoverMode: HandoverContentMode;
+  handoverPath?: string | null;
+  evidencePath?: string | null;
+};
+
+export type HandoverContentMode = "recommended" | "compact" | "full";
+
+export type HandoverPreview = {
+  estimatedChars: number;
+  largeThresholdChars: number;
+  isLarge: boolean;
+  recommendedMode: "compact" | "full";
+  terminalContextChars: number;
+  userInputChars: number;
+  inheritedContextChars: number;
+  gitStatusChars: number;
+  unstagedDiffChars: number;
+  stagedDiffChars: number;
 };
 
 export type AgentPresetInfo = {
