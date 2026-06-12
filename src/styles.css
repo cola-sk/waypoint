@@ -306,6 +306,7 @@ textarea:focus-visible {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  min-height: 30px;
   padding: 0 8px;
 }
 
@@ -329,10 +330,21 @@ textarea:focus-visible {
   background: #ffd7c9;
   color: #1f2328;
   cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(0) scale(0.94);
   transition:
     background 140ms ease,
+    opacity 140ms ease,
     box-shadow 140ms ease,
     transform 140ms ease;
+}
+
+.section-header:hover .add-workspace-btn,
+.section-header:focus-within .add-workspace-btn {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0) scale(1);
 }
 
 .add-workspace-btn:hover {

@@ -86,7 +86,7 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
       minimumContrastRatio: 5.2,
       drawBoldTextInBrightColors: false,
       convertEol: false,
-      scrollback: 12000,
+      scrollback: 50000,
       theme: {
         background: "#101318",
         foreground: "#edf2f7",

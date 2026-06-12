@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ChevronRight,
   Folder,
+  FolderPlus,
   RefreshCw,
   Send,
   Square,
@@ -674,7 +675,7 @@ function App() {
               onClick={() => setIsAddingWorkspace(!isAddingWorkspace)}
               title="固定新工作区目录"
             >
-              <Plus size={14} />
+              <FolderPlus size={15} />
             </button>
           </div>
 
