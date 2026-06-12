@@ -850,28 +850,53 @@ function App() {
                       const activeInGroup = group.sessions.some((session) => session.id === activeSessionId);
                       const expanded = expandedAgents[groupKey] ?? activeInGroup;
                       const runningCount = group.sessions.filter((session) => session.status === "running").length;
+                      const agentAvailable = agents.some(
+                        (agent) => agent.id === group.agentId && agent.available,
+                      );
 
                       return (
                         <div className="agent-history-group" key={groupKey}>
-                          <button
-                            type="button"
+                          <div
+                            role="button"
+                            tabIndex={0}
                             className={`agent-history-header ${activeInGroup ? "active" : ""}`}
                             onClick={() => toggleAgentGroup(folder.path, group.agentId)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault();
+                                toggleAgentGroup(folder.path, group.agentId);
+                              }
+                            }}
                           >
                             {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
                             <Bot size={13} />
                             <span className="agent-history-name">{group.agentName}</span>
+                            <button
+                              type="button"
+                              className="agent-history-new-btn"
+                              disabled={isLaunching || !agentAvailable}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                handleCreateSessionForPath(group.agentId, folder.path);
+                              }}
+                              onKeyDown={(event) => event.stopPropagation()}
+                              title={
+                                agentAvailable
+                                  ? `在当前目录新建 ${group.agentName} 会话`
+                                  : `${group.agentName} 当前不可用`
+                              }
+                            >
+                              <Plus size={12} />
+                            </button>
                             <span className="agent-history-badges">
                               <span className="agent-history-count">
-                                {group.sessions.length > 0
-                                  ? `${group.sessions.length}`
-                                  : "0"}
+                                {group.sessions.length > 0 ? `${group.sessions.length}` : "0"}
                               </span>
                               {runningCount > 0 ? (
                                 <span className="agent-history-live">{runningCount} live</span>
                               ) : null}
                             </span>
-                          </button>
+                          </div>
 
                           {expanded ? (
                             <div className="agent-history-children">

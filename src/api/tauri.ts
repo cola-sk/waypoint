@@ -17,13 +17,16 @@ function assertTauriRuntime() {
   }
 }
 
+const DEFAULT_TERMINAL_ROWS = 30;
+const DEFAULT_TERMINAL_COLS = 160;
+
 export function createAgentSession(agentId: string, cwd: string): Promise<SessionInfo> {
   assertTauriRuntime();
   return invoke("create_agent_session", {
     agentId,
     cwd,
-    rows: 30,
-    cols: 100,
+    rows: DEFAULT_TERMINAL_ROWS,
+    cols: DEFAULT_TERMINAL_COLS,
   });
 }
 
@@ -90,8 +93,8 @@ export function reactivateSession(sessionId: string): Promise<SessionInfo> {
   assertTauriRuntime();
   return invoke("reactivate_session", {
     sessionId,
-    rows: 30,
-    cols: 100,
+    rows: DEFAULT_TERMINAL_ROWS,
+    cols: DEFAULT_TERMINAL_COLS,
   });
 }
 
@@ -145,8 +148,8 @@ export function continueSession(
     targetAgentId,
     cwd,
     note,
-    rows: 30,
-    cols: 100,
+    rows: DEFAULT_TERMINAL_ROWS,
+    cols: DEFAULT_TERMINAL_COLS,
   });
 }
 

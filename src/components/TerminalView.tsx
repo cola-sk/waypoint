@@ -74,13 +74,14 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
       cursorBlink: true,
       cursorStyle: "bar",
       fontFamily:
-        'JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "PingFang SC", "Microsoft YaHei", "Liberation Mono", monospace',
-      fontSize: 14.5,
-      lineHeight: 1.52,
-      letterSpacing: 0.16,
+        '"Sarasa Term SC", "Maple Mono NF CN", "Maple Mono CN", "Noto Sans Mono CJK SC", "JetBrains Mono", "PingFang SC", "Microsoft YaHei", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+      fontSize: 13.5,
+      lineHeight: 1.42,
+      letterSpacing: 0,
       fontWeight: 430,
       fontWeightBold: 700,
-      minimumContrastRatio: 4.5,
+      minimumContrastRatio: 5.2,
+      drawBoldTextInBrightColors: false,
       convertEol: false,
       scrollback: 12000,
       theme: {
@@ -313,10 +314,10 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
   };
 
   return (
-    <div className="terminal-shell" data-status={status} onClick={handleContainerClick} ref={shellRef}>
+    <div className="terminal-view" data-status={status}>
       {status === "readonly" && !isRestoring && (
         <div className="resume-banner">
-          <span className="banner-icon">💡</span>
+          <span className="banner-icon" aria-hidden="true">i</span>
           <span>
             当前为历史只读会话。
             <button
@@ -333,29 +334,31 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
           </span>
         </div>
       )}
-      <div className="terminal-surface" ref={surfaceRef} />
-      {status === "connecting" ? (
-        <div className="terminal-restore-overlay" role="status" aria-live="polite">
-          <div className="terminal-restore-panel">
-            <span className="terminal-restore-spinner" aria-hidden="true" />
-            <div>
-              <strong>正在加载会话</strong>
-              <span>正在加载终端内容，请稍候...</span>
+      <div className="terminal-shell" data-status={status} onClick={handleContainerClick} ref={shellRef}>
+        <div className="terminal-surface" ref={surfaceRef} />
+        {status === "connecting" ? (
+          <div className="terminal-restore-overlay" role="status" aria-live="polite">
+            <div className="terminal-restore-panel">
+              <span className="terminal-restore-spinner" aria-hidden="true" />
+              <div>
+                <strong>正在加载会话</strong>
+                <span>正在加载终端内容，请稍候...</span>
+              </div>
             </div>
           </div>
-        </div>
-      ) : null}
-      {isRestoring && status !== "connecting" ? (
-        <div className="terminal-restore-overlay" role="status" aria-live="polite">
-          <div className="terminal-restore-panel">
-            <span className="terminal-restore-spinner" aria-hidden="true" />
-            <div>
-              <strong>正在恢复会话</strong>
-              <span>正在连接 Agent 原生历史，恢复完成后会继续显示会话内容。</span>
+        ) : null}
+        {isRestoring && status !== "connecting" ? (
+          <div className="terminal-restore-overlay" role="status" aria-live="polite">
+            <div className="terminal-restore-panel">
+              <span className="terminal-restore-spinner" aria-hidden="true" />
+              <div>
+                <strong>正在恢复会话</strong>
+                <span>正在连接 Agent 原生历史，恢复完成后会继续显示会话内容。</span>
+              </div>
             </div>
           </div>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
     </div>
   );
 }
