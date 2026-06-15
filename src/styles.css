@@ -319,6 +319,162 @@ textarea:focus-visible {
   text-transform: uppercase;
 }
 
+.pinned-list {
+  display: flex;
+  max-height: 28vh;
+  min-height: 0;
+  flex: 0 1 auto;
+  flex-direction: column;
+  gap: 6px;
+  overflow: hidden;
+  padding: 0 8px 0 2px;
+}
+
+.pinned-section-header {
+  min-height: 22px;
+  padding: 0 8px;
+}
+
+.pinned-items {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 4px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 2px;
+  scrollbar-color: #aaa69d transparent;
+}
+
+.pinned-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-primary);
+  padding: 3px 4px 3px 6px;
+  text-align: left;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.pinned-item:hover,
+.pinned-item:focus-visible,
+.pinned-item.active {
+  border-color: #ffd3c4;
+  background: rgba(255, 255, 255, 0.68);
+  box-shadow: none;
+}
+
+.pinned-item:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: 2px;
+}
+
+.pinned-main-action {
+  display: grid;
+  align-items: center;
+  width: 100%;
+  min-height: 28px;
+  min-width: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  gap: 8px;
+  padding: 0;
+  text-align: left;
+}
+
+.pinned-main-action.pinned-session-action {
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+}
+
+.pinned-main-action:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: 2px;
+}
+
+.pinned-item-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+}
+
+.pinned-item-icon.workspace {
+  background: transparent;
+  color: #bd4828;
+}
+
+.pinned-item-icon.session {
+  background: transparent;
+  color: var(--accent-cyan);
+}
+
+.pinned-item-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pinned-item-title,
+.pinned-item-subtitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pinned-item-title {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 740;
+  line-height: 1.15;
+}
+
+.pinned-item-subtitle {
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 620;
+  line-height: 1.2;
+}
+
+.pinned-unpin-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  background: transparent;
+  color: #bd4828;
+  cursor: pointer;
+  flex: 0 0 auto;
+  opacity: 0.72;
+  transition:
+    background 120ms ease,
+    color 120ms ease,
+    opacity 120ms ease;
+}
+
+.pinned-unpin-btn:hover {
+  background: rgba(217, 83, 79, 0.1);
+  color: var(--accent-red);
+  opacity: 1;
+}
+
 .add-workspace-btn {
   display: flex;
   align-items: center;
@@ -353,68 +509,11 @@ textarea:focus-visible {
   transform: translateY(-1px);
 }
 
-.add-workspace-form {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  border: 1px solid var(--border-color-muted);
-  border-radius: 8px;
-  background: var(--bg-tertiary);
-  padding: 10px;
-  box-shadow: var(--shadow-panel);
-}
-
-.add-workspace-form input {
-  width: 100%;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-input);
-  color: var(--text-primary);
-  font-size: 12px;
-  outline: none;
-  padding: 7px 9px;
-  font-family: var(--font-mono);
-}
-
-.add-workspace-form input:focus {
-  border-color: var(--border-color-glow);
-  box-shadow: 0 0 0 3px var(--accent-cyan-dim);
-}
-
-.add-workspace-form .form-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 6px;
-}
-
-.add-workspace-form .form-actions button {
-  border: 1px solid transparent;
-  border-radius: 7px;
-  cursor: pointer;
-  font-size: 12px;
-  padding: 5px 10px;
-}
-
-.add-workspace-form .form-actions button[type="button"] {
-  border-color: var(--border-color);
-  background: #ffffff;
-  color: var(--text-secondary);
-}
-
-.add-workspace-form .form-actions button[type="button"]:hover {
-  color: var(--text-primary);
-  background: #f4f3ef;
-}
-
-.add-workspace-form .form-actions button[type="submit"] {
-  background: var(--accent-cyan);
-  color: #ffffff;
-  font-weight: 700;
-}
-
-.add-workspace-form .form-actions button[type="submit"]:hover {
-  background: #ff5f38;
-  box-shadow: var(--glow-cyan);
+.add-workspace-btn:disabled {
+  cursor: wait;
+  opacity: 0.5;
+  pointer-events: none;
+  transform: translateY(0) scale(0.94);
 }
 
 .workspace-tree {
@@ -456,6 +555,7 @@ textarea:focus-visible {
 
 .workspace-folder-info {
   display: flex;
+  flex: 1 1 auto;
   align-items: center;
   gap: 8px;
   min-width: 0;
@@ -479,8 +579,10 @@ textarea:focus-visible {
 
 .workspace-folder-actions {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 6px;
+  position: relative;
 }
 
 .new-session-btn {
@@ -505,8 +607,10 @@ textarea:focus-visible {
     opacity 140ms ease;
 }
 
-.workspace-folder-header:hover .new-session-btn,
-.workspace-folder-header:focus-within .new-session-btn {
+.workspace-folder-node:hover .new-session-btn,
+.workspace-folder-node:focus-within .new-session-btn,
+.workspace-folder-node:hover .workspace-more-btn,
+.workspace-folder-node:focus-within .workspace-more-btn {
   opacity: 1;
   pointer-events: auto;
 }
@@ -518,24 +622,82 @@ textarea:focus-visible {
   box-shadow: var(--glow-cyan);
 }
 
-.remove-folder-btn {
+.workspace-more-btn {
   display: flex;
   align-items: center;
   justify-content: center;
+  flex: 0 0 auto;
   width: 24px;
   height: 24px;
   border-radius: 7px;
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
   transition:
     background 140ms ease,
-    color 140ms ease;
+    color 140ms ease,
+    opacity 140ms ease;
 }
 
-.remove-folder-btn:hover {
+.workspace-more-btn:hover {
+  background: #fff4ef;
+  color: #bd4828;
+}
+
+.workspace-action-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 100;
+  display: flex;
+  width: 148px;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 18px 38px rgba(31, 35, 40, 0.16);
+  padding: 5px;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  animation: popoverFadeIn 140ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.workspace-action-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 680;
+  padding: 0 9px;
+  text-align: left;
+  transition:
+    background 120ms ease,
+    color 120ms ease;
+}
+
+.workspace-action-item:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: #bd4828;
+}
+
+.workspace-action-item:first-child:hover:not(:disabled) {
   background: rgba(217, 83, 79, 0.1);
   color: var(--accent-red);
+}
+
+.workspace-action-item:disabled {
+  cursor: default;
+  color: var(--text-muted);
+  opacity: 0.58;
 }
 
 .popover-backdrop {
@@ -549,12 +711,16 @@ textarea:focus-visible {
   position: relative;
 }
 
+.new-session-popover-wrapper {
+  position: static;
+}
+
 .agent-popover {
   position: absolute;
   top: calc(100% + 8px);
-  right: 0;
+  right: -2px;
   z-index: 100;
-  width: 206px;
+  width: min(206px, calc(100vw - 32px));
   border: 1px solid var(--border-color);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.96);
@@ -672,6 +838,10 @@ textarea:focus-visible {
   border-color: #ffd3c4;
   background: #fff0ea;
   box-shadow: 0 6px 14px rgba(255, 111, 76, 0.1);
+}
+
+.workspace-session-item.pinned {
+  background: rgba(255, 244, 239, 0.58);
 }
 
 .agent-history-group {
@@ -929,6 +1099,7 @@ textarea:focus-visible {
 }
 
 .session-kill-btn,
+.session-pin-btn,
 .session-delete-btn,
 .session-remove-history-btn {
   display: flex;
@@ -950,6 +1121,24 @@ textarea:focus-visible {
 .session-remove-history-btn:hover {
   background: rgba(217, 83, 79, 0.1);
   color: var(--accent-red);
+}
+
+.session-pin-btn {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.workspace-session-item:hover .session-pin-btn,
+.workspace-session-item:focus-within .session-pin-btn,
+.session-pin-btn.active {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.session-pin-btn:hover,
+.session-pin-btn.active {
+  background: #fff4ef;
+  color: #bd4828;
 }
 
 .no-sessions {

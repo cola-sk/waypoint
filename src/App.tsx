@@ -6,6 +6,9 @@ import {
   ChevronRight,
   Folder,
   FolderPlus,
+  MoreHorizontal,
+  MessageSquare,
+  Pin,
   RefreshCw,
   Send,
   Square,
@@ -85,8 +88,61 @@ function sessionDisplayTitle(session: SessionInfo) {
 }
 
 const NONE_WORKSPACE_STORAGE_KEY = "waypoint_none_workspace_session_ids";
+const HIDDEN_WORKSPACE_STORAGE_KEY = "waypoint_hidden_workspace_paths";
+const PINNED_ITEMS_STORAGE_KEY = "waypoint_pinned_items";
 const NONE_WORKSPACE_VALUE = "__none_workspace__";
 const CUSTOM_WORKSPACE_VALUE = "__custom_workspace__";
+
+type PinnedItem = {
+  targetType: "session";
+  targetId: string;
+  createdAt: number;
+};
+
+type PinnedEntry = {
+  item: PinnedItem;
+  session: SessionInfo;
+  subtitle: string;
+};
+
+function pinnedItemKey(targetType: PinnedItem["targetType"], targetId: string) {
+  return `${targetType}:${targetId}`;
+}
+
+function parsePinnedItems(value: unknown): PinnedItem[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") {
+      return [];
+    }
+    const candidate = item as Partial<PinnedItem>;
+    if (candidate.targetType !== "session") {
+      return [];
+    }
+    if (typeof candidate.targetId !== "string" || !candidate.targetId.trim()) {
+      return [];
+    }
+    const key = pinnedItemKey(candidate.targetType, candidate.targetId);
+    if (seen.has(key)) {
+      return [];
+    }
+    seen.add(key);
+    return [
+      {
+        targetType: candidate.targetType,
+        targetId: candidate.targetId,
+        createdAt:
+          typeof candidate.createdAt === "number"
+            ? candidate.createdAt
+            : Date.now(),
+      },
+    ];
+  });
+}
 
 // ── Open-in-editor button ────────────────────────────────────────────────────
 
@@ -296,18 +352,21 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [deleteSessionId, setDeleteSessionId] = useState<string | null>(null);
   const [isDeletingSession, setIsDeletingSession] = useState(false);
+  const [removeWorkspaceTarget, setRemoveWorkspaceTarget] = useState<WorkspaceFolder | null>(null);
   const [newConversationOpen, setNewConversationOpen] = useState(false);
   const [newConversationWorkspaceValue, setNewConversationWorkspaceValue] =
     useState<string>(NONE_WORKSPACE_VALUE);
   const [newConversationCustomWorkspace, setNewConversationCustomWorkspace] = useState("");
   const [noneWorkspaceSessionIds, setNoneWorkspaceSessionIds] = useState<string[]>([]);
+  const [hiddenWorkspacePaths, setHiddenWorkspacePaths] = useState<string[]>([]);
+  const [pinnedItems, setPinnedItems] = useState<PinnedItem[]>([]);
+  const [isSelectingWorkspaceDirectory, setIsSelectingWorkspaceDirectory] = useState(false);
 
   // New Workspace state variables
   const [pinnedWorkspaces, setPinnedWorkspaces] = useState<WorkspaceFolder[]>([]);
-  const [newWorkspaceInput, setNewWorkspaceInput] = useState("");
-  const [isAddingWorkspace, setIsAddingWorkspace] = useState(false);
   const [detectedEditors, setDetectedEditors] = useState<EditorInfo[]>([]);
   const [activeNewMenuFolder, setActiveNewMenuFolder] = useState<string | null>(null);
+  const [activeWorkspaceMenuFolder, setActiveWorkspaceMenuFolder] = useState<string | null>(null);
   const [expandedAgents, setExpandedAgents] = useState<Record<string, boolean>>({});
   const [workspaceAgentHistory, setWorkspaceAgentHistory] = useState<
     Record<string, { agentId: string; agentName: string }[]>
@@ -324,6 +383,10 @@ function App() {
   const noneWorkspaceSessionIdSet = useMemo(
     () => new Set(noneWorkspaceSessionIds),
     [noneWorkspaceSessionIds],
+  );
+  const hiddenWorkspacePathSet = useMemo(
+    () => new Set(hiddenWorkspacePaths),
+    [hiddenWorkspacePaths],
   );
   const noneWorkspaceSessions = useMemo(
     () =>
@@ -357,6 +420,22 @@ function App() {
     () => sessions.find((session) => session.id === deleteSessionId) ?? null,
     [deleteSessionId, sessions],
   );
+  const pinnedItemKeySet = useMemo(
+    () => new Set(pinnedItems.map((item) => pinnedItemKey(item.targetType, item.targetId))),
+    [pinnedItems],
+  );
+  const workspaceNameByPath = useMemo(() => {
+    const names = new Map<string, string>();
+    pinnedWorkspaces.forEach((folder) => {
+      names.set(folder.path, folder.name);
+    });
+    sessions.forEach((session) => {
+      if (!names.has(session.cwd)) {
+        names.set(session.cwd, session.cwd.split(/[/\\]/).pop() || session.cwd);
+      }
+    });
+    return names;
+  }, [pinnedWorkspaces, sessions]);
 
   // Compute workspaces with nested active sessions
   const workspacesWithSessions = useMemo(() => {
@@ -377,6 +456,9 @@ function App() {
       if (folderMap[session.cwd]) {
         folderMap[session.cwd].sessions.push(session);
       } else {
+        if (hiddenWorkspacePathSet.has(session.cwd)) {
+          return;
+        }
         if (!unpinnedFolders[session.cwd]) {
           unpinnedFolders[session.cwd] = {
             folder: {
@@ -395,7 +477,25 @@ function App() {
       ...Object.values(folderMap),
       ...Object.values(unpinnedFolders),
     ];
-  }, [noneWorkspaceSessionIdSet, pinnedWorkspaces, sessions]);
+  }, [hiddenWorkspacePathSet, noneWorkspaceSessionIdSet, pinnedWorkspaces, sessions]);
+  const pinnedEntries = useMemo<PinnedEntry[]>(() => {
+    const sessionById = new Map(sessions.map((session) => [session.id, session]));
+
+    return pinnedItems.flatMap((item): PinnedEntry[] => {
+      const session = sessionById.get(item.targetId);
+      if (!session) {
+        return [];
+      }
+      const workspaceLabel = noneWorkspaceSessionIdSet.has(session.id)
+        ? "无工作区"
+        : workspaceNameByPath.get(session.cwd) ?? session.cwd;
+      return [{
+        item,
+        session,
+        subtitle: `${workspaceLabel} · ${session.agentName} · ${formatSessionTime(session.createdAt)}`,
+      }];
+    });
+  }, [noneWorkspaceSessionIdSet, pinnedItems, sessions, workspaceNameByPath]);
 
   async function refreshSessions(nextActiveId?: string) {
     const nextSessions = await listSessions();
@@ -450,11 +550,42 @@ function App() {
     });
   }
 
+  function updatePinnedItems(updater: (current: PinnedItem[]) => PinnedItem[]) {
+    setPinnedItems((current) => {
+      const next = updater(current);
+      localStorage.setItem(PINNED_ITEMS_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  }
+
+  function pinSession(targetId: string) {
+    updatePinnedItems((current) => {
+      const key = pinnedItemKey("session", targetId);
+      if (current.some((item) => pinnedItemKey(item.targetType, item.targetId) === key)) {
+        return current;
+      }
+      return [{ targetType: "session", targetId, createdAt: Date.now() }, ...current];
+    });
+  }
+
+  function unpinSession(targetId: string) {
+    updatePinnedItems((current) =>
+      current.filter(
+        (item) => pinnedItemKey(item.targetType, item.targetId) !== pinnedItemKey("session", targetId),
+      ),
+    );
+  }
+
+  function isSessionPinned(sessionId: string) {
+    return pinnedItemKeySet.has(pinnedItemKey("session", sessionId));
+  }
+
   // Handle adding workspace folder
   function handleAddWorkspace(path: string) {
     const trimmed = path.trim();
     if (!trimmed) return;
     if (pinnedWorkspaces.some((w) => w.path === trimmed)) {
+      revealWorkspacePath(trimmed);
       setError("该目录已存在于工作区中。");
       return;
     }
@@ -462,8 +593,33 @@ function App() {
     const nextFolders = [...pinnedWorkspaces, { path: trimmed, name, isPinned: true }];
     setPinnedWorkspaces(nextFolders);
     localStorage.setItem("waypoint_pinned_workspaces", JSON.stringify(nextFolders));
-    setNewWorkspaceInput("");
-    setIsAddingWorkspace(false);
+    revealWorkspacePath(trimmed);
+  }
+
+  async function pickDirectory(onSelected: (path: string) => void) {
+    setError(null);
+    try {
+      const selected = await selectDirectory();
+      if (selected) {
+        onSelected(selected);
+      }
+    } catch (err) {
+      setError(`选择目录失败：${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  async function handleAddWorkspaceFromPicker() {
+    if (isSelectingWorkspaceDirectory) {
+      return;
+    }
+    setActiveNewMenuFolder(null);
+    setActiveWorkspaceMenuFolder(null);
+    setIsSelectingWorkspaceDirectory(true);
+    try {
+      await pickDirectory(handleAddWorkspace);
+    } finally {
+      setIsSelectingWorkspaceDirectory(false);
+    }
   }
 
   // Handle removing workspace folder
@@ -471,6 +627,48 @@ function App() {
     const nextFolders = pinnedWorkspaces.filter((w) => w.path !== path);
     setPinnedWorkspaces(nextFolders);
     localStorage.setItem("waypoint_pinned_workspaces", JSON.stringify(nextFolders));
+    setActiveNewMenuFolder((current) => (current === path ? null : current));
+    setActiveWorkspaceMenuFolder((current) => (current === path ? null : current));
+    setHiddenWorkspacePaths((current) => {
+      if (current.includes(path)) {
+        return current;
+      }
+      const next = [...current, path];
+      localStorage.setItem(HIDDEN_WORKSPACE_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  }
+
+  function requestRemoveWorkspace(folder: WorkspaceFolder) {
+    setError(null);
+    setActiveNewMenuFolder(null);
+    setActiveWorkspaceMenuFolder(null);
+    setRemoveWorkspaceTarget(folder);
+  }
+
+  function confirmRemoveWorkspace() {
+    if (!removeWorkspaceTarget) return;
+    handleRemoveWorkspace(removeWorkspaceTarget.path);
+    setRemoveWorkspaceTarget(null);
+  }
+
+  function handleToggleSessionPin(session: SessionInfo) {
+    if (isSessionPinned(session.id)) {
+      unpinSession(session.id);
+      return;
+    }
+    pinSession(session.id);
+  }
+
+  function revealWorkspacePath(path: string) {
+    setHiddenWorkspacePaths((current) => {
+      if (!current.includes(path)) {
+        return current;
+      }
+      const next = current.filter((item) => item !== path);
+      localStorage.setItem(HIDDEN_WORKSPACE_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
   }
 
   // Update workspace agent history
@@ -533,6 +731,7 @@ function App() {
     setActiveNewMenuFolder(null);
     try {
       const session = await createAgentSession(agentId, path);
+      revealWorkspacePath(session.cwd);
       updateWorkspaceAgentHistory(session.cwd, session.agentId, session.agentName);
       await refreshSessions(session.id);
     } catch (err) {
@@ -580,6 +779,7 @@ function App() {
       if (useNoneWorkspace) {
         markSessionAsNoneWorkspace(session.id);
       } else {
+        revealWorkspacePath(session.cwd);
         updateWorkspaceAgentHistory(session.cwd, session.agentId, session.agentName);
       }
       setNewConversationOpen(false);
@@ -603,6 +803,7 @@ function App() {
     try {
       await deleteSession(deleteSessionId);
       unmarkNoneWorkspaceSession(deleteSessionId);
+      unpinSession(deleteSessionId);
       const nextSessions = await listSessions();
       setSessions(nextSessions);
       if (activeSessionId === deleteSessionId) {
@@ -628,6 +829,7 @@ function App() {
       if (noneWorkspaceSessionIdSet.has(source.id)) {
         markSessionAsNoneWorkspace(nextSession.id);
       } else {
+        revealWorkspacePath(nextSession.cwd);
         updateWorkspaceAgentHistory(nextSession.cwd, nextSession.agentId, nextSession.agentName);
       }
       await refreshSessions(nextSession.id);
@@ -684,6 +886,7 @@ function App() {
         result.targetSession.agentId,
         result.targetSession.agentName,
       );
+      revealWorkspacePath(result.targetSession.cwd);
       setHandoverOpen(false);
       setHandoverNote("");
       await refreshSessions(result.targetSession.id);
@@ -705,9 +908,12 @@ function App() {
   }
 
   function renderSessionItem(session: SessionInfo) {
+    const pinned = isSessionPinned(session.id);
     return (
       <div
-        className={`workspace-session-item chat-history-item ${session.id === activeSessionId ? "active" : ""}`}
+        className={`workspace-session-item chat-history-item ${session.id === activeSessionId ? "active" : ""} ${
+          pinned ? "pinned" : ""
+        }`}
         key={`session-${session.id}`}
         onClick={() => handleSelectSession(session)}
         title={session.firstUserMessage ?? session.title}
@@ -723,6 +929,17 @@ function App() {
         </div>
         <div className="session-actions">
           <span className={`session-state ${session.status}`}>{sessionStateLabel(session.status)}</span>
+          <button
+            className={`session-pin-btn ${pinned ? "active" : ""}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              handleToggleSessionPin(session);
+            }}
+            title={pinned ? "取消置顶会话" : "置顶会话"}
+            aria-label={pinned ? "取消置顶会话" : "置顶会话"}
+          >
+            <Pin size={10} fill={pinned ? "currentColor" : "none"} />
+          </button>
           {session.status === "running" ? (
             <button
               className="session-kill-btn"
@@ -756,6 +973,51 @@ function App() {
     );
   }
 
+  function renderPinnedEntry(entry: PinnedEntry) {
+    const pinned = isSessionPinned(entry.session.id);
+    return (
+      <div
+        className={`pinned-item session-pinned-item ${entry.session.id === activeSessionId ? "active" : ""}`}
+        key={pinnedItemKey(entry.item.targetType, entry.item.targetId)}
+        title={entry.session.firstUserMessage ?? entry.session.title}
+      >
+        <button
+          type="button"
+          className="pinned-main-action pinned-session-action"
+          onClick={() => handleSelectSession(entry.session)}
+        >
+          <span className="pinned-item-icon session">
+            <MessageSquare size={14} />
+          </span>
+          <span className="pinned-item-copy">
+            <span className="pinned-item-title">{sessionDisplayTitle(entry.session)}</span>
+            <span className="pinned-item-subtitle">{entry.subtitle}</span>
+          </span>
+          <span className={`status-dot ${entry.session.status}`} />
+        </button>
+        <button
+          type="button"
+          className={`pinned-unpin-btn ${pinned ? "active" : ""}`}
+          title="取消置顶会话"
+          aria-label="取消置顶会话"
+          onClick={(event) => {
+            event.stopPropagation();
+            unpinSession(entry.session.id);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              event.stopPropagation();
+              unpinSession(entry.session.id);
+            }
+          }}
+        >
+          <Pin size={11} fill="currentColor" />
+        </button>
+      </div>
+    );
+  }
+
   useEffect(() => {
     let unlistenExited: UnlistenFn | null = null;
     let unlistenError: UnlistenFn | null = null;
@@ -767,12 +1029,20 @@ function App() {
       .then(async ([, , cwd]) => {
         setWorkspacePath(cwd);
         // Load pinned workspaces
+        let loadedPinnedWorkspaces: WorkspaceFolder[] = [];
         const saved = localStorage.getItem("waypoint_pinned_workspaces");
         if (saved) {
           try {
             const parsed = JSON.parse(saved);
             if (Array.isArray(parsed)) {
-              setPinnedWorkspaces(parsed);
+              loadedPinnedWorkspaces = parsed.filter(
+                (item): item is WorkspaceFolder =>
+                  item &&
+                  typeof item === "object" &&
+                  typeof item.path === "string" &&
+                  typeof item.name === "string",
+              );
+              setPinnedWorkspaces(loadedPinnedWorkspaces);
             }
           } catch (e) {
             console.error("[Waypoint] Failed to parse pinned workspaces:", e);
@@ -783,8 +1053,32 @@ function App() {
             name: cwd.split(/[/\\]/).pop() || cwd,
             isPinned: true,
           };
-          setPinnedWorkspaces([defaultFolder]);
-          localStorage.setItem("waypoint_pinned_workspaces", JSON.stringify([defaultFolder]));
+          loadedPinnedWorkspaces = [defaultFolder];
+          setPinnedWorkspaces(loadedPinnedWorkspaces);
+          localStorage.setItem("waypoint_pinned_workspaces", JSON.stringify(loadedPinnedWorkspaces));
+        }
+
+        const savedPinnedItems = localStorage.getItem(PINNED_ITEMS_STORAGE_KEY);
+        if (savedPinnedItems) {
+          try {
+            const parsed = parsePinnedItems(JSON.parse(savedPinnedItems));
+            setPinnedItems(parsed);
+            localStorage.setItem(PINNED_ITEMS_STORAGE_KEY, JSON.stringify(parsed));
+          } catch (e) {
+            console.error("[Waypoint] Failed to parse pinned items:", e);
+          }
+        }
+
+        const savedHiddenWorkspaces = localStorage.getItem(HIDDEN_WORKSPACE_STORAGE_KEY);
+        if (savedHiddenWorkspaces) {
+          try {
+            const parsed = JSON.parse(savedHiddenWorkspaces);
+            if (Array.isArray(parsed)) {
+              setHiddenWorkspacePaths(parsed.filter((item): item is string => typeof item === "string"));
+            }
+          } catch (e) {
+            console.error("[Waypoint] Failed to parse hidden workspaces:", e);
+          }
         }
 
         // Load workspace agent history
@@ -853,7 +1147,16 @@ function App() {
   return (
     <main className="app-shell">
       {activeNewMenuFolder && (
-        <div className="popover-backdrop" onClick={() => setActiveNewMenuFolder(null)} />
+        <div
+          className="popover-backdrop"
+          onClick={() => {
+            setActiveNewMenuFolder(null);
+            setActiveWorkspaceMenuFolder(null);
+          }}
+        />
+      )}
+      {!activeNewMenuFolder && activeWorkspaceMenuFolder && (
+        <div className="popover-backdrop" onClick={() => setActiveWorkspaceMenuFolder(null)} />
       )}
 
       <aside className="sidebar">
@@ -872,54 +1175,31 @@ function App() {
           <span>新对话</span>
         </button>
 
+        {pinnedEntries.length > 0 ? (
+          <section className="pinned-list" aria-label="Pinned items">
+            <div className="section-header pinned-section-header">
+              <h3>置顶</h3>
+            </div>
+            <div className="pinned-items">
+              {pinnedEntries.map((entry) => renderPinnedEntry(entry))}
+            </div>
+          </section>
+        ) : null}
+
         <section className="workspace-list" aria-label="Workspaces">
           <div className="section-header">
             <h3>工作区目录</h3>
             <button
+              type="button"
               className="add-workspace-btn"
-              onClick={() => setIsAddingWorkspace(!isAddingWorkspace)}
-              title="固定新工作区目录"
+              onClick={handleAddWorkspaceFromPicker}
+              disabled={isSelectingWorkspaceDirectory}
+              aria-label="选择并固定新工作区目录"
+              title={isSelectingWorkspaceDirectory ? "正在打开目录选择器" : "固定新工作区目录"}
             >
               <FolderPlus size={15} />
             </button>
           </div>
-
-          {isAddingWorkspace && (
-            <form
-              className="add-workspace-form"
-              onSubmit={(e) => {
-                e.preventDefault();
-                handleAddWorkspace(newWorkspaceInput);
-              }}
-            >
-              <div className="input-group-with-btn">
-                <input
-                  type="text"
-                  placeholder="输入或选择本地路径..."
-                  value={newWorkspaceInput}
-                  onChange={(e) => setNewWorkspaceInput(e.target.value)}
-                  autoFocus
-                />
-                <button
-                  type="button"
-                  className="browse-dir-btn"
-                  onClick={async () => {
-                    const selected = await selectDirectory();
-                    if (selected) {
-                      setNewWorkspaceInput(selected);
-                    }
-                  }}
-                  title="浏览选择文件夹"
-                >
-                  <FolderOpen size={14} />
-                </button>
-              </div>
-              <div className="form-actions">
-                <button type="button" onClick={() => setIsAddingWorkspace(false)}>取消</button>
-                <button type="submit">添加</button>
-              </div>
-            </form>
-          )}
 
           <div className="workspace-tree">
             {noneWorkspaceSessions.length > 0 ? (
@@ -944,12 +1224,13 @@ function App() {
                     <span className="folder-name">{folder.name}</span>
                   </div>
                   <div className="workspace-folder-actions">
-                    <div className="popover-wrapper">
+                    <div className="popover-wrapper new-session-popover-wrapper">
                       <button
                         type="button"
                         className="new-session-btn"
                         onClick={(e) => {
                           e.stopPropagation();
+                          setActiveWorkspaceMenuFolder(null);
                           setActiveNewMenuFolder(
                             activeNewMenuFolder === folder.path ? null : folder.path
                           );
@@ -985,18 +1266,36 @@ function App() {
                       )}
                     </div>
 
-                    {folder.isPinned && (
+                    <div className="popover-wrapper">
                       <button
-                        className="remove-folder-btn"
+                        type="button"
+                        className="workspace-more-btn"
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleRemoveWorkspace(folder.path);
+                          setActiveNewMenuFolder(null);
+                          setActiveWorkspaceMenuFolder(
+                            activeWorkspaceMenuFolder === folder.path ? null : folder.path
+                          );
                         }}
-                        title="取消固定目录"
+                        aria-label={`${folder.name} 更多操作`}
+                        title="更多项目操作"
                       >
-                        <X size={12} />
+                        <MoreHorizontal size={15} />
                       </button>
-                    )}
+
+                      {activeWorkspaceMenuFolder === folder.path && (
+                        <div className="workspace-action-popover" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            type="button"
+                            className="workspace-action-item"
+                            onClick={() => requestRemoveWorkspace(folder)}
+                          >
+                            <Trash2 size={13} />
+                            <span>移除</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
 
@@ -1299,12 +1598,7 @@ function App() {
                     <button
                       type="button"
                       className="browse-dir-btn"
-                      onClick={async () => {
-                        const selected = await selectDirectory();
-                        if (selected) {
-                          setNewConversationCustomWorkspace(selected);
-                        }
-                      }}
+                      onClick={() => pickDirectory(setNewConversationCustomWorkspace)}
                       title="浏览选择文件夹"
                     >
                       <FolderOpen size={14} />
@@ -1502,12 +1796,7 @@ function App() {
                       <button
                         type="button"
                         className="browse-dir-btn"
-                        onClick={async () => {
-                          const selected = await selectDirectory();
-                          if (selected) {
-                            setContinueWorkspacePath(selected);
-                          }
-                        }}
+                        onClick={() => pickDirectory(setContinueWorkspacePath)}
                         title="浏览选择文件夹"
                       >
                         <FolderOpen size={14} />
@@ -1571,6 +1860,53 @@ function App() {
                 </span>
               </button>
             </footer>
+	          </section>
+	        </div>
+	      ) : null}
+
+	      {removeWorkspaceTarget ? (
+	        <div className="modal-backdrop" role="presentation">
+	          <section className="modal confirm-modal" role="dialog" aria-modal="true" aria-labelledby="remove-workspace-title">
+	            <header className="modal-header">
+	              <div>
+	                <p className="eyebrow">Remove Project</p>
+	                <h3 id="remove-workspace-title">从 Waypoint 移除项目</h3>
+	              </div>
+	              <button
+	                className="icon-only"
+	                type="button"
+	                onClick={() => setRemoveWorkspaceTarget(null)}
+	                title="Close"
+	              >
+	                <X aria-hidden="true" size={16} />
+	              </button>
+	            </header>
+	            <div className="modal-body">
+	              <p className="confirm-copy">
+	                确认从 Waypoint 移除「{removeWorkspaceTarget.name}」吗？
+	              </p>
+	              <p className="confirm-copy">
+	                这只会把项目从 Waypoint 侧边栏移除，不会删除本地目录，也不会删除任何会话记录。
+	              </p>
+	              <p className="confirm-meta">{removeWorkspaceTarget.path}</p>
+	            </div>
+	            <footer className="modal-footer">
+	              <button
+	                className="icon-action"
+	                type="button"
+	                onClick={() => setRemoveWorkspaceTarget(null)}
+	              >
+	                Cancel
+	              </button>
+	              <button
+	                className="danger-action"
+	                type="button"
+	                onClick={confirmRemoveWorkspace}
+	              >
+	                <Trash2 aria-hidden="true" size={15} />
+	                <span>移除</span>
+	              </button>
+	            </footer>
 	          </section>
 	        </div>
 	      ) : null}
