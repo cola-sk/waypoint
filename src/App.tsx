@@ -1563,7 +1563,13 @@ function App() {
                 <select
                   id="new-conversation-workspace"
                   value={newConversationWorkspaceValue}
-                  onChange={(event) => setNewConversationWorkspaceValue(event.target.value)}
+                  onChange={(event) => {
+                    const val = event.target.value;
+                    setNewConversationWorkspaceValue(val);
+                    if (val === CUSTOM_WORKSPACE_VALUE) {
+                      pickDirectory(setNewConversationCustomWorkspace);
+                    }
+                  }}
                 >
                   <option value={NONE_WORKSPACE_VALUE}>None（不绑定工作区）</option>
                   {pinnedWorkspaces.map((folder) => (
