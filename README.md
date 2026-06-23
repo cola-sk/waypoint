@@ -16,7 +16,7 @@
 
 Waypoint is a Tauri desktop app for managing multiple local AI agent CLI sessions in one place. It keeps PTY-backed sessions alive, lets you switch between workspaces and agents, and provides a handover flow for passing context from one agent session to another.
 
-It is built for tools like Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, and your regular shell.
+It is built for tools like Claude Code, Codex, Antigravity CLI, GitHub Copilot CLI, and your regular shell.
 
 ## Highlights
 
@@ -38,8 +38,8 @@ Claude Code:
 Codex:
   codex
 
-Gemini CLI:
-  gemini
+Antigravity CLI:
+  agy
 
 GitHub Copilot:
   copilot
@@ -54,7 +54,7 @@ If an agent is available in your terminal but appears as missing in Waypoint, ve
 ```bash
 command -v claude
 command -v codex
-command -v gemini
+command -v agy
 command -v copilot
 command -v gh
 ```

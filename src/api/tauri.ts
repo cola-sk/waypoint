@@ -59,11 +59,11 @@ export function listAgentPresets(): Promise<AgentPresetInfo[]> {
         resolvedCommand: null,
       },
       {
-        id: "gemini",
-        name: "Gemini CLI",
-        description: "Google Gemini CLI",
+        id: "agy",
+        name: "Antigravity CLI",
+        description: "Google Antigravity CLI",
         available: false,
-        command: "gemini",
+        command: "agy",
         resolvedCommand: null,
       },
       {

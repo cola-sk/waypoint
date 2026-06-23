@@ -2,7 +2,7 @@
 
 ## 1. 项目定位
 
-AgentRelay 是一个桌面端本地 Agent CLI 编排器，用于启动、保持、切换和转发多个本机 AI Agent CLI 会话，例如 Claude Code、Goose、Gemini CLI、自定义 Shell Agent 等。
+AgentRelay 是一个桌面端本地 Agent CLI 编排器，用于启动、保持、切换和转发多个本机 AI Agent CLI 会话，例如 Claude Code、Goose、Antigravity CLI、自定义 Shell Agent 等。
 
 它的核心目标不是简单地启动一个 agent，而是让多个本地 agent 的 PTY 会话长期存活，让用户可以在这些会话之间切换，并把一个 agent 的上下文、代码 diff、任务状态转发给另一个 agent 继续执行。
 
@@ -34,7 +34,7 @@ MVP 需要实现以下能力：
 
 5. Agent CLI 适配
 
-   不同 CLI 的启动方式、输入方式、ready 状态不同，MVP 需要通过 Agent Preset 做基础抽象，而不是把 Claude、Goose、Gemini 的细节写死在业务逻辑里。
+   不同 CLI 的启动方式、输入方式、ready 状态不同，MVP 需要通过 Agent Preset 做基础抽象，而不是把 Claude、Goose、Antigravity 的细节写死在业务逻辑里。
 
 ## 3. 推荐技术栈
 
@@ -81,7 +81,7 @@ graph TD
     UI["React UI<br/>Session List / Terminal / Handover"] <-->|Commands| API["Tauri Command API"]
     API --> Registry["Session Registry<br/>会话注册表"]
     Registry --> PTY["PTY Runtime<br/>portable-pty"]
-    PTY --> AgentCLI["Local Agent CLIs<br/>Claude / Goose / Gemini / Shell"]
+    PTY --> AgentCLI["Local Agent CLIs<br/>Claude / Goose / Antigravity / Shell"]
 
     PTY --> Log["Transcript & Event Log"]
     Registry --> Log
@@ -583,7 +583,7 @@ flowchart LR
 Review Loop 是 AgentRelay 后续最有价值的产品形态之一：
 
 ```text
-Claude 实现 -> Goose Review -> Claude 修复 -> Gemini 总结 -> 用户验收
+Claude 实现 -> Goose Review -> Claude 修复 -> Antigravity 总结 -> 用户验收
 ```
 
 ## 10. 会话生命周期
@@ -682,7 +682,7 @@ Session A 执行 read name。
 目标：
 
 ```text
-支持配置 Claude / Goose / Gemini / Shell。
+支持配置 Claude / Goose / Antigravity / Shell。
 检测 command 是否存在。
 允许用户设置 absolute path。
 ```
@@ -767,7 +767,7 @@ handover 前生成 patch checkpoint。
 ```text
 引入 AgentPreset / AgentAdapter。
 MVP 默认使用 paste-enter 策略。
-后续给 Claude、Goose、Gemini 做专门 adapter。
+后续给 Claude、Goose、Antigravity 做专门 adapter。
 ```
 
 ### 风险 2: macOS GUI app 找不到 PATH
@@ -859,7 +859,7 @@ MVP 应对：
 [ ] session 切换不会导致进程退出
 [ ] xterm 输入输出正常
 [ ] resize 正常
-[ ] 可以启动 shell / claude / goose / gemini
+[ ] 可以启动 shell / claude / goose / agy
 [ ] 可以检测 agent command 是否存在
 [ ] 后端保存 session transcript
 [ ] attach session 时可以 replay 最近 buffer
@@ -891,5 +891,5 @@ MVP-4: source 不死的 handover
 MVP-5: git checkpoint + review loop
 ```
 
-只要这个地基成立，后面加 Claude/Goose/Gemini adapter、review loop、git worktree、checkpoint、agent 对比、自动总结，都会比较自然。
+只要这个地基成立，后面加 Claude/Goose/Antigravity adapter、review loop、git worktree、checkpoint、agent 对比、自动总结，都会比较自然。
 

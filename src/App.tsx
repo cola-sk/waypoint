@@ -156,8 +156,12 @@ function normalizeWorkspaceAgentHistory(
         return [];
       }
       const candidate = agent as Partial<{ agentId: string; agentName: string }>;
-      const agentId = candidate.agentId?.trim();
-      const agentName = candidate.agentName?.trim();
+      let agentId = candidate.agentId?.trim();
+      let agentName = candidate.agentName?.trim();
+      if (agentId === "gemini") {
+        agentId = "agy";
+        agentName = "Antigravity CLI";
+      }
       if (!agentId || !agentName || seenAgentIds.has(agentId)) {
         return [];
       }

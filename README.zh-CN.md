@@ -14,7 +14,7 @@
 
 ![Waypoint 桌面界面](docs/assets/waypoint-screenshot.png)
 
-waypoint 是一个桌面端本地 Agent CLI 会话路由器。它的目标是通过 Tauri + Rust 管理多个本机 PTY 会话，让 Claude Code、Codex、Gemini CLI、GitHub Copilot、Shell 等 agent 会话可以长期存活、随时切换，并支持跨 agent 上下文交接（Handover）。
+waypoint 是一个桌面端本地 Agent CLI 会话路由器。它的目标是通过 Tauri + Rust 管理多个本机 PTY 会话，让 Claude Code、Codex、Antigravity CLI、GitHub Copilot、Shell 等 agent 会话可以长期存活、随时切换，并支持跨 agent 上下文交接（Handover）。
 
 ## 技术栈
 
@@ -45,8 +45,8 @@ Claude Code:
 Codex:
   codex
 
-Gemini CLI:
-  gemini
+Antigravity CLI:
+  agy
 
 GitHub Copilot:
   copilot
@@ -63,7 +63,7 @@ Shell:
 ```bash
 command -v claude
 command -v codex
-command -v gemini
+command -v agy
 command -v copilot
 command -v gh
 ```
@@ -150,7 +150,7 @@ npm run tauri:dev
 
 ```text
 1. 打开 waypoint 桌面窗口。
-2. 左侧 Agent 下拉框会显示 Claude Code / Codex / Gemini CLI / GitHub Copilot。
+2. 左侧 Agent 下拉框会显示 Claude Code / Codex / Antigravity CLI / GitHub Copilot。
 3. 可用 agent 会显示 resolved command，不可用 agent 会显示 missing。
 4. 在 Workspace 输入本地项目目录，例如：
    /Users/liuzhe.x/coding/waypoint
@@ -195,11 +195,11 @@ npm run tauri:dev
 不同 agent 的 Continue 注入策略：
 
 ```text
-Gemini CLI:
+Antigravity CLI:
   waypoint 将完整 handover 写入 ~/.waypoint/<workspace-name>/handover-*.md。
-  新 session 使用 gemini --prompt-interactive "Read this exact handover file..."。
-  这样 Gemini 只接收一段很短的启动 prompt，避免长 diff/context 卡住 TUI。
-  Gemini 的 handover 文件使用 compact 模板：只包含 git status、少量最近上下文和操作指令，不内联完整 diff。
+  新 session 使用 agy --prompt-interactive "Read this exact handover file..."。
+  这样 Antigravity 只接收一段很短的启动 prompt，避免长 diff/context 卡住 TUI。
+  Antigravity 的 handover 文件使用 compact 模板：只包含 git status、少量最近上下文和操作指令，不内联完整 diff。
 
 Codex:
   使用 codex --no-alt-screen 启动，减少嵌入式 xterm 中的 alternate screen 闪屏。
@@ -254,7 +254,7 @@ npm run tauri -- info
 ```text
 1. 先直接 Start 目标 agent，确认它能保持在可输入状态。
 2. 如果目标 agent 会立即退出，先解决它自己的登录/配置问题。
-3. 如果该 CLI 本身不是持久交互式 agent，暂时用 Shell、Claude Code、Codex 或 Gemini CLI 做 Continue target。
+3. 如果该 CLI 本身不是持久交互式 agent，暂时用 Shell、Claude Code、Codex 或 Antigravity CLI 做 Continue target。
 ```
 
 ---

@@ -32,7 +32,7 @@ graph TD
         Broker["Handover Broker (上下文生成器)"]
     end
     
-    PTY <-->|标准输入输出 stdin/stdout| CLI["本地 Agent CLIs (Claude / Goose / Gemini / Shell)"]
+    PTY <-->|标准输入输出 stdin/stdout| CLI["本地 Agent CLIs (Claude / Goose / Antigravity / Shell)"]
     GitGuard -->|状态/Diff 读取| Workspace["本地工程目录"]
 ```
 

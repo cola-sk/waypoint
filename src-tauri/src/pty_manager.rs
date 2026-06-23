@@ -1085,8 +1085,8 @@ impl SessionManager {
             ));
         }
 
-        if target_agent_id == "gemini" {
-            return self.continue_gemini_with_initial_prompt(
+        if target_agent_id == "agy" {
+            return self.continue_agy_with_initial_prompt(
                 app,
                 &source,
                 source_info,
@@ -1229,7 +1229,7 @@ impl SessionManager {
         })
     }
 
-    fn continue_gemini_with_initial_prompt(
+    fn continue_agy_with_initial_prompt(
         &self,
         app: AppHandle,
         source: &Arc<PtySession>,
@@ -1242,18 +1242,18 @@ impl SessionManager {
     ) -> Result<HandoverResult, String> {
         let definition = agent_definitions()
             .into_iter()
-            .find(|definition| definition.id == "gemini")
-            .ok_or_else(|| "Gemini CLI preset is missing".to_string())?;
+            .find(|definition| definition.id == "agy")
+            .ok_or_else(|| "Antigravity CLI preset is missing".to_string())?;
         let resolved = resolve_agent_command(&definition).ok_or_else(|| {
-            "Gemini CLI is not available in PATH. Install it or make sure your login shell can resolve it."
+            "Antigravity CLI is not available in PATH. Install it or make sure your login shell can resolve it."
                 .to_string()
         })?;
         let planned_target = SessionInfo {
             id: "pending".to_string(),
             agent_id: definition.id.to_string(),
             agent_name: definition.name.to_string(),
-            title: "Gemini CLI new session".to_string(),
-            command: "gemini --prompt-interactive <handover>".to_string(),
+            title: "Antigravity CLI new session".to_string(),
+            command: "agy --prompt-interactive <handover>".to_string(),
             cwd: cwd.clone(),
             status: SessionStatus::Running,
             attached: false,
@@ -1273,7 +1273,7 @@ impl SessionManager {
         let startup_prompt = handover_reference_startup_prompt(&handover.main_path);
         let mut args = resolved.args;
         if let Some(parent) = handover.main_path.parent() {
-            args.push("--include-directories".to_string());
+            args.push("--add-dir".to_string());
             args.push(parent.to_string_lossy().into_owned());
         }
         args.push("--prompt-interactive".to_string());
@@ -1283,7 +1283,7 @@ impl SessionManager {
             definition.id,
             definition.name,
             definition.name.to_string(),
-            "gemini --prompt-interactive <handover>".to_string(),
+            "agy --prompt-interactive <handover>".to_string(),
             resolved.executable,
             args,
             cwd,
@@ -2173,13 +2173,13 @@ fn agent_definitions() -> Vec<AgentDefinition> {
             }],
         },
         AgentDefinition {
-            id: "gemini",
-            name: "Gemini CLI",
-            description: "Google Gemini CLI",
+            id: "agy",
+            name: "Antigravity CLI",
+            description: "Google Antigravity CLI",
             candidates: &[CommandCandidate {
-                executable: "gemini",
+                executable: "agy",
                 args: &[],
-                display: "gemini",
+                display: "agy",
                 verify: VerifyStrategy::CommandExists,
             }],
         },
@@ -2306,17 +2306,18 @@ fn native_resume_command_for(meta: &SessionMeta) -> Result<Option<NativeResumeCo
                 (args, format!("{} resume --last", resolved.display))
             }
         }
-        "gemini" => {
+        "agy" => {
             let mut args = resolved.args;
-            args.push("--resume".to_string());
             if let Some(native_id) = native_id {
+                args.push("--conversation".to_string());
                 args.push(native_id.clone());
                 (
                     args,
-                    format!("{} --resume {}", resolved.display, shell_quote(&native_id)),
+                    format!("{} --conversation {}", resolved.display, shell_quote(&native_id)),
                 )
             } else {
-                (args, format!("{} --resume", resolved.display))
+                args.push("--continue".to_string());
+                (args, format!("{} --continue", resolved.display))
             }
         }
         "copilot" => {
@@ -2434,7 +2435,7 @@ fn planned_handover_target_info(agent_id: &str, cwd: &str) -> Result<SessionInfo
     let now = unix_timestamp();
     let command = match definition.id {
         "claude-code" => "claude <handover>".to_string(),
-        "gemini" => "gemini --prompt-interactive <handover>".to_string(),
+        "agy" => "agy --prompt-interactive <handover>".to_string(),
         "codex" => "codex --no-alt-screen <handover>".to_string(),
         "copilot" => resolve_agent_command(&definition)
             .map(|resolved| format!("{} -i <handover>", resolved.display))
