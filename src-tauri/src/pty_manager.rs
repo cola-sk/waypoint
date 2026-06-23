@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     env, fs,
     fs::{File, OpenOptions},
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
@@ -14,6 +14,7 @@ use base64::Engine;
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
@@ -185,7 +186,7 @@ pub struct HandoverPreview {
     staged_diff_chars: usize,
 }
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Serialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum ChatRole {
     User,
@@ -1559,11 +1560,12 @@ impl SessionManager {
 
     fn build_handover_preview_for(&self, source: &Arc<PtySession>) -> HandoverPreview {
         let source_info = source.info();
-        let terminal_context_chars = build_recent_source_context(source, HANDOVER_CONTEXT_CHARS)
-            .chars()
-            .count();
+        let terminal_context_chars =
+            build_handover_source_context(source, &source_info, HANDOVER_CONTEXT_CHARS)
+                .chars()
+                .count();
         let user_input_chars =
-            clean_terminal_input(&source.input_ring.lock(), HANDOVER_USER_INPUT_CHARS)
+            build_handover_user_inputs(source, &source_info, HANDOVER_USER_INPUT_CHARS)
                 .chars()
                 .count();
         let inherited_context_chars = tail_chars(
@@ -1720,9 +1722,10 @@ impl SessionManager {
         note: Option<String>,
         diff_preview_limit: usize,
     ) -> String {
-        let recent_context = build_recent_source_context(source, HANDOVER_CONTEXT_CHARS);
+        let recent_context =
+            build_handover_source_context(source, source_info, HANDOVER_CONTEXT_CHARS);
         let recent_user_inputs =
-            clean_terminal_input(&source.input_ring.lock(), HANDOVER_USER_INPUT_CHARS);
+            build_handover_user_inputs(source, source_info, HANDOVER_USER_INPUT_CHARS);
         let inherited_handover = tail_chars(
             &source.inherited_handover.lock(),
             HANDOVER_INHERITED_CONTEXT_CHARS,
@@ -1753,9 +1756,10 @@ impl SessionManager {
         note: Option<String>,
         evidence_path: Option<&str>,
     ) -> String {
-        let recent_context = build_recent_source_context(source, COMPACT_HANDOVER_CONTEXT_CHARS);
+        let recent_context =
+            build_handover_source_context(source, source_info, COMPACT_HANDOVER_CONTEXT_CHARS);
         let recent_user_inputs =
-            clean_terminal_input(&source.input_ring.lock(), COMPACT_USER_INPUT_CHARS);
+            build_handover_user_inputs(source, source_info, COMPACT_USER_INPUT_CHARS);
         let inherited_handover = tail_chars(
             &source.inherited_handover.lock(),
             COMPACT_HANDOVER_INHERITED_CONTEXT_CHARS,
@@ -1786,9 +1790,10 @@ impl SessionManager {
         target_info: &SessionInfo,
         note: Option<String>,
     ) -> String {
-        let recent_context = build_recent_source_context(source, HANDOVER_CONTEXT_CHARS);
+        let recent_context =
+            build_handover_source_context(source, source_info, HANDOVER_CONTEXT_CHARS);
         let recent_user_inputs =
-            clean_terminal_input(&source.input_ring.lock(), HANDOVER_USER_INPUT_CHARS);
+            build_handover_user_inputs(source, source_info, HANDOVER_USER_INPUT_CHARS);
         let inherited_handover = tail_chars(
             &source.inherited_handover.lock(),
             HANDOVER_INHERITED_CONTEXT_CHARS,
@@ -2923,6 +2928,30 @@ fn trim_chat_messages(messages: &mut Vec<ChatMessage>, open_assistant_index: &mu
     }
 }
 
+fn build_handover_source_context(
+    source: &Arc<PtySession>,
+    source_info: &SessionInfo,
+    limit: usize,
+) -> String {
+    if let Some(context) = build_native_source_context(source_info, limit) {
+        return context;
+    }
+
+    build_recent_source_context(source, limit)
+}
+
+fn build_handover_user_inputs(
+    source: &Arc<PtySession>,
+    source_info: &SessionInfo,
+    limit: usize,
+) -> String {
+    if let Some(inputs) = build_native_user_inputs(source_info, limit) {
+        return inputs;
+    }
+
+    build_recent_user_inputs(source, limit)
+}
+
 fn build_recent_source_context(source: &Arc<PtySession>, limit: usize) -> String {
     source.finalize_open_assistant_message_if_idle(CHAT_STREAM_IDLE_FINALIZE_MS);
     let messages = source.chat_messages.lock().clone();
@@ -2932,6 +2961,323 @@ fn build_recent_source_context(source: &Arc<PtySession>, limit: usize) -> String
     }
 
     clean_terminal_output(&source.ring.lock(), limit)
+}
+
+fn build_recent_user_inputs(source: &Arc<PtySession>, limit: usize) -> String {
+    let terminal_inputs = clean_terminal_input(&source.input_ring.lock(), limit);
+    if !terminal_inputs.trim().is_empty() {
+        return terminal_inputs;
+    }
+
+    let recent_output = clean_terminal_output(&source.ring.lock(), limit);
+    extract_user_prompts_from_terminal_context(&recent_output, limit)
+}
+
+fn build_native_source_context(source_info: &SessionInfo, limit: usize) -> Option<String> {
+    let messages = native_transcript_messages_for(source_info)?;
+    let context = format_native_transcript_context(&messages, limit);
+    if context.trim().is_empty() {
+        None
+    } else {
+        Some(context)
+    }
+}
+
+fn build_native_user_inputs(source_info: &SessionInfo, limit: usize) -> Option<String> {
+    let messages = native_transcript_messages_for(source_info)?;
+    let inputs = format_native_user_inputs(&messages, limit);
+    if inputs.trim().is_empty() {
+        None
+    } else {
+        Some(inputs)
+    }
+}
+
+fn native_transcript_messages_for(
+    source_info: &SessionInfo,
+) -> Option<Vec<NativeTranscriptMessage>> {
+    let kind = native_transcript_kind(source_info)?;
+    let path = native_transcript_path(source_info, kind)?;
+    let file = File::open(path).ok()?;
+    let messages = parse_native_transcript_messages(BufReader::new(file), kind);
+    if messages.is_empty() {
+        None
+    } else {
+        Some(messages)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum NativeTranscriptKind {
+    Claude,
+    Codex,
+}
+
+struct NativeTranscriptMessage {
+    role: ChatRole,
+    content: String,
+}
+
+fn native_transcript_kind(source_info: &SessionInfo) -> Option<NativeTranscriptKind> {
+    let native_ref = source_info.native_session_ref.as_ref()?;
+    let native_id = native_ref.id.as_deref()?.trim();
+    if native_id.is_empty() {
+        return None;
+    }
+
+    match source_info.agent_id.as_str() {
+        "claude-code" => Some(NativeTranscriptKind::Claude),
+        "codex" => Some(NativeTranscriptKind::Codex),
+        _ => match native_ref.provider.as_str() {
+            "claude-code" | "claude" => Some(NativeTranscriptKind::Claude),
+            "codex" => Some(NativeTranscriptKind::Codex),
+            _ => None,
+        },
+    }
+}
+
+fn native_transcript_path(
+    source_info: &SessionInfo,
+    kind: NativeTranscriptKind,
+) -> Option<PathBuf> {
+    let native_id = source_info
+        .native_session_ref
+        .as_ref()
+        .and_then(|session_ref| session_ref.id.as_deref())?
+        .trim();
+    if native_id.is_empty() {
+        return None;
+    }
+
+    match kind {
+        NativeTranscriptKind::Claude => {
+            find_claude_native_transcript_path(&source_info.cwd, native_id)
+        }
+        NativeTranscriptKind::Codex => find_codex_native_transcript_path(native_id),
+    }
+}
+
+fn find_claude_native_transcript_path(cwd: &str, native_id: &str) -> Option<PathBuf> {
+    let home = home_dir()?;
+    let projects_dir = home.join(".claude").join("projects");
+    let expected = projects_dir
+        .join(claude_project_dir_name(cwd))
+        .join(format!("{native_id}.jsonl"));
+    if expected.is_file() {
+        return Some(expected);
+    }
+
+    let mut candidates = Vec::new();
+    collect_jsonl_paths(&projects_dir, 3, &mut candidates);
+    candidates.into_iter().find(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name == format!("{native_id}.jsonl"))
+            .unwrap_or(false)
+    })
+}
+
+fn claude_project_dir_name(cwd: &str) -> String {
+    cwd.replace('/', "-")
+}
+
+fn find_codex_native_transcript_path(native_id: &str) -> Option<PathBuf> {
+    let home = home_dir()?;
+    let mut candidates = Vec::new();
+    collect_jsonl_paths(&home.join(".codex").join("sessions"), 6, &mut candidates);
+    collect_jsonl_paths(
+        &home.join(".codex").join("archived_sessions"),
+        3,
+        &mut candidates,
+    );
+
+    if let Some(path) = candidates.iter().find(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.contains(native_id))
+            .unwrap_or(false)
+    }) {
+        return Some(path.clone());
+    }
+
+    candidates
+        .into_iter()
+        .find(|path| codex_transcript_has_session_id(path, native_id))
+}
+
+fn codex_transcript_has_session_id(path: &Path, native_id: &str) -> bool {
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    for line in BufReader::new(file).lines().map_while(Result::ok).take(50) {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some("session_meta") {
+            continue;
+        }
+        if value
+            .pointer("/payload/id")
+            .and_then(Value::as_str)
+            .map(|id| id == native_id)
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn collect_jsonl_paths(root: &Path, max_depth: usize, paths: &mut Vec<PathBuf>) {
+    if max_depth == 0 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_jsonl_paths(&path, max_depth - 1, paths);
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+            paths.push(path);
+        }
+    }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    env::var("HOME").ok().map(PathBuf::from)
+}
+
+fn parse_native_transcript_messages<R: BufRead>(
+    reader: R,
+    kind: NativeTranscriptKind,
+) -> Vec<NativeTranscriptMessage> {
+    reader
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+        .filter_map(|value| match kind {
+            NativeTranscriptKind::Claude => parse_claude_native_message(&value),
+            NativeTranscriptKind::Codex => parse_codex_native_message(&value),
+        })
+        .collect()
+}
+
+fn parse_claude_native_message(value: &Value) -> Option<NativeTranscriptMessage> {
+    let message = value.get("message")?;
+    let role = match message
+        .get("role")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("type").and_then(Value::as_str))?
+    {
+        "user" => ChatRole::User,
+        "assistant" => ChatRole::Assistant,
+        _ => return None,
+    };
+    let raw_content = message.get("content")?;
+    let content = match role {
+        ChatRole::User => extract_text_parts(raw_content, &["text"]),
+        ChatRole::Assistant => extract_text_parts(raw_content, &["text"]),
+    };
+    let content = clean_native_message_content(&content, role);
+    if content.trim().is_empty() || is_native_system_noise(&content) {
+        return None;
+    }
+
+    Some(NativeTranscriptMessage { role, content })
+}
+
+fn parse_codex_native_message(value: &Value) -> Option<NativeTranscriptMessage> {
+    if value.get("type").and_then(Value::as_str) != Some("response_item") {
+        return None;
+    }
+    let payload = value.get("payload")?;
+    if payload.get("type").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+    let role = match payload.get("role").and_then(Value::as_str)? {
+        "user" => ChatRole::User,
+        "assistant" => ChatRole::Assistant,
+        _ => return None,
+    };
+    let content_value = payload.get("content")?;
+    let allowed_types = match role {
+        ChatRole::User => &["input_text", "text"][..],
+        ChatRole::Assistant => &["output_text", "text"][..],
+    };
+    let content = extract_text_parts(content_value, allowed_types);
+    let content = clean_native_message_content(&content, role);
+    if content.trim().is_empty() || is_native_system_noise(&content) {
+        return None;
+    }
+
+    Some(NativeTranscriptMessage { role, content })
+}
+
+fn extract_text_parts(value: &Value, allowed_types: &[&str]) -> String {
+    match value {
+        Value::String(text) => text.to_string(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| extract_text_part(item, allowed_types))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+fn extract_text_part(value: &Value, allowed_types: &[&str]) -> Option<String> {
+    if let Value::String(text) = value {
+        return Some(text.to_string());
+    }
+
+    let item_type = value.get("type").and_then(Value::as_str)?;
+    if !allowed_types.contains(&item_type) {
+        return None;
+    }
+
+    value
+        .get("text")
+        .or_else(|| value.get("content"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn clean_native_message_content(content: &str, role: ChatRole) -> String {
+    let cleaned = clean_handover_message_content(content, role);
+    collapse_blank_lines(&cleaned, 2).trim().to_string()
+}
+
+fn is_native_system_noise(content: &str) -> bool {
+    let trimmed = content.trim();
+    trimmed.starts_with("<system-reminder>")
+        || trimmed.starts_with("<local-command-stdout>")
+        || trimmed.starts_with("<local-command-stderr>")
+}
+
+fn format_native_transcript_context(messages: &[NativeTranscriptMessage], limit: usize) -> String {
+    let blocks = messages
+        .iter()
+        .map(|message| {
+            let role = match message.role {
+                ChatRole::User => "User",
+                ChatRole::Assistant => "Assistant",
+            };
+            format!("{role}:\n{}", message.content)
+        })
+        .collect::<Vec<_>>();
+    tail_chars(&blocks.join("\n\n"), limit)
+}
+
+fn format_native_user_inputs(messages: &[NativeTranscriptMessage], limit: usize) -> String {
+    let inputs = messages
+        .iter()
+        .filter(|message| message.role == ChatRole::User)
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>();
+    tail_chars(&inputs.join("\n\n"), limit)
 }
 
 fn format_chat_messages_for_handover(messages: &[ChatMessage], limit: usize) -> String {
@@ -2958,6 +3304,28 @@ fn format_chat_messages_for_handover(messages: &[ChatMessage], limit: usize) -> 
     }
 
     tail_chars(&blocks.join("\n\n"), limit)
+}
+
+fn extract_user_prompts_from_terminal_context(context: &str, limit: usize) -> String {
+    let prompts = context
+        .lines()
+        .filter_map(extract_user_prompt_line)
+        .collect::<Vec<_>>();
+    tail_chars(&prompts.join("\n"), limit)
+}
+
+fn extract_user_prompt_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let content = trimmed
+        .strip_prefix('›')
+        .or_else(|| trimmed.strip_prefix('❯'))
+        .or_else(|| trimmed.strip_prefix("Human:"))
+        .or_else(|| trimmed.strip_prefix("User:"))?
+        .trim();
+    if content.is_empty() || looks_like_tui_noise_line(content) {
+        return None;
+    }
+    Some(content.to_string())
 }
 
 fn clean_handover_message_content(content: &str, role: ChatRole) -> String {
@@ -3883,5 +4251,64 @@ mod tests {
         assert!(result.contains("Assistant:\n可以，建议把 tokenSetId"));
         assert!(!result.contains("Welcome back"));
         assert!(!result.contains("shortcuts"));
+    }
+
+    #[test]
+    fn test_extract_user_prompts_from_terminal_context_handles_cli_prompts() {
+        let context = "│~/coding/flowbite-mcp││\n❯  我觉得也是这样比较好，实现吧\nAssistant answer\n› 重新构建打包吧";
+
+        let result = extract_user_prompts_from_terminal_context(context, 10000);
+
+        assert!(result.contains("我觉得也是这样比较好"));
+        assert!(result.contains("重新构建打包吧"));
+        assert!(!result.contains("Assistant answer"));
+    }
+
+    #[test]
+    fn test_parse_claude_native_transcript_preserves_user_followups() {
+        let jsonl = r#"
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"先实现 preview"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"已处理 preview"},{"type":"tool_use","name":"Read"}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ignored tool output"}]}}
+{"type":"user","message":{"role":"user","content":"追问：create 后不要再显示 handover 弹窗"}}
+"#;
+
+        let messages = parse_native_transcript_messages(
+            std::io::Cursor::new(jsonl),
+            NativeTranscriptKind::Claude,
+        );
+        let context = format_native_transcript_context(&messages, 10000);
+        let inputs = format_native_user_inputs(&messages, 10000);
+
+        assert!(context.contains("User:\n先实现 preview"));
+        assert!(context.contains("Assistant:\n已处理 preview"));
+        assert!(inputs.contains("先实现 preview"));
+        assert!(inputs.contains("追问：create 后不要再显示"));
+        assert!(!context.contains("ignored tool output"));
+    }
+
+    #[test]
+    fn test_parse_codex_native_transcript_preserves_user_messages() {
+        let jsonl = r#"
+{"type":"session_meta","payload":{"id":"native-1","cwd":"/tmp/workspace"}}
+{"type":"event_msg","msg":"user_message","user_message":"duplicated event should be ignored"}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"用户第一问"}]}}
+{"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"hidden"}]}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"助手回答"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"用户追问"}]}}
+"#;
+
+        let messages = parse_native_transcript_messages(
+            std::io::Cursor::new(jsonl),
+            NativeTranscriptKind::Codex,
+        );
+        let context = format_native_transcript_context(&messages, 10000);
+        let inputs = format_native_user_inputs(&messages, 10000);
+
+        assert!(context.contains("User:\n用户第一问"));
+        assert!(context.contains("Assistant:\n助手回答"));
+        assert!(inputs.contains("用户追问"));
+        assert!(!context.contains("duplicated event"));
+        assert!(!context.contains("hidden"));
     }
 }

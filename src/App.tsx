@@ -1053,8 +1053,11 @@ function App() {
         result.targetSession.agentName,
       );
       revealWorkspacePath(result.targetSession.cwd);
-      setHandoverResult(result);
       setHandoverNote("");
+      setHandoverOpen(false);
+      setHandoverDraft(null);
+      setHandoverDraftError(null);
+      setIsHandoverDraftLoading(false);
       await refreshSessions(result.targetSession.id);
     } catch (err) {
       setError(String(err));
