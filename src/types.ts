@@ -70,6 +70,13 @@ export type HandoverPreview = {
   stagedDiffChars: number;
 };
 
+export type HandoverDraft = {
+  prompt: string;
+  effectiveMode: "compact" | "full";
+  estimatedChars: number;
+  evidencePath?: string | null;
+};
+
 export type AgentPresetInfo = {
   id: string;
   name: string;

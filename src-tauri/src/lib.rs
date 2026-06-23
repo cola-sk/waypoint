@@ -2,8 +2,9 @@ mod pty_manager;
 
 use pty_manager::{
     attach_session, continue_session, create_agent_session, default_workspace, delete_session,
-    detach_session, forward_session, get_handover_preview, kill_session, list_agent_presets,
-    list_chat_messages, list_sessions, reactivate_session, resize_session, write_session, AppState,
+    detach_session, forward_session, get_handover_draft, get_handover_preview, kill_session,
+    list_agent_presets, list_chat_messages, list_sessions, reactivate_session, resize_session,
+    write_session, AppState,
 };
 use serde::Serialize;
 use std::process::Command;
@@ -45,9 +46,7 @@ fn detect_editors() -> Vec<EditorInfo> {
             id: "vscode",
             name: "Visual Studio Code",
             bins: &["code"],
-            macos_paths: &[
-                "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
-            ],
+            macos_paths: &["/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"],
         },
     ];
 
@@ -119,6 +118,7 @@ pub fn run() {
             delete_session,
             forward_session,
             continue_session,
+            get_handover_draft,
             get_handover_preview,
             list_chat_messages,
             select_directory,

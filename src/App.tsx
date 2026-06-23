@@ -26,6 +26,7 @@ import {
   deleteSession,
   detectEditors,
   forwardSession,
+  getHandoverDraft,
   getHandoverPreview,
   killSession,
   listAgentPresets,
@@ -33,7 +34,15 @@ import {
   openInEditor,
   selectDirectory,
 } from "./api/tauri";
-import type { AgentPresetInfo, HandoverContentMode, HandoverPreview, SessionInfo, WorkspaceFolder } from "./types";
+import type {
+  AgentPresetInfo,
+  HandoverContentMode,
+  HandoverDraft,
+  HandoverPreview,
+  HandoverResult,
+  SessionInfo,
+  WorkspaceFolder,
+} from "./types";
 import type { EditorInfo } from "./api/tauri";
 
 function agentTreeKey(folderPath: string, agentId: string) {
@@ -87,11 +96,110 @@ function sessionDisplayTitle(session: SessionInfo) {
   return `${title.slice(0, 39).trimEnd()}...`;
 }
 
+function normalizeWorkspacePath(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  const normalized = trimmed.replace(/\/\.(?=\/|$)/g, "");
+  return normalized || "/";
+}
+
+function isLegacyRootWorkspace(folder: WorkspaceFolder) {
+  const normalizedPath = normalizeWorkspacePath(folder.path);
+  const normalizedName = folder.name.trim();
+  const normalizedNameAsPath = normalizeWorkspacePath(normalizedName);
+  return normalizedPath === "/" && (normalizedName === "" || normalizedNameAsPath === "/");
+}
+
+function isUsableDefaultWorkspace(path: string) {
+  const normalizedPath = normalizeWorkspacePath(path);
+  return normalizedPath !== "" && normalizedPath !== "/";
+}
+
+function normalizeWorkspaceFolders(folders: WorkspaceFolder[]): WorkspaceFolder[] {
+  const seen = new Set<string>();
+  const normalized: WorkspaceFolder[] = [];
+  folders.forEach((folder) => {
+    if (isLegacyRootWorkspace(folder)) {
+      return;
+    }
+    const path = normalizeWorkspacePath(folder.path);
+    if (!path || seen.has(path)) {
+      return;
+    }
+    seen.add(path);
+    normalized.push({
+      ...folder,
+      path,
+      name: folder.name || path.split(/[/\\]/).pop() || path,
+    });
+  });
+  return normalized;
+}
+
+function normalizeWorkspaceAgentHistory(
+  value: unknown,
+): Record<string, { agentId: string; agentName: string }[]> {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+  const result: Record<string, { agentId: string; agentName: string }[]> = {};
+  for (const [path, agents] of Object.entries(value as Record<string, unknown>)) {
+    const normalizedPath = normalizeWorkspacePath(path);
+    if (!normalizedPath || !Array.isArray(agents)) {
+      continue;
+    }
+    const seenAgentIds = new Set<string>();
+    const normalizedAgents = agents.flatMap((agent) => {
+      if (!agent || typeof agent !== "object") {
+        return [];
+      }
+      const candidate = agent as Partial<{ agentId: string; agentName: string }>;
+      const agentId = candidate.agentId?.trim();
+      const agentName = candidate.agentName?.trim();
+      if (!agentId || !agentName || seenAgentIds.has(agentId)) {
+        return [];
+      }
+      seenAgentIds.add(agentId);
+      return [{ agentId, agentName }];
+    });
+    if (normalizedAgents.length > 0) {
+      result[normalizedPath] = normalizedAgents;
+    }
+  }
+  return result;
+}
+
+function normalizeWorkspacePathHistory(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  value.forEach((item) => {
+    if (typeof item !== "string") {
+      return;
+    }
+    const path = normalizeWorkspacePath(item);
+    if (!isUsableDefaultWorkspace(path) || seen.has(path)) {
+      return;
+    }
+    seen.add(path);
+    normalized.push(path);
+  });
+
+  return normalized.slice(0, NEW_CONVERSATION_WORKSPACE_HISTORY_LIMIT);
+}
+
 const NONE_WORKSPACE_STORAGE_KEY = "waypoint_none_workspace_session_ids";
 const HIDDEN_WORKSPACE_STORAGE_KEY = "waypoint_hidden_workspace_paths";
 const PINNED_ITEMS_STORAGE_KEY = "waypoint_pinned_items";
+const NEW_CONVERSATION_WORKSPACE_HISTORY_STORAGE_KEY = "waypoint_new_conversation_workspace_history";
 const NONE_WORKSPACE_VALUE = "__none_workspace__";
 const CUSTOM_WORKSPACE_VALUE = "__custom_workspace__";
+const NEW_CONVERSATION_WORKSPACE_HISTORY_LIMIT = 20;
 
 type PinnedItem = {
   targetType: "session";
@@ -347,7 +455,11 @@ function App() {
   const [handoverNote, setHandoverNote] = useState("");
   const [handoverContentMode, setHandoverContentMode] = useState<HandoverContentMode>("recommended");
   const [handoverPreview, setHandoverPreview] = useState<HandoverPreview | null>(null);
+  const [handoverDraft, setHandoverDraft] = useState<HandoverDraft | null>(null);
+  const [handoverResult, setHandoverResult] = useState<HandoverResult | null>(null);
   const [isHandoverPreviewLoading, setIsHandoverPreviewLoading] = useState(false);
+  const [isHandoverDraftLoading, setIsHandoverDraftLoading] = useState(false);
+  const [handoverDraftError, setHandoverDraftError] = useState<string | null>(null);
   const [isForwarding, setIsForwarding] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleteSessionId, setDeleteSessionId] = useState<string | null>(null);
@@ -357,6 +469,7 @@ function App() {
   const [newConversationWorkspaceValue, setNewConversationWorkspaceValue] =
     useState<string>(NONE_WORKSPACE_VALUE);
   const [newConversationCustomWorkspace, setNewConversationCustomWorkspace] = useState("");
+  const [newConversationWorkspaceHistory, setNewConversationWorkspaceHistory] = useState<string[]>([]);
   const [noneWorkspaceSessionIds, setNoneWorkspaceSessionIds] = useState<string[]>([]);
   const [hiddenWorkspacePaths, setHiddenWorkspacePaths] = useState<string[]>([]);
   const [pinnedItems, setPinnedItems] = useState<PinnedItem[]>([]);
@@ -416,6 +529,10 @@ function App() {
     handoverContentMode === "recommended"
       ? (handoverPreview?.recommendedMode ?? "full")
       : handoverContentMode;
+  const shownHandoverPrompt = handoverResult?.prompt ?? handoverDraft?.prompt ?? "";
+  const shownHandoverMode = handoverResult?.handoverMode ?? handoverDraft?.effectiveMode ?? effectiveHandoverMode;
+  const shownHandoverPath = handoverResult?.handoverPath ?? null;
+  const shownEvidencePath = handoverResult?.evidencePath ?? handoverDraft?.evidencePath ?? null;
   const pendingDeleteSession = useMemo(
     () => sessions.find((session) => session.id === deleteSessionId) ?? null,
     [deleteSessionId, sessions],
@@ -582,18 +699,18 @@ function App() {
 
   // Handle adding workspace folder
   function handleAddWorkspace(path: string) {
-    const trimmed = path.trim();
-    if (!trimmed) return;
-    if (pinnedWorkspaces.some((w) => w.path === trimmed)) {
-      revealWorkspacePath(trimmed);
+    const normalizedPath = normalizeWorkspacePath(path);
+    if (!normalizedPath) return;
+    if (pinnedWorkspaces.some((w) => w.path === normalizedPath)) {
+      revealWorkspacePath(normalizedPath);
       setError("该目录已存在于工作区中。");
       return;
     }
-    const name = trimmed.split(/[/\\]/).pop() || trimmed;
-    const nextFolders = [...pinnedWorkspaces, { path: trimmed, name, isPinned: true }];
+    const name = normalizedPath.split(/[/\\]/).pop() || normalizedPath;
+    const nextFolders = [...pinnedWorkspaces, { path: normalizedPath, name, isPinned: true }];
     setPinnedWorkspaces(nextFolders);
     localStorage.setItem("waypoint_pinned_workspaces", JSON.stringify(nextFolders));
-    revealWorkspacePath(trimmed);
+    revealWorkspacePath(normalizedPath);
   }
 
   async function pickDirectory(onSelected: (path: string) => void) {
@@ -661,18 +778,39 @@ function App() {
   }
 
   function revealWorkspacePath(path: string) {
+    const normalizedPath = normalizeWorkspacePath(path);
+    if (!normalizedPath) {
+      return;
+    }
     setHiddenWorkspacePaths((current) => {
-      if (!current.includes(path)) {
+      if (!current.includes(normalizedPath)) {
         return current;
       }
-      const next = current.filter((item) => item !== path);
+      const next = current.filter((item) => item !== normalizedPath);
       localStorage.setItem(HIDDEN_WORKSPACE_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  }
+
+  function rememberNewConversationWorkspace(path: string) {
+    const normalizedPath = normalizeWorkspacePath(path);
+    if (!isUsableDefaultWorkspace(normalizedPath)) {
+      return;
+    }
+    setNewConversationWorkspaceHistory((current) => {
+      const next = [normalizedPath, ...current.filter((item) => item !== normalizedPath)]
+        .slice(0, NEW_CONVERSATION_WORKSPACE_HISTORY_LIMIT);
+      localStorage.setItem(NEW_CONVERSATION_WORKSPACE_HISTORY_STORAGE_KEY, JSON.stringify(next));
       return next;
     });
   }
 
   // Update workspace agent history
   function updateWorkspaceAgentHistory(path: string, agentId: string, agentName: string) {
+    const normalizedPath = normalizeWorkspacePath(path);
+    if (!normalizedPath) {
+      return;
+    }
     const saved = localStorage.getItem("waypoint_workspace_agent_history");
     let history: Record<string, { agentId: string; agentName: string }[]> = {};
     if (saved) {
@@ -686,12 +824,12 @@ function App() {
       }
     }
     
-    if (!history[path] || !Array.isArray(history[path])) {
-      history[path] = [];
+    if (!history[normalizedPath] || !Array.isArray(history[normalizedPath])) {
+      history[normalizedPath] = [];
     }
     
-    if (!history[path].some(a => a.agentId === agentId)) {
-      history[path].push({ agentId, agentName });
+    if (!history[normalizedPath].some(a => a.agentId === agentId)) {
+      history[normalizedPath].push({ agentId, agentName });
       setWorkspaceAgentHistory(history);
       localStorage.setItem("waypoint_workspace_agent_history", JSON.stringify(history));
     }
@@ -730,7 +868,13 @@ function App() {
     setIsLaunching(true);
     setActiveNewMenuFolder(null);
     try {
-      const session = await createAgentSession(agentId, path);
+      const normalizedPath = normalizeWorkspacePath(path);
+      if (!normalizedPath) {
+        setError("目录路径无效。");
+        return;
+      }
+      const session = await createAgentSession(agentId, normalizedPath);
+      rememberNewConversationWorkspace(session.cwd);
       revealWorkspacePath(session.cwd);
       updateWorkspaceAgentHistory(session.cwd, session.agentId, session.agentName);
       await refreshSessions(session.id);
@@ -741,14 +885,23 @@ function App() {
     }
   }
 
-  function openNewConversationModal() {
+  function openNewConversationModal(initialWorkspaceValue = NONE_WORKSPACE_VALUE) {
     setError(null);
     setActiveNewMenuFolder(null);
     const firstAvailableAgent =
       agents.find((agent) => agent.available)?.id ?? agents[0]?.id ?? "claude-code";
-    const defaultWorkspaceChoice = pinnedWorkspaces[0]?.path ?? workspacePath.trim();
+    const normalizedWorkspaceValue =
+      initialWorkspaceValue === NONE_WORKSPACE_VALUE || initialWorkspaceValue === CUSTOM_WORKSPACE_VALUE
+        ? initialWorkspaceValue
+        : normalizeWorkspacePath(initialWorkspaceValue);
+    if (
+      normalizedWorkspaceValue !== NONE_WORKSPACE_VALUE &&
+      normalizedWorkspaceValue !== CUSTOM_WORKSPACE_VALUE
+    ) {
+      rememberNewConversationWorkspace(normalizedWorkspaceValue);
+    }
     setSelectedAgentId(firstAvailableAgent);
-    setNewConversationWorkspaceValue(defaultWorkspaceChoice || NONE_WORKSPACE_VALUE);
+    setNewConversationWorkspaceValue(normalizedWorkspaceValue || NONE_WORKSPACE_VALUE);
     setNewConversationCustomWorkspace("");
     setNewConversationOpen(true);
   }
@@ -768,9 +921,10 @@ function App() {
     setIsLaunching(true);
     try {
       let launchPath = selectedWorkspace?.trim() || workspacePath.trim();
-      if (useNoneWorkspace && !launchPath) {
+      if (useNoneWorkspace && !isUsableDefaultWorkspace(launchPath)) {
         launchPath = (await defaultWorkspace()).trim();
       }
+      launchPath = normalizeWorkspacePath(launchPath);
       if (!launchPath) {
         setError("无法解析可用目录，请先选择一个工作区目录。");
         return;
@@ -779,6 +933,7 @@ function App() {
       if (useNoneWorkspace) {
         markSessionAsNoneWorkspace(session.id);
       } else {
+        rememberNewConversationWorkspace(session.cwd);
         revealWorkspacePath(session.cwd);
         updateWorkspaceAgentHistory(session.cwd, session.agentId, session.agentName);
       }
@@ -825,7 +980,7 @@ function App() {
     }
 
     try {
-      const nextSession = await createAgentSession(source.agentId, source.cwd);
+      const nextSession = await createAgentSession(source.agentId, normalizeWorkspacePath(source.cwd));
       if (noneWorkspaceSessionIdSet.has(source.id)) {
         markSessionAsNoneWorkspace(nextSession.id);
       } else {
@@ -843,6 +998,9 @@ function App() {
 
   function openHandover() {
     setError(null);
+    setHandoverResult(null);
+    setHandoverDraft(null);
+    setHandoverDraftError(null);
     if (activeSessionId) {
       setIsHandoverPreviewLoading(true);
       setHandoverPreview(null);
@@ -864,11 +1022,19 @@ function App() {
     setHandoverOpen(true);
   }
 
+  function closeHandover() {
+    setHandoverOpen(false);
+    setHandoverResult(null);
+    setHandoverDraft(null);
+    setHandoverDraftError(null);
+  }
+
   async function handleContinue() {
     if (!activeSessionId) return;
     if (handoverMode === "existing" && !handoverTargetId) return;
     if (handoverMode === "new" && (!continueAgentId || !continueWorkspacePath.trim())) return;
     setError(null);
+    setHandoverResult(null);
     setIsForwarding(true);
     try {
       const result =
@@ -887,7 +1053,7 @@ function App() {
         result.targetSession.agentName,
       );
       revealWorkspacePath(result.targetSession.cwd);
-      setHandoverOpen(false);
+      setHandoverResult(result);
       setHandoverNote("");
       await refreshSessions(result.targetSession.id);
     } catch (err) {
@@ -896,6 +1062,76 @@ function App() {
       setIsForwarding(false);
     }
   }
+
+  useEffect(() => {
+    if (!handoverOpen || !activeSessionId) {
+      setHandoverDraft(null);
+      setHandoverDraftError(null);
+      setIsHandoverDraftLoading(false);
+      return;
+    }
+    if (handoverResult) {
+      return;
+    }
+    if (handoverMode === "existing" && !handoverTargetId) {
+      setHandoverDraft(null);
+      setHandoverDraftError(null);
+      setIsHandoverDraftLoading(false);
+      return;
+    }
+    if (handoverMode === "new" && (!continueAgentId || !continueWorkspacePath.trim())) {
+      setHandoverDraft(null);
+      setHandoverDraftError(null);
+      setIsHandoverDraftLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIsHandoverDraftLoading(true);
+    setHandoverDraftError(null);
+    const timeout = window.setTimeout(() => {
+      void getHandoverDraft({
+        sourceSessionId: activeSessionId,
+        targetMode: handoverMode,
+        targetSessionId: handoverMode === "existing" ? handoverTargetId : null,
+        targetAgentId: handoverMode === "new" ? continueAgentId : null,
+        cwd: handoverMode === "new" ? continueWorkspacePath.trim() : null,
+        note: handoverNote,
+        handoverMode: handoverContentMode,
+      })
+        .then((draft) => {
+          if (!cancelled) {
+            setHandoverDraft(draft);
+          }
+        })
+        .catch((err) => {
+          if (!cancelled) {
+            setHandoverDraft(null);
+            setHandoverDraftError(String(err));
+          }
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setIsHandoverDraftLoading(false);
+          }
+        });
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [
+    activeSessionId,
+    continueAgentId,
+    continueWorkspacePath,
+    handoverContentMode,
+    handoverMode,
+    handoverNote,
+    handoverOpen,
+    handoverResult,
+    handoverTargetId,
+  ]);
 
   function handleSelectSession(session: SessionInfo) {
     if (session.id === activeSessionId) {
@@ -1027,7 +1263,10 @@ function App() {
 
     Promise.all([refreshSessions(), refreshAgents(), defaultWorkspace()])
       .then(async ([, , cwd]) => {
-        setWorkspacePath(cwd);
+        const normalizedDefaultWorkspace = normalizeWorkspacePath(cwd);
+        setWorkspacePath(
+          isUsableDefaultWorkspace(normalizedDefaultWorkspace) ? normalizedDefaultWorkspace : "",
+        );
         // Load pinned workspaces
         let loadedPinnedWorkspaces: WorkspaceFolder[] = [];
         const saved = localStorage.getItem("waypoint_pinned_workspaces");
@@ -1035,22 +1274,25 @@ function App() {
           try {
             const parsed = JSON.parse(saved);
             if (Array.isArray(parsed)) {
-              loadedPinnedWorkspaces = parsed.filter(
-                (item): item is WorkspaceFolder =>
-                  item &&
-                  typeof item === "object" &&
-                  typeof item.path === "string" &&
-                  typeof item.name === "string",
+              loadedPinnedWorkspaces = normalizeWorkspaceFolders(
+                parsed.filter(
+                  (item): item is WorkspaceFolder =>
+                    item &&
+                    typeof item === "object" &&
+                    typeof item.path === "string" &&
+                    typeof item.name === "string",
+                ),
               );
               setPinnedWorkspaces(loadedPinnedWorkspaces);
+              localStorage.setItem("waypoint_pinned_workspaces", JSON.stringify(loadedPinnedWorkspaces));
             }
           } catch (e) {
             console.error("[Waypoint] Failed to parse pinned workspaces:", e);
           }
-        } else if (cwd) {
+        } else if (isUsableDefaultWorkspace(normalizedDefaultWorkspace)) {
           const defaultFolder: WorkspaceFolder = {
-            path: cwd,
-            name: cwd.split(/[/\\]/).pop() || cwd,
+            path: normalizedDefaultWorkspace,
+            name: normalizedDefaultWorkspace.split(/[/\\]/).pop() || normalizedDefaultWorkspace,
             isPinned: true,
           };
           loadedPinnedWorkspaces = [defaultFolder];
@@ -1069,12 +1311,39 @@ function App() {
           }
         }
 
+        const savedWorkspaceHistory = localStorage.getItem(NEW_CONVERSATION_WORKSPACE_HISTORY_STORAGE_KEY);
+        if (savedWorkspaceHistory) {
+          try {
+            const parsed = JSON.parse(savedWorkspaceHistory);
+            const normalized = normalizeWorkspacePathHistory(parsed);
+            setNewConversationWorkspaceHistory(normalized);
+            localStorage.setItem(NEW_CONVERSATION_WORKSPACE_HISTORY_STORAGE_KEY, JSON.stringify(normalized));
+          } catch (e) {
+            console.error("[Waypoint] Failed to parse new conversation workspace history:", e);
+          }
+        } else {
+          const seeded = normalizeWorkspacePathHistory(loadedPinnedWorkspaces.map((folder) => folder.path));
+          setNewConversationWorkspaceHistory(seeded);
+          if (seeded.length > 0) {
+            localStorage.setItem(NEW_CONVERSATION_WORKSPACE_HISTORY_STORAGE_KEY, JSON.stringify(seeded));
+          }
+        }
+
         const savedHiddenWorkspaces = localStorage.getItem(HIDDEN_WORKSPACE_STORAGE_KEY);
         if (savedHiddenWorkspaces) {
           try {
             const parsed = JSON.parse(savedHiddenWorkspaces);
             if (Array.isArray(parsed)) {
-              setHiddenWorkspacePaths(parsed.filter((item): item is string => typeof item === "string"));
+              const normalized = Array.from(
+                new Set(
+                  parsed
+                    .filter((item): item is string => typeof item === "string")
+                    .map((item) => normalizeWorkspacePath(item))
+                    .filter(Boolean),
+                ),
+              );
+              setHiddenWorkspacePaths(normalized);
+              localStorage.setItem(HIDDEN_WORKSPACE_STORAGE_KEY, JSON.stringify(normalized));
             }
           } catch (e) {
             console.error("[Waypoint] Failed to parse hidden workspaces:", e);
@@ -1086,9 +1355,9 @@ function App() {
         if (savedHistory) {
           try {
             const parsed = JSON.parse(savedHistory);
-            if (parsed && typeof parsed === "object") {
-              setWorkspaceAgentHistory(parsed);
-            }
+            const normalized = normalizeWorkspaceAgentHistory(parsed);
+            setWorkspaceAgentHistory(normalized);
+            localStorage.setItem("waypoint_workspace_agent_history", JSON.stringify(normalized));
           } catch (e) {
             console.error("[Waypoint] Failed to parse workspace agent history:", e);
           }
@@ -1170,7 +1439,7 @@ function App() {
           </div>
         </div>
 
-        <button className="new-conversation-trigger" type="button" onClick={openNewConversationModal}>
+        <button className="new-conversation-trigger" type="button" onClick={() => openNewConversationModal()}>
           <Plus size={14} />
           <span>新对话</span>
         </button>
@@ -1202,19 +1471,37 @@ function App() {
           </div>
 
           <div className="workspace-tree">
-            {noneWorkspaceSessions.length > 0 ? (
-              <div className="workspace-folder-node none-workspace-node">
-                <div className="workspace-folder-header">
-                  <div className="workspace-folder-info" title="none">
-                    <Folder size={14} className="folder-icon" />
-                    <span className="folder-name">无工作区会话</span>
-                  </div>
+            <div className="workspace-folder-node none-workspace-node">
+              <div className="workspace-folder-header">
+                <div className="workspace-folder-info" title="none">
+                  <Folder size={14} className="folder-icon" />
+                  <span className="folder-name">无工作区会话</span>
                 </div>
-                <div className="workspace-sessions-list">
-                  {noneWorkspaceSessions.map((session) => renderSessionItem(session))}
+                <div className="workspace-folder-actions">
+                  <button
+                    type="button"
+                    className="new-session-btn"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setActiveNewMenuFolder(null);
+                      setActiveWorkspaceMenuFolder(null);
+                      openNewConversationModal(NONE_WORKSPACE_VALUE);
+                    }}
+                    title="新建无工作区会话"
+                  >
+                    <Plus size={12} />
+                    <span>New</span>
+                  </button>
                 </div>
               </div>
-            ) : null}
+              <div className="workspace-sessions-list">
+                {noneWorkspaceSessions.length > 0 ? (
+                  noneWorkspaceSessions.map((session) => renderSessionItem(session))
+                ) : (
+                  <div className="no-sessions">暂无会话</div>
+                )}
+              </div>
+            </div>
 
             {workspacesWithSessions.map(({ folder, sessions: folderSessions }) => (
               <div className="workspace-folder-node" key={folder.path}>
@@ -1572,18 +1859,12 @@ function App() {
                   }}
                 >
                   <option value={NONE_WORKSPACE_VALUE}>None（不绑定工作区）</option>
-                  {pinnedWorkspaces.map((folder) => (
-                    <option key={folder.path} value={folder.path}>
-                      {folder.name} · {folder.path}
+                  {newConversationWorkspaceHistory.map((path) => (
+                    <option key={path} value={path}>
+                      历史目录 · {path}
                     </option>
                   ))}
-                  {workspacePath.trim() &&
-                  !pinnedWorkspaces.some((folder) => folder.path === workspacePath.trim()) ? (
-                    <option value={workspacePath.trim()}>
-                      默认目录 · {workspacePath.trim()}
-                    </option>
-                  ) : null}
-                  <option value={CUSTOM_WORKSPACE_VALUE}>选择其他目录...</option>
+                  <option value={CUSTOM_WORKSPACE_VALUE}>选择其他工作区目录...</option>
                 </select>
               </div>
 
@@ -1615,7 +1896,7 @@ function App() {
 
               {newConversationWorkspaceValue === NONE_WORKSPACE_VALUE ? (
                 <div className="workspace-none-hint">
-                  该会话将归类到「无工作区会话」，并使用默认目录启动 Agent。
+                  该会话将归类到「无工作区会话」，启动目录由系统自动选择。
                 </div>
               ) : null}
             </div>
@@ -1643,43 +1924,46 @@ function App() {
         </div>
       ) : null}
 
-	      {handoverOpen ? (
-	        <div className="modal-backdrop" role="presentation">
-	          <section className="modal" role="dialog" aria-modal="true" aria-labelledby="handover-title">
+      {handoverOpen ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal handover-modal" role="dialog" aria-modal="true" aria-labelledby="handover-title">
             <header className="modal-header">
               <div>
                 <p className="eyebrow">Handover</p>
                 <h3 id="handover-title">Continue from current session</h3>
               </div>
-              <button
-                className="icon-only"
-                type="button"
-                onClick={() => setHandoverOpen(false)}
-                title="Close"
-              >
+              <button className="icon-only" type="button" onClick={closeHandover} title="Close">
                 <X aria-hidden="true" size={16} />
               </button>
             </header>
 
-            <div className="modal-body">
-              <div className="handover-source">
-                <span>From</span>
-                <strong>{activeSession?.title}</strong>
-                <small>{activeSession?.agentName} · {activeSession?.cwd}</small>
-              </div>
+            <div className="modal-body handover-modal-body">
+              <div className="handover-layout">
+                <div className="handover-controls">
+                  <div className="handover-source">
+                    <span>From</span>
+                    <strong>{activeSession?.title}</strong>
+                    <small>{activeSession?.agentName} · {activeSession?.cwd}</small>
+                  </div>
 
               <div className="mode-toggle" role="group" aria-label="Handover mode">
                 <button
                   className={handoverMode === "new" ? "active" : ""}
                   type="button"
-                  onClick={() => setHandoverMode("new")}
+                  onClick={() => {
+                    setHandoverResult(null);
+                    setHandoverMode("new");
+                  }}
                 >
                   New Session
                 </button>
                 <button
                   className={handoverMode === "existing" ? "active" : ""}
                   type="button"
-                  onClick={() => setHandoverMode("existing")}
+                  onClick={() => {
+                    setHandoverResult(null);
+                    setHandoverMode("existing");
+                  }}
                   disabled={handoverTargets.length === 0}
                 >
                   Existing Session
@@ -1709,7 +1993,9 @@ function App() {
                   <div className="handover-size-grid" aria-label="Handover size details">
                     <span>Terminal {formatHandoverChars(handoverPreview.terminalContextChars)}</span>
                     <span>Inputs {formatHandoverChars(handoverPreview.userInputChars)}</span>
-                    <span>Diffs {formatHandoverChars(handoverPreview.unstagedDiffChars + handoverPreview.stagedDiffChars)}</span>
+                    <span>
+                      Diffs {formatHandoverChars(handoverPreview.unstagedDiffChars + handoverPreview.stagedDiffChars)}
+                    </span>
                   </div>
                 ) : null}
 
@@ -1720,7 +2006,10 @@ function App() {
                       name="handover-content-mode"
                       value="recommended"
                       checked={handoverContentMode === "recommended"}
-                      onChange={() => setHandoverContentMode("recommended")}
+                      onChange={() => {
+                        setHandoverResult(null);
+                        setHandoverContentMode("recommended");
+                      }}
                     />
                     <span>
                       <strong>Recommended</strong>
@@ -1737,7 +2026,10 @@ function App() {
                       name="handover-content-mode"
                       value="compact"
                       checked={handoverContentMode === "compact"}
-                      onChange={() => setHandoverContentMode("compact")}
+                      onChange={() => {
+                        setHandoverResult(null);
+                        setHandoverContentMode("compact");
+                      }}
                     />
                     <span>
                       <strong>Compact + evidence</strong>
@@ -1750,7 +2042,10 @@ function App() {
                       name="handover-content-mode"
                       value="full"
                       checked={handoverContentMode === "full"}
-                      onChange={() => setHandoverContentMode("full")}
+                      onChange={() => {
+                        setHandoverResult(null);
+                        setHandoverContentMode("full");
+                      }}
                     />
                     <span>
                       <strong>Full context</strong>
@@ -1770,7 +2065,10 @@ function App() {
                     <select
                       id="continue-agent"
                       value={continueAgentId}
-                      onChange={(event) => setContinueAgentId(event.target.value)}
+                      onChange={(event) => {
+                        setHandoverResult(null);
+                        setContinueAgentId(event.target.value);
+                      }}
                     >
                       {agents.map((agent) => (
                         <option key={agent.id} value={agent.id} disabled={!agent.available}>
@@ -1795,14 +2093,20 @@ function App() {
                       <input
                         id="continue-workspace"
                         value={continueWorkspacePath}
-                        onChange={(event) => setContinueWorkspacePath(event.target.value)}
+                        onChange={(event) => {
+                          setHandoverResult(null);
+                          setContinueWorkspacePath(event.target.value);
+                        }}
                         placeholder="/path/to/project"
                         spellCheck={false}
                       />
                       <button
                         type="button"
                         className="browse-dir-btn"
-                        onClick={() => pickDirectory(setContinueWorkspacePath)}
+                        onClick={() => {
+                          setHandoverResult(null);
+                          pickDirectory(setContinueWorkspacePath);
+                        }}
                         title="浏览选择文件夹"
                       >
                         <FolderOpen size={14} />
@@ -1819,7 +2123,10 @@ function App() {
                   <select
                     id="handover-target"
                     value={handoverTargetId}
-                    onChange={(event) => setHandoverTargetId(event.target.value)}
+                    onChange={(event) => {
+                      setHandoverResult(null);
+                      setHandoverTargetId(event.target.value);
+                    }}
                   >
                     {handoverTargets.map((session) => (
                       <option key={session.id} value={session.id}>
@@ -1835,16 +2142,46 @@ function App() {
                 <textarea
                   id="handover-note"
                   value={handoverNote}
-                  onChange={(event) => setHandoverNote(event.target.value)}
+                  onChange={(event) => {
+                    setHandoverResult(null);
+                    setHandoverNote(event.target.value);
+                  }}
                   placeholder="Optional: tell the target agent what to focus on next."
                   rows={6}
                 />
               </div>
+
+                </div>
+
+                <aside className="handover-preview-pane">
+                  <div className="handover-result-panel">
+                    <div className="handover-result-heading">
+                      <div>
+                        <span>{handoverResult ? "Generated handover" : "Handover preview"}</span>
+                        <strong>
+                          {isHandoverDraftLoading && !handoverResult
+                            ? "Rendering..."
+                            : shownHandoverPrompt
+                              ? formatHandoverChars(shownHandoverPrompt.length)
+                              : "No preview"}
+                        </strong>
+                      </div>
+                      <small>{shownHandoverMode}</small>
+                    </div>
+                    {shownHandoverPath ? <code className="handover-path">{shownHandoverPath}</code> : null}
+                    {handoverDraftError ? <div className="handover-preview-error">{handoverDraftError}</div> : null}
+                    <pre className="handover-raw-markdown">{shownHandoverPrompt || "Select a valid target to render the raw handover Markdown."}</pre>
+                    {shownEvidencePath ? (
+                      <small className="handover-evidence-path">Full evidence: {shownEvidencePath}</small>
+                    ) : null}
+                  </div>
+                </aside>
+              </div>
             </div>
 
             <footer className="modal-footer">
-              <button className="icon-action" type="button" onClick={() => setHandoverOpen(false)}>
-                Cancel
+              <button className="icon-action" type="button" onClick={closeHandover}>
+                {handoverResult ? "Done" : "Cancel"}
               </button>
               <button
                 className="primary-action"
@@ -1866,9 +2203,9 @@ function App() {
                 </span>
               </button>
             </footer>
-	          </section>
-	        </div>
-	      ) : null}
+          </section>
+        </div>
+      ) : null}
 
 	      {removeWorkspaceTarget ? (
 	        <div className="modal-backdrop" role="presentation">

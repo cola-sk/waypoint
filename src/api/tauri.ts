@@ -3,6 +3,7 @@ import type {
   AgentPresetInfo,
   ChatMessage,
   HandoverContentMode,
+  HandoverDraft,
   HandoverPreview,
   HandoverResult,
   SessionInfo,
@@ -168,6 +169,19 @@ export function continueSession(
 export function getHandoverPreview(sourceSessionId: string): Promise<HandoverPreview> {
   assertTauriRuntime();
   return invoke("get_handover_preview", { sourceSessionId });
+}
+
+export function getHandoverDraft(params: {
+  sourceSessionId: string;
+  targetMode: "new" | "existing";
+  targetSessionId?: string | null;
+  targetAgentId?: string | null;
+  cwd?: string | null;
+  note: string;
+  handoverMode: HandoverContentMode;
+}): Promise<HandoverDraft> {
+  assertTauriRuntime();
+  return invoke("get_handover_draft", params);
 }
 
 export function listChatMessages(sessionId: string): Promise<ChatMessage[]> {

@@ -147,6 +147,15 @@ pub struct HandoverResult {
     evidence_path: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandoverDraft {
+    prompt: String,
+    effective_mode: String,
+    estimated_chars: usize,
+    evidence_path: Option<String>,
+}
+
 #[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum HandoverContentMode {
@@ -176,7 +185,7 @@ pub struct HandoverPreview {
     staged_diff_chars: usize,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChatRole {
     User,
@@ -422,6 +431,28 @@ pub fn get_handover_preview(
 }
 
 #[tauri::command]
+pub fn get_handover_draft(
+    state: State<'_, AppState>,
+    source_session_id: String,
+    target_mode: String,
+    target_session_id: Option<String>,
+    target_agent_id: Option<String>,
+    cwd: Option<String>,
+    note: Option<String>,
+    handover_mode: Option<HandoverContentMode>,
+) -> Result<HandoverDraft, String> {
+    state.manager.get_handover_draft(
+        &source_session_id,
+        &target_mode,
+        target_session_id.as_deref(),
+        target_agent_id.as_deref(),
+        cwd.as_deref(),
+        note,
+        handover_mode.unwrap_or_default(),
+    )
+}
+
+#[tauri::command]
 pub fn send_chat_message(
     state: State<'_, AppState>,
     session_id: String,
@@ -539,6 +570,8 @@ impl SessionManager {
         if !cwd_path.is_dir() {
             return Err(format!("workspace directory does not exist: {cwd}"));
         }
+        let cwd_path = fs::canonicalize(&cwd_path).unwrap_or(cwd_path);
+        let normalized_cwd = cwd_path.to_string_lossy().to_string();
 
         let id = existing_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let now = unix_timestamp();
@@ -622,7 +655,7 @@ impl SessionManager {
             agent_name: agent_name.to_string(),
             title: session_title,
             command: display_command,
-            cwd,
+            cwd: normalized_cwd,
             status: SessionStatus::Running,
             attached: false,
             created_at: created_at_override.unwrap_or(now),
@@ -1477,12 +1510,58 @@ impl SessionManager {
         Ok(self.build_handover_preview_for(&source))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn get_handover_draft(
+        &self,
+        source_session_id: &str,
+        target_mode: &str,
+        target_session_id: Option<&str>,
+        target_agent_id: Option<&str>,
+        cwd: Option<&str>,
+        note: Option<String>,
+        requested_mode: HandoverContentMode,
+    ) -> Result<HandoverDraft, String> {
+        let source = self.get(source_session_id)?;
+        let source_info = source.info();
+        let target_info = match target_mode {
+            "existing" => {
+                let target_id = target_session_id
+                    .filter(|id| !id.trim().is_empty())
+                    .ok_or_else(|| {
+                        "target session is required for existing-session handover".to_string()
+                    })?;
+                self.get(target_id)?.info()
+            }
+            "new" => {
+                let agent_id = target_agent_id
+                    .filter(|id| !id.trim().is_empty())
+                    .ok_or_else(|| {
+                        "target agent is required for new-session handover".to_string()
+                    })?;
+                let target_cwd = cwd
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or(&source_info.cwd);
+                planned_handover_target_info(agent_id, target_cwd)?
+            }
+            other => return Err(format!("unknown handover target mode: {other}")),
+        };
+
+        Ok(
+            self.build_handover_draft_for(
+                &source,
+                &source_info,
+                &target_info,
+                note,
+                requested_mode,
+            ),
+        )
+    }
+
     fn build_handover_preview_for(&self, source: &Arc<PtySession>) -> HandoverPreview {
         let source_info = source.info();
-        let terminal_context_chars =
-            clean_terminal_output(&source.ring.lock(), HANDOVER_CONTEXT_CHARS)
-                .chars()
-                .count();
+        let terminal_context_chars = build_recent_source_context(source, HANDOVER_CONTEXT_CHARS)
+            .chars()
+            .count();
         let user_input_chars =
             clean_terminal_input(&source.input_ring.lock(), HANDOVER_USER_INPUT_CHARS)
                 .chars()
@@ -1524,6 +1603,56 @@ impl SessionManager {
             git_status_chars,
             unstaged_diff_chars,
             staged_diff_chars,
+        }
+    }
+
+    fn build_handover_draft_for(
+        &self,
+        source: &Arc<PtySession>,
+        source_info: &SessionInfo,
+        target_info: &SessionInfo,
+        note: Option<String>,
+        requested_mode: HandoverContentMode,
+    ) -> HandoverDraft {
+        let preview = self.build_handover_preview_for(source);
+        let effective_mode = resolve_handover_mode(requested_mode, preview.is_large);
+        let evidence_path = if matches!(effective_mode, EffectiveHandoverMode::Compact) {
+            Some(
+                "Preview only: full evidence path is assigned when handover is created."
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        let prompt = match effective_mode {
+            EffectiveHandoverMode::Compact => self.build_compact_handover_prompt_for(
+                source,
+                source_info,
+                target_info,
+                note,
+                evidence_path.as_deref(),
+            ),
+            EffectiveHandoverMode::Full => {
+                let diff_preview_limit = if matches!(requested_mode, HandoverContentMode::Full) {
+                    GIT_OUTPUT_LIMIT_CHARS
+                } else {
+                    HANDOVER_DIFF_PREVIEW_CHARS
+                };
+                self.build_handover_prompt_for(
+                    source,
+                    source_info,
+                    target_info,
+                    note,
+                    diff_preview_limit,
+                )
+            }
+        };
+
+        HandoverDraft {
+            prompt,
+            effective_mode: effective_mode.as_str().to_string(),
+            estimated_chars: preview.estimated_chars,
+            evidence_path,
         }
     }
 
@@ -1591,7 +1720,7 @@ impl SessionManager {
         note: Option<String>,
         diff_preview_limit: usize,
     ) -> String {
-        let recent_context = clean_terminal_output(&source.ring.lock(), HANDOVER_CONTEXT_CHARS);
+        let recent_context = build_recent_source_context(source, HANDOVER_CONTEXT_CHARS);
         let recent_user_inputs =
             clean_terminal_input(&source.input_ring.lock(), HANDOVER_USER_INPUT_CHARS);
         let inherited_handover = tail_chars(
@@ -1624,8 +1753,7 @@ impl SessionManager {
         note: Option<String>,
         evidence_path: Option<&str>,
     ) -> String {
-        let recent_context =
-            clean_terminal_output(&source.ring.lock(), COMPACT_HANDOVER_CONTEXT_CHARS);
+        let recent_context = build_recent_source_context(source, COMPACT_HANDOVER_CONTEXT_CHARS);
         let recent_user_inputs =
             clean_terminal_input(&source.input_ring.lock(), COMPACT_USER_INPUT_CHARS);
         let inherited_handover = tail_chars(
@@ -1658,7 +1786,7 @@ impl SessionManager {
         target_info: &SessionInfo,
         note: Option<String>,
     ) -> String {
-        let recent_context = clean_terminal_output(&source.ring.lock(), HANDOVER_CONTEXT_CHARS);
+        let recent_context = build_recent_source_context(source, HANDOVER_CONTEXT_CHARS);
         let recent_user_inputs =
             clean_terminal_input(&source.input_ring.lock(), HANDOVER_USER_INPUT_CHARS);
         let inherited_handover = tail_chars(
@@ -1761,33 +1889,12 @@ impl PtySession {
 
     fn capture_user_input(&self, data: &str) {
         let mut pending = self.pending_user_input.lock();
-        let mut ignoring_escape = false;
-        for ch in data.chars() {
-            if ignoring_escape {
-                if ch.is_ascii_alphabetic() || ch == '~' {
-                    ignoring_escape = false;
-                }
-                continue;
-            }
+        let submitted = extract_submitted_user_inputs(&mut pending, data);
+        drop(pending);
 
-            match ch {
-                '\u{1b}' => {
-                    ignoring_escape = true;
-                }
-                '\r' | '\n' => {
-                    let candidate = pending.trim().to_string();
-                    pending.clear();
-                    drop(pending);
-                    self.remember_first_user_message(&candidate);
-                    return;
-                }
-                '\u{7f}' | '\u{8}' => {
-                    pending.pop();
-                }
-                '\t' => pending.push(' '),
-                _ if !ch.is_control() => pending.push(ch),
-                _ => {}
-            }
+        for candidate in submitted {
+            self.append_chat_user_message(&candidate);
+            self.remember_first_user_message(&candidate);
         }
     }
 
@@ -1860,9 +1967,9 @@ impl PtySession {
 
         if let Some(message) = messages.get_mut(index) {
             if replace_existing {
-                message.content = chunk.to_string();
+                message.content = merge_assistant_output(&message.content, chunk, true);
             } else if !message.content.ends_with(chunk) {
-                message.content.push_str(chunk);
+                message.content = merge_assistant_output(&message.content, chunk, false);
             }
             if message.content.chars().count() > CHAT_MESSAGE_CONTENT_LIMIT_CHARS {
                 message.content = truncate_tail(&message.content, CHAT_MESSAGE_CONTENT_LIMIT_CHARS);
@@ -1924,10 +2031,33 @@ impl SessionMeta {
 }
 
 fn default_cwd() -> String {
-    env::current_dir()
+    if let Ok(path) = env::current_dir() {
+        if let Some(normalized) = canonicalize_workspace_dir(&path) {
+            if normalized != "/" {
+                return normalized;
+            }
+        }
+        if let Some(raw) = path.to_str() {
+            if raw != "/" {
+                return raw.to_string();
+            }
+        }
+    }
+
+    if let Ok(home) = env::var("HOME") {
+        if let Some(normalized) = canonicalize_workspace_dir(Path::new(&home)) {
+            return normalized;
+        }
+        return home;
+    }
+
+    "/".to_string()
+}
+
+fn canonicalize_workspace_dir(path: &Path) -> Option<String> {
+    fs::canonicalize(path)
         .ok()
-        .and_then(|path| path.to_str().map(ToOwned::to_owned))
-        .unwrap_or_else(|| env::var("HOME").unwrap_or_else(|_| "/".to_string()))
+        .and_then(|resolved| resolved.to_str().map(ToOwned::to_owned))
 }
 
 fn waypoint_sessions_dir() -> Result<PathBuf, String> {
@@ -2289,6 +2419,38 @@ fn resolve_handover_mode(
         HandoverContentMode::Compact => EffectiveHandoverMode::Compact,
         HandoverContentMode::Full => EffectiveHandoverMode::Full,
     }
+}
+
+fn planned_handover_target_info(agent_id: &str, cwd: &str) -> Result<SessionInfo, String> {
+    let definition = agent_definitions()
+        .into_iter()
+        .find(|definition| definition.id == agent_id)
+        .ok_or_else(|| format!("unknown agent preset: {agent_id}"))?;
+    let now = unix_timestamp();
+    let command = match definition.id {
+        "claude-code" => "claude <handover>".to_string(),
+        "gemini" => "gemini --prompt-interactive <handover>".to_string(),
+        "codex" => "codex --no-alt-screen <handover>".to_string(),
+        "copilot" => resolve_agent_command(&definition)
+            .map(|resolved| format!("{} -i <handover>", resolved.display))
+            .unwrap_or_else(|| "copilot -i <handover>".to_string()),
+        _ => format!("{} <handover>", definition.name),
+    };
+
+    Ok(SessionInfo {
+        id: "pending".to_string(),
+        agent_id: definition.id.to_string(),
+        agent_name: definition.name.to_string(),
+        title: format!("{} new session", definition.name),
+        command,
+        cwd: cwd.to_string(),
+        status: SessionStatus::Running,
+        attached: false,
+        created_at: now,
+        last_active_at: now,
+        first_user_message: None,
+        native_session_ref: None,
+    })
 }
 
 fn reserve_handover_paths(cwd: &str) -> Result<HandoverPaths, String> {
@@ -2761,6 +2923,139 @@ fn trim_chat_messages(messages: &mut Vec<ChatMessage>, open_assistant_index: &mu
     }
 }
 
+fn build_recent_source_context(source: &Arc<PtySession>, limit: usize) -> String {
+    source.finalize_open_assistant_message_if_idle(CHAT_STREAM_IDLE_FINALIZE_MS);
+    let messages = source.chat_messages.lock().clone();
+    let conversation = format_chat_messages_for_handover(&messages, limit);
+    if !conversation.trim().is_empty() {
+        return conversation;
+    }
+
+    clean_terminal_output(&source.ring.lock(), limit)
+}
+
+fn format_chat_messages_for_handover(messages: &[ChatMessage], limit: usize) -> String {
+    let Some(start_index) = messages
+        .iter()
+        .position(|message| matches!(message.role, ChatRole::User))
+    else {
+        return String::new();
+    };
+
+    let mut blocks = Vec::new();
+    for message in messages.iter().skip(start_index) {
+        let content = clean_handover_message_content(&message.content, message.role);
+        if content.trim().is_empty() {
+            continue;
+        }
+
+        let role = match message.role {
+            ChatRole::User => "User",
+            ChatRole::Assistant => "Assistant",
+        };
+        let pending = if message.pending { " (pending)" } else { "" };
+        blocks.push(format!("{role}{pending}:\n{content}"));
+    }
+
+    tail_chars(&blocks.join("\n\n"), limit)
+}
+
+fn clean_handover_message_content(content: &str, role: ChatRole) -> String {
+    let cleaned = match role {
+        ChatRole::User => clean_terminal_input(content, CHAT_MESSAGE_CONTENT_LIMIT_CHARS),
+        ChatRole::Assistant => clean_chat_chunk(content),
+    };
+    if !cleaned.trim().is_empty() {
+        return cleaned;
+    }
+
+    let lines = content
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !looks_like_tui_noise_line(line))
+        .collect::<Vec<_>>();
+    collapse_blank_lines(&lines.join("\n"), 2)
+        .trim()
+        .to_string()
+}
+
+fn extract_submitted_user_inputs(pending: &mut String, data: &str) -> Vec<String> {
+    let mut submitted = Vec::new();
+    let mut ignoring_escape = false;
+
+    for ch in data.chars() {
+        if ignoring_escape {
+            if ch.is_ascii_alphabetic() || ch == '~' {
+                ignoring_escape = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '\u{1b}' => {
+                ignoring_escape = true;
+            }
+            '\r' | '\n' => {
+                let candidate = pending.trim().to_string();
+                pending.clear();
+                if !candidate.is_empty() {
+                    submitted.push(candidate);
+                }
+            }
+            '\u{7f}' | '\u{8}' => {
+                pending.pop();
+            }
+            '\t' => pending.push(' '),
+            _ if !ch.is_control() => pending.push(ch),
+            _ => {}
+        }
+    }
+
+    submitted
+}
+
+fn merge_assistant_output(existing: &str, chunk: &str, replace_existing: bool) -> String {
+    if existing.is_empty() {
+        return chunk.to_string();
+    }
+    if chunk.is_empty() {
+        return existing.to_string();
+    }
+
+    if existing.ends_with(chunk) || existing.contains(chunk) {
+        return existing.to_string();
+    }
+    if chunk.contains(existing) {
+        return chunk.to_string();
+    }
+
+    let overlap = longest_suffix_prefix_overlap(existing, chunk);
+    if overlap > 0 {
+        let suffix = chunk.chars().skip(overlap).collect::<String>();
+        return format!("{existing}{suffix}");
+    }
+
+    if replace_existing && chunk.chars().count() > existing.chars().count() * 2 {
+        return chunk.to_string();
+    }
+
+    format!("{existing}{chunk}")
+}
+
+fn longest_suffix_prefix_overlap(left: &str, right: &str) -> usize {
+    let left_chars = left.chars().collect::<Vec<_>>();
+    let right_chars = right.chars().collect::<Vec<_>>();
+    let max = left_chars.len().min(right_chars.len());
+
+    for len in (4..=max).rev() {
+        if left_chars[left_chars.len() - len..] == right_chars[..len] {
+            return len;
+        }
+    }
+
+    0
+}
+
 fn truncate_tail(value: &str, limit: usize) -> String {
     if value.chars().count() <= limit {
         return value.to_string();
@@ -2930,6 +3225,22 @@ fn looks_like_tui_noise_line(line: &str) -> bool {
         || normalized.contains("effort")
         || normalized.contains("mcpserver")
         || normalized.contains("mcpneedsauth")
+        || normalized.contains("nativeinstallationexists")
+        || normalized.contains("localbinisnotinyourpath")
+        || normalized.contains("sessionstartstartuphookerror")
+        || normalized.contains("failedwithnonblockingstatus")
+        || normalized.contains("imageinclipboard")
+        || normalized.contains("ctrlvtopaste")
+    {
+        return true;
+    }
+
+    if normalized == "thinking"
+        || normalized.contains("noodling")
+        || normalized.contains("stillthinking")
+        || normalized.contains("thinkingmore")
+        || normalized.contains("brewedfor")
+        || normalized.contains("bakedfor")
     {
         return true;
     }
@@ -3182,14 +3493,14 @@ fn clean_terminal_output(raw: &str, limit: usize) -> String {
         clean_lines.push(cleaned);
     }
 
-    // Step 3: remove TUI spinner / decoration characters
+    // Step 3: remove TUI spinner / decoration characters and known status lines
     let spinner_chars: &[char] = &[
         '✢', '✳', '✶', '✻', '✽', '⏺', '⠂', '⠐',
         '·', // middle dot used as separator in TUI status bars
     ];
     let clean_lines: Vec<String> = clean_lines
         .into_iter()
-        .map(|line| {
+        .filter_map(|line| {
             let trimmed = line.trim();
             // If the line is ONLY spinner/decoration chars (possibly with spaces), skip it
             if !trimmed.is_empty()
@@ -3197,9 +3508,12 @@ fn clean_terminal_output(raw: &str, limit: usize) -> String {
                     .chars()
                     .all(|c| spinner_chars.contains(&c) || c == ' ')
             {
-                String::new()
+                return None;
+            }
+            if looks_like_tui_noise_line(trimmed) {
+                None
             } else {
-                line
+                Some(line)
             }
         })
         .collect();
@@ -3340,6 +3654,19 @@ mod tests {
     }
 
     #[test]
+    fn test_clean_terminal_output_filters_claude_tui_noise() {
+        let input = "╭───Claude Code v2.1.144────────────────╮\n│ Tips for getting started │\n? for shortcuts ● high · /effort\n✻ Noodling… still thinking\nthinking\n看完代码，其实当前实现已经支持按次调用切换。\nNative installation exists but ~/.local/bin is not in your PATH. Run:\n";
+        let result = clean_terminal_output(input, 10000);
+
+        assert!(result.contains("看完代码"));
+        assert!(!result.contains("Claude Code"));
+        assert!(!result.contains("Tips for getting started"));
+        assert!(!result.contains("shortcuts"));
+        assert!(!result.contains("Noodling"));
+        assert!(!result.contains("Native installation exists"));
+    }
+
+    #[test]
     fn test_clean_terminal_output_handles_cr_overwrite() {
         // \r causes the cursor to go back to start of line, overwriting
         let input = "old text\rnew";
@@ -3373,6 +3700,45 @@ mod tests {
         assert!(result.contains("hi"));
         assert!(result.contains("fr"));
         assert!(!result.contains('\x1b'));
+    }
+
+    #[test]
+    fn test_extract_submitted_user_inputs_handles_escape_and_multiline() {
+        let mut pending = String::new();
+        assert!(extract_submitted_user_inputs(&mut pending, "hel").is_empty());
+        assert_eq!(pending, "hel");
+
+        let submitted = extract_submitted_user_inputs(&mut pending, "lo\x1b[A\rnext\n");
+
+        assert_eq!(submitted, vec!["hello".to_string(), "next".to_string()]);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn test_merge_assistant_output_keeps_existing_when_repaint_is_suffix_fragment() {
+        let existing = "要我帮你生成一份CLAUDE.md模板，或者直接改成方案3的自动推断？";
+        let chunk = "份CLAUDE.md模板，或者直接改成方案3的自动推断？";
+
+        let result = merge_assistant_output(existing, chunk, true);
+
+        assert_eq!(result, existing);
+    }
+
+    #[test]
+    fn test_merge_assistant_output_uses_overlap_for_incremental_chunks() {
+        let existing = "方式1把端绑定到项目目录";
+        let chunk = "项目目录语义，一次约定长期有效";
+
+        let result = merge_assistant_output(existing, chunk, true);
+
+        assert_eq!(result, "方式1把端绑定到项目目录语义，一次约定长期有效");
+    }
+
+    #[test]
+    fn test_clean_chat_chunk_filters_completion_status() {
+        let result = clean_chat_chunk("实际回答\n✻Bakedfor48s\n");
+
+        assert_eq!(result, "实际回答");
     }
 
     #[test]
@@ -3478,5 +3844,44 @@ mod tests {
         let noise_input = "┌───ClaudeCodev2.1.144──────────────────────────┐\n││Tipsforgettingstarted│\n?forshortcuts●high·/effort\n* Swirling...\nesctointerrupt●high·/effort+·+***Sw*Sirwliirn*lig...*ng*..\n~/coding/waypoint/src-tauri││>\n>\n?\n";
         let noise_result = clean_chat_chunk(noise_input);
         assert_eq!(noise_result, "");
+    }
+
+    #[test]
+    fn test_format_chat_messages_for_handover_prefers_conversation() {
+        let messages = vec![
+            ChatMessage {
+                id: "startup".to_string(),
+                role: ChatRole::Assistant,
+                content: "Welcome back!".to_string(),
+                pending: false,
+                created_at: 1,
+                updated_at: 1,
+            },
+            ChatMessage {
+                id: "user".to_string(),
+                role: ChatRole::User,
+                content: "我这里是不是要加 CLAUDE.md 约定？".to_string(),
+                pending: false,
+                created_at: 2,
+                updated_at: 2,
+            },
+            ChatMessage {
+                id: "assistant".to_string(),
+                role: ChatRole::Assistant,
+                content:
+                    "? for shortcuts ● high · /effort\n可以，建议把 tokenSetId 约定绑定到项目目录。"
+                        .to_string(),
+                pending: false,
+                created_at: 3,
+                updated_at: 3,
+            },
+        ];
+
+        let result = format_chat_messages_for_handover(&messages, 10000);
+
+        assert!(result.contains("User:\n我这里是不是要加 CLAUDE.md"));
+        assert!(result.contains("Assistant:\n可以，建议把 tokenSetId"));
+        assert!(!result.contains("Welcome back"));
+        assert!(!result.contains("shortcuts"));
     }
 }
