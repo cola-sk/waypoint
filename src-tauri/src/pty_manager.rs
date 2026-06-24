@@ -601,6 +601,21 @@ impl SessionManager {
             });
         }
 
+        if agent_id == "claude-code"
+            && native_session_ref.is_none()
+            && !claude_args_have_session_identity(&args)
+        {
+            args.push("--session-id".to_string());
+            args.push(id.clone());
+            native_session_ref = Some(NativeSessionRef {
+                provider: agent_id.to_string(),
+                id: Some(id.clone()),
+                name: None,
+                resume_command: Some(format!("{} --resume {}", display_command, shell_quote(&id))),
+                discovered_at: now,
+            });
+        }
+
         let pty_system = native_pty_system();
         let initial_rows = rows.unwrap_or(30);
         let initial_cols = cols.unwrap_or(100);
@@ -3079,7 +3094,25 @@ fn find_claude_native_transcript_path(cwd: &str, native_id: &str) -> Option<Path
 }
 
 fn claude_project_dir_name(cwd: &str) -> String {
-    cwd.replace('/', "-")
+    let mut name = String::new();
+    for c in cwd.chars() {
+        if c.is_alphanumeric() {
+            name.push(c);
+        } else {
+            name.push('-');
+        }
+    }
+    name
+}
+
+fn claude_args_have_session_identity(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg == "--resume"
+            || arg == "-r"
+            || arg.starts_with("-r=")
+            || arg == "--session-id"
+            || arg.starts_with("--session-id=")
+    })
 }
 
 fn find_codex_native_transcript_path(native_id: &str) -> Option<PathBuf> {
