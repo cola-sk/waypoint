@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   Bot,
@@ -485,6 +485,40 @@ function App() {
   const [activeNewMenuFolder, setActiveNewMenuFolder] = useState<string | null>(null);
   const [activeWorkspaceMenuFolder, setActiveWorkspaceMenuFolder] = useState<string | null>(null);
   const [expandedAgents, setExpandedAgents] = useState<Record<string, boolean>>({});
+
+  // Sidebar resizer state & logic
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    const saved = localStorage.getItem("sidebar-width");
+    return saved ? parseInt(saved, 10) : 320;
+  });
+  const [isDragging, setIsDragging] = useState(false);
+
+  const startResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const newWidth = Math.max(200, Math.min(600, e.clientX));
+      setSidebarWidth(newWidth);
+      localStorage.setItem("sidebar-width", String(newWidth));
+    };
+
+    const handleMouseUp = () => {
+      setIsDragging(false);
+    };
+
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+
+    return () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [isDragging]);
   const [workspaceAgentHistory, setWorkspaceAgentHistory] = useState<
     Record<string, { agentId: string; agentName: string }[]>
   >({});
@@ -1421,7 +1455,10 @@ function App() {
   }, []);
 
   return (
-    <main className="app-shell">
+    <main
+      className={`app-shell ${isDragging ? "is-resizing" : ""}`}
+      style={{ "--sidebar-width": `${sidebarWidth}px` } as React.CSSProperties}
+    >
       {activeNewMenuFolder && (
         <div
           className="popover-backdrop"
@@ -1747,6 +1784,11 @@ function App() {
           </div>
         </div>
       </aside>
+
+      <div
+        className={`sidebar-resizer ${isDragging ? "is-dragging" : ""}`}
+        onMouseDown={startResize}
+      />
 
       <section className="workspace">
         <header className="topbar">
