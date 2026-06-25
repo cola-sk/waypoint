@@ -605,8 +605,7 @@ impl SessionManager {
             && native_session_ref.is_none()
             && !claude_args_have_session_identity(&args)
         {
-            args.push("--session-id".to_string());
-            args.push(id.clone());
+            append_claude_session_id(&mut args, &id);
             native_session_ref = Some(NativeSessionRef {
                 provider: agent_id.to_string(),
                 id: Some(id.clone()),
@@ -1366,6 +1365,10 @@ impl SessionManager {
         let startup_prompt = handover_reference_startup_prompt(&handover.main_path);
 
         let mut args = resolved.args;
+        if let Some(parent) = handover.main_path.parent() {
+            args.push("--add-dir".to_string());
+            args.push(parent.to_string_lossy().into_owned());
+        }
         args.push(startup_prompt);
 
         let target_info = self.spawn_session(
@@ -2328,7 +2331,11 @@ fn native_resume_command_for(meta: &SessionMeta) -> Result<Option<NativeResumeCo
                 args.push(native_id.clone());
                 (
                     args,
-                    format!("{} --conversation {}", resolved.display, shell_quote(&native_id)),
+                    format!(
+                        "{} --conversation {}",
+                        resolved.display,
+                        shell_quote(&native_id)
+                    ),
                 )
             } else {
                 args.push("--continue".to_string());
@@ -3103,6 +3110,15 @@ fn claude_project_dir_name(cwd: &str) -> String {
         }
     }
     name
+}
+
+fn append_claude_session_id(args: &mut Vec<String>, session_id: &str) {
+    let insert_at = args
+        .iter()
+        .position(|arg| !arg.starts_with('-'))
+        .unwrap_or(args.len());
+    args.insert(insert_at, session_id.to_string());
+    args.insert(insert_at, "--session-id".to_string());
 }
 
 fn claude_args_have_session_identity(args: &[String]) -> bool {
@@ -4319,6 +4335,30 @@ mod tests {
         assert!(inputs.contains("先实现 preview"));
         assert!(inputs.contains("追问：create 后不要再显示"));
         assert!(!context.contains("ignored tool output"));
+    }
+
+    #[test]
+    fn test_claude_project_dir_name_matches_native_storage() {
+        assert_eq!(
+            claude_project_dir_name("/Users/liuzhe.x/coding/mcp-deck"),
+            "-Users-liuzhe-x-coding-mcp-deck"
+        );
+    }
+
+    #[test]
+    fn test_append_claude_session_id_precedes_initial_prompt() {
+        let mut args = vec!["Read the handover file".to_string()];
+
+        append_claude_session_id(&mut args, "acc81906-1dbd-4c13-b910-4c903c4feea6");
+
+        assert_eq!(
+            args,
+            vec![
+                "--session-id",
+                "acc81906-1dbd-4c13-b910-4c903c4feea6",
+                "Read the handover file"
+            ]
+        );
     }
 
     #[test]
