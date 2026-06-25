@@ -454,6 +454,8 @@ function App() {
   const [handoverDraft, setHandoverDraft] = useState<HandoverDraft | null>(null);
   const [handoverResult, setHandoverResult] = useState<HandoverResult | null>(null);
   const [handoverFileResult, setHandoverFileResult] = useState<HandoverFileResult | null>(null);
+  const [handoverPromptEdit, setHandoverPromptEdit] = useState("");
+  const [handoverPromptEdited, setHandoverPromptEdited] = useState(false);
   const [isHandoverPreviewLoading, setIsHandoverPreviewLoading] = useState(false);
   const [isHandoverDraftLoading, setIsHandoverDraftLoading] = useState(false);
   const [handoverDraftError, setHandoverDraftError] = useState<string | null>(null);
@@ -990,6 +992,8 @@ function App() {
     setHandoverResult(null);
     setHandoverDraft(null);
     setHandoverDraftError(null);
+    setHandoverPromptEdit("");
+    setHandoverPromptEdited(false);
     if (activeSessionId) {
       setIsHandoverPreviewLoading(true);
       setHandoverPreview(null);
@@ -1016,6 +1020,8 @@ function App() {
     setHandoverResult(null);
     setHandoverDraft(null);
     setHandoverDraftError(null);
+    setHandoverPromptEdit("");
+    setHandoverPromptEdited(false);
   }
 
   async function copyTextToClipboard(value: string) {
@@ -1069,25 +1075,39 @@ function App() {
     if (!activeSessionId) return;
     if (handoverMode === "existing" && !handoverTargetId) return;
     if (handoverMode === "new" && (!continueAgentId || !continueWorkspacePath.trim())) return;
+    if (handoverPromptEdited && !handoverPromptEdit.trim()) {
+      setError("Handover Markdown 不能为空。");
+      return;
+    }
     setError(null);
     setHandoverResult(null);
     setIsForwarding(true);
     try {
+      const editedPrompt = handoverPromptEdited ? handoverPromptEdit : "";
       const result =
         handoverMode === "existing"
-          ? await forwardSession(activeSessionId, handoverTargetId, handoverNote, handoverContentMode)
+          ? await forwardSession(
+              activeSessionId,
+              handoverTargetId,
+              handoverNote,
+              handoverContentMode,
+              editedPrompt,
+            )
           : await continueSession(
               activeSessionId,
               continueAgentId,
               continueWorkspacePath.trim(),
               handoverNote,
               handoverContentMode,
+              editedPrompt,
             );
       revealWorkspacePath(result.targetSession.cwd);
       setHandoverNote("");
       setHandoverOpen(false);
       setHandoverDraft(null);
       setHandoverDraftError(null);
+      setHandoverPromptEdit("");
+      setHandoverPromptEdited(false);
       setIsHandoverDraftLoading(false);
       await refreshSessions(result.targetSession.id);
     } catch (err) {
@@ -1166,6 +1186,15 @@ function App() {
     handoverResult,
     handoverTargetId,
   ]);
+
+  useEffect(() => {
+    if (!handoverOpen) {
+      return;
+    }
+    if (!handoverPromptEdited) {
+      setHandoverPromptEdit(shownHandoverPrompt);
+    }
+  }, [handoverOpen, handoverPromptEdited, shownHandoverPrompt]);
 
   function handleSelectSession(session: SessionInfo) {
     if (session.id === activeSessionId) {
@@ -2225,7 +2254,31 @@ function App() {
                     </div>
                     {shownHandoverPath ? <code className="handover-path">{shownHandoverPath}</code> : null}
                     {handoverDraftError ? <div className="handover-preview-error">{handoverDraftError}</div> : null}
-                    <pre className="handover-raw-markdown">{shownHandoverPrompt || "Select a valid target to render the raw handover Markdown."}</pre>
+                    <div className="handover-editor-row">
+                      <span>Editable Markdown</span>
+                      {handoverPromptEdited ? (
+                        <button
+                          className="icon-action"
+                          type="button"
+                          onClick={() => {
+                            setHandoverPromptEdit(shownHandoverPrompt);
+                            setHandoverPromptEdited(false);
+                          }}
+                        >
+                          Reset to Draft
+                        </button>
+                      ) : null}
+                    </div>
+                    <textarea
+                      className="handover-raw-markdown handover-edit-markdown"
+                      value={handoverPromptEdit}
+                      onChange={(event) => {
+                        setHandoverPromptEdited(true);
+                        setHandoverPromptEdit(event.target.value);
+                      }}
+                      placeholder="Select a valid target to render the raw handover Markdown."
+                      spellCheck={false}
+                    />
                     {shownEvidencePath ? (
                       <small className="handover-evidence-path">Full evidence: {shownEvidencePath}</small>
                     ) : null}

@@ -173,11 +173,13 @@ npm run tauri:dev
 6. 在 Note 中填写目标 agent 接下来要关注的任务。
 7. 点击 Create & Continue。
 8. waypoint 会创建一个新的目标 session。
-9. waypoint 会收集源 session 最近 terminal context、workspace git status、git diff、staged diff。
+9. waypoint 会收集源 session 按时间顺序排列的最近对话、workspace git status、git diff、staged diff。
 10. waypoint 会生成 handover prompt，并注入新 session。
 11. UI 自动切换到新 session。
 12. 源 session 仍然保持运行，可以随时切回。
 ```
+
+Continue 弹窗右侧的 handover Markdown 支持直接编辑；点击 Create & Continue / Forward 时会把编辑后的内容写入 handover 文件并用于注入。
 
 如果已经有一个目标 session，也可以使用高级模式：
 
@@ -254,7 +256,7 @@ workspace-name：
   取 workspace 路径最后一级目录名；无法解析时使用 workspace。
 
 模式选择：
-  Recommended 模式下，如果估算上下文超过 32,000 字符，使用 Compact；
+  Recommended 模式下，如果估算上下文超过 24,000 字符，使用 Compact；
   否则使用 Full。
   用户也可以显式选择 Compact 或 Full。
 ```
@@ -266,11 +268,10 @@ handover 文件会收集以下信息：
 2. 用户在 Continue 面板填写的 note。
 3. git branch、git status --short。
 4. unstaged diff 与 staged diff 的 stat、文件列表和 diff preview。
-5. 最近的 source terminal context。
-6. 最近用户输入。
-7. 上一跳 inherited handover context。
-8. 截图/图片附件的精确路径、类型和大小。
-9. agy 会话生成的 markdown artifacts：
+5. 最近的 conversation timeline：尽量按原始 chat 顺序保留 User / Assistant 往返。
+6. 上一跳 inherited handover context。
+7. 截图/图片附件的精确路径、类型和大小。
+8. agy 会话生成的 markdown artifacts：
    从 ~/.gemini/antigravity-cli/brain/<conversation-id> 读取顶层 .md 文件。
 ```
 
@@ -293,17 +294,19 @@ Antigravity CLI:
 
 GitHub Copilot / Shell:
   主要使用 waypoint 自己的 terminal/chat buffer 与输入 ring。
+  如果无法构造有序 User / Assistant 对话，handover 会在同一个 timeline 区块中
+  标明只捕获到用户输入，而不会再把 assistant/context 和 user inputs 分成两个独立区块。
 ```
 
 Full 与 Compact 的差异：
 
 ```text
 Full:
-  主 handover 文件中包含完整结构、最近上下文、用户输入、git 状态、
+  主 handover 文件中包含完整结构、最近有序对话、git 状态、
   diff stat、文件列表和受限长度的 diff preview。
 
 Compact:
-  主 handover 文件只保留更短的上下文、用户输入、git 状态、diff stat 和文件列表；
+  主 handover 文件只保留更短的有序对话、git 状态、diff stat 和文件列表；
   不内联完整 diff preview。
   同时生成 *-full-evidence.md，保存完整证据、完整 git diff 和 staged diff。
   Compact 主文件会引用 evidence 文件路径，目标 agent 可按需读取该精确文件。

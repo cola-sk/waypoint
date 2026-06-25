@@ -2478,6 +2478,15 @@ textarea:focus-visible {
   padding: 8px 10px;
 }
 
+.handover-editor-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
 .handover-raw-markdown {
   max-height: none;
   min-height: 0;
@@ -2494,6 +2503,12 @@ textarea:focus-visible {
   tab-size: 2;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.handover-edit-markdown {
+  width: 100%;
+  min-height: 320px;
+  resize: vertical;
 }
 
 @media (max-width: 920px) {

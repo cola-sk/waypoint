@@ -160,6 +160,7 @@ export function forwardSession(
   targetSessionId: string,
   note: string,
   handoverMode: HandoverContentMode,
+  editedPrompt?: string,
 ): Promise<HandoverResult> {
   assertTauriRuntime();
   return invoke("forward_session", {
@@ -167,6 +168,7 @@ export function forwardSession(
     targetSessionId,
     note,
     handoverMode,
+    editedPrompt: editedPrompt ?? null,
   });
 }
 
@@ -176,6 +178,7 @@ export function continueSession(
   cwd: string,
   note: string,
   handoverMode: HandoverContentMode,
+  editedPrompt?: string,
 ): Promise<HandoverResult> {
   assertTauriRuntime();
   return invoke("continue_session", {
@@ -184,6 +187,7 @@ export function continueSession(
     cwd,
     note,
     handoverMode,
+    editedPrompt: editedPrompt ?? null,
     rows: DEFAULT_TERMINAL_ROWS,
     cols: DEFAULT_TERMINAL_COLS,
   });
