@@ -5,51 +5,41 @@
 </p>
 
 <p align="center">
-  <strong>A local desktop router for long-running AI agent CLI sessions.</strong>
+  <strong>桌面端本地 Agent CLI 会话路由器。</strong>
 </p>
 
 <p align="center">
-  <a href="README.zh-CN.md">中文文档</a>
+  <a href="README.zh-CN.md">中文文档（详细版）</a>
 </p>
 
-![Waypoint desktop interface](docs/assets/waypoint-screenshot.png)
+![Waypoint 桌面界面](docs/assets/waypoint-screenshot.png)
 
-Waypoint is a Tauri desktop app for managing multiple local AI agent CLI sessions in one place. It keeps PTY-backed sessions alive, lets you switch between workspaces and agents, and provides a handover flow for passing context from one agent session to another.
+Waypoint 是一个 Tauri 桌面应用，用于在一个窗口中管理多个本地 AI agent CLI 会话。它通过 PTY 保持会话长期存活，支持在工作区和 agent 之间切换，并提供 handover 流程，将上下文从一个 agent 会话传递给另一个 agent 会话。
 
-It is built for tools like Claude Code, Codex, Antigravity CLI, GitHub Copilot CLI, and your regular shell.
+它面向 Claude Code、Codex、Antigravity CLI、GitHub Copilot CLI 以及常规 shell 等工具。
 
-## Highlights
+## 核心能力
 
-- **Local PTY session hosting**: run agent CLIs in real terminal sessions managed by the desktop app.
-- **Multi-agent workspace routing**: pin workspace folders and launch available agents from each folder.
-- **Persistent session switching**: switch between sessions without killing the underlying process.
-- **Agent handover**: continue work by forwarding terminal context, git status, diffs, and a note to another agent session.
-- **Native desktop shell**: Tauri v2 + Rust backend with a React and xterm.js interface.
-- **Automatic CLI detection**: resolves agent commands through the user login shell so the app sees a PATH close to the terminal environment.
+- **本地 PTY 会话托管**：在桌面应用管理的真实终端会话中运行 agent CLI。
+- **多 agent 工作区路由**：固定工作区目录，并从每个目录启动可用的 agent。
+- **持久会话切换**：在会话之间切换时不杀掉底层进程。
+- **Agent handover**：将终端上下文、git 状态、diff 和备注转发到另一个 agent 会话以延续工作。
+- **原生桌面外壳**：Tauri v2 + Rust 后端，React + xterm.js 前端。
+- **自动 CLI 检测**：通过用户 login shell 解析 agent 命令，使应用看到的 PATH 更接近终端环境。
 
-## Supported Agents
+## 支持的 Agent
 
-Waypoint currently detects these presets:
+Waypoint 当前会识别以下 preset：
 
-```text
-Claude Code:
-  claude
+| Agent | 命令 |
+|---|---|
+| Claude Code | `claude` |
+| Codex | `codex` |
+| Antigravity CLI | `agy` |
+| GitHub Copilot | `copilot`、`gh copilot` |
+| Shell | `$SHELL` |
 
-Codex:
-  codex
-
-Antigravity CLI:
-  agy
-
-GitHub Copilot:
-  copilot
-  gh copilot
-
-Shell:
-  $SHELL
-```
-
-If an agent is available in your terminal but appears as missing in Waypoint, verify it with:
+如果某个 agent 在你的 terminal 中可用，但在 Waypoint 中显示 missing，请用以下命令验证：
 
 ```bash
 command -v claude
@@ -59,37 +49,37 @@ command -v copilot
 command -v gh
 ```
 
-## Tech Stack
+## 技术栈
 
-- **Desktop shell**: Tauri v2 + Rust
-- **Frontend**: React + TypeScript + Vite
-- **Terminal UI**: `@xterm/xterm` + `@xterm/addon-fit`
-- **PTY hosting**: `portable-pty`
+- **桌面外壳**：Tauri v2 + Rust
+- **前端**：React + TypeScript + Vite
+- **终端 UI**：`@xterm/xterm` + `@xterm/addon-fit`
+- **PTY 托管**：`portable-pty`
 
-## Prerequisites
+## 环境准备
 
-Waypoint requires Node.js, npm, and a Rust toolchain.
+Waypoint 需要 Node.js、npm 和 Rust 工具链。
 
-On macOS, make sure Xcode Command Line Tools are installed:
+在 macOS 上，先确认 Xcode Command Line Tools 已安装：
 
 ```bash
 xcode-select -p
 ```
 
-If they are missing:
+如未安装：
 
 ```bash
 xcode-select --install
 ```
 
-Install Rust with `rustup`:
+使用 `rustup` 安装 Rust：
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 ```
 
-Verify the environment:
+验证环境：
 
 ```bash
 node --version
@@ -98,254 +88,194 @@ rustc --version
 cargo --version
 ```
 
-## Development
+## 开发
 
-Install dependencies:
+安装依赖：
 
 ```bash
 npm install
 ```
 
-Run the desktop app in development mode:
+以开发模式启动桌面应用：
 
 ```bash
 npm run tauri:dev
 ```
 
-This starts the Vite dev server and opens the Tauri desktop shell.
+该命令会启动 Vite 开发服务器并打开 Tauri 桌面外壳。
 
 > [!IMPORTANT]
-> PTY management runs in the Tauri desktop process. Opening `http://127.0.0.1:1420/` in a regular browser is useful for UI preview only; creating and using real PTY sessions requires the Tauri desktop window.
+> PTY 管理运行在 Tauri 桌面进程中。在普通浏览器中访问 `http://127.0.0.1:1420/` 只能用于 UI 预览；创建和使用真实 PTY 会话必须在 Tauri 桌面窗口中进行。
 
-Build the frontend:
+构建前端：
 
 ```bash
 npm run build
 ```
 
-Build the Tauri app without bundling installers:
+构建 Tauri 应用（不打包安装器）：
 
 ```bash
 npm run tauri -- build --debug --no-bundle --ci
 ```
 
-## Manual Acceptance Flow
+## 手动验收流程
 
-1. Start the desktop app with `npm run tauri:dev`.
-2. Confirm the left-side agent environment list shows available and missing local agents.
-3. Pin or select a local workspace folder.
-4. Start an available agent from that workspace.
-5. Confirm the terminal launches in the selected workspace.
-6. Start a second session and switch back to the first one.
-7. Confirm the first PTY process is still alive.
+1. 用 `npm run tauri:dev` 启动桌面应用。
+2. 确认左侧 agent 环境列表显示可用与缺失的本地 agent。
+3. 固定或选择一个本地工作区目录。
+4. 从该工作区启动一个可用 agent。
+5. 确认终端在选定工作区中启动。
+6. 启动第二个会话并切回第一个。
+7. 确认第一个 PTY 进程仍然存活。
 
 ## Continue / Handover
 
-The Continue flow passes context from the current session to another agent.
+Continue 流程将当前会话的上下文传递给另一个 agent。
 
-For a new target session:
+新目标会话流程：
 
-1. Open a source session.
-2. Click **Continue**.
-3. Choose **New Session**.
-4. Select the target agent and workspace.
-5. Add an optional note describing what the next agent should focus on.
-6. Click **Create & Continue**.
+1. 打开源会话。
+2. 点击 **Continue**。
+3. 选择 **New Session**。
+4. 选择目标 agent 和工作区。
+5. 添加可选的 note，描述下一个 agent 应该关注的内容。
+6. 点击 **Create & Continue**。
 
-Waypoint collects recent terminal context, workspace git status, git diff, and staged diff. It writes a handover file under `~/.waypoint/<workspace-name>/handover-*.md`, launches the target session, and injects a short instruction pointing the target agent to the handover file.
+Waypoint 会按 chat 顺序收集最近的对话时间线、工作区 git status、git diff 与 staged diff，将 handover 文件写到 `~/.waypoint/<workspace-name>/handover-*.md`，启动目标会话，并注入一段简短指令，指引目标 agent 读取该 handover 文件。
 
-Existing sessions can also receive a handover through **Existing Session** mode.
+也可以通过 **Existing Session** 模式将 handover 注入已有会话。
 
-### Native Session IDs And Resume
+### Native Session ID 与恢复
 
-Waypoint stores its own session metadata in `~/.waypoint/sessions/<session-id>/meta.json`. For agents with native resume support, it also records a `nativeSessionRef` with the provider, native id, optional project, resume command, and discovery time. When a historical session is reactivated, the backend refreshes this native reference first, then builds the agent-specific resume command.
+Waypoint 自己的 session 元数据存储在 `~/.waypoint/sessions/<session-id>/meta.json` 中。对于支持原生恢复的 agent，还会记录 `nativeSessionRef`，包含 provider、native id、可选 project、resume 命令和发现时间。重新激活历史会话时，后端会先刷新该 native 引用，再构造 agent 专属的 resume 命令。
 
-Agent-specific native id behavior:
+不同 agent 的 native id 策略对比：
 
-```text
-Claude Code:
-  Waypoint injects its own session id as Claude's --session-id on new sessions.
-  If the launch args already contain --resume/-r/--session-id, it does not inject another id.
-  meta.nativeSessionRef.id = the Waypoint session id.
-  Before resume, Waypoint checks ~/.claude/projects/<workspace-as-claude-project>/<id>.jsonl.
-  If that path is missing, it searches ~/.claude/projects for a matching <id>.jsonl filename.
-  Resume command: claude --resume <id>.
+| Agent | 创建时是否注入 native id | native id 来源 | 恢复命令 |
+|---|---|---|---|
+| Claude Code | 是，将 Waypoint session id 作为 `--session-id` 注入；若启动参数已含 `--resume`/`-r`/`--session-id` 则不重复注入 | Waypoint session id | `claude --resume <id>` |
+| Codex | 否，不在创建时强制指定 | 若 meta 已有则用之，否则无 | 有 native id：`codex resume <id>`；无：`codex resume --last` |
+| Antigravity CLI (agy) | 否，agy 不支持外部指定 conversation id | 首次真实提交用户输入时写入 `<!-- waypoint_session_id: <id> -->` 标记，扫描 brain 目录下的 transcript 反查得到 conversation id；若终端 transcript 出现 "Resume in the same project" 行，则解析 `--project=<project>` 作为补充 | `agy --conversation=<conversation-id> [--project=<project>]` |
+| GitHub Copilot | 是，将 Waypoint session id 作为 `--session-id=<id>` 注入；若启动参数已含 `--continue`/`--resume`/`-r`/`--session-id` 则不重复注入；`gh copilot` 形式在必要时通过 `--` 分隔参数 | Waypoint session id | `copilot --resume=<id>` 或 `gh copilot -- --resume=<id>` |
+| Shell | 不适用 | 无 agent 原生 session id | 仅保留 Waypoint 自身的 PTY transcript 和 replay |
 
-Codex:
-  Waypoint does not force a native id when creating a Codex session.
-  If meta already has a native id, resume uses codex resume <id>.
-  If no native id is known, resume falls back to codex resume --last.
-  For native transcript lookup, Waypoint searches ~/.codex/sessions and
-  ~/.codex/archived_sessions by native id. Without a native id, it selects the
-  newest transcript matching the workspace cwd and session creation time.
+Claude Code 恢复前还会确认 `~/.claude/projects/<workspace-as-claude-project>/<id>.jsonl` 存在；若标准路径不存在，会在 `~/.claude/projects` 下按文件名兜底搜索 `<id>.jsonl`。
 
-Antigravity CLI (agy):
-  agy does not support caller-supplied conversation ids.
-  On the first real user submission in an agy PTY session, Waypoint sends:
-    <!-- waypoint_session_id: <waypoint-session-id> -->
-  This marker is persisted in agy's native transcript.
-  On natural exit, kill/stop, resume, and handover construction, Waypoint scans:
-    ~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript.jsonl
-  The brain directory containing the waypoint_session_id marker is the agy conversation id.
-  meta.nativeSessionRef.id = the agy conversation id.
-  If Waypoint's own terminal transcript includes agy's "Resume in the same project" line,
-  Waypoint parses --project=<project> as supplemental resume metadata.
-  Resume command: agy --conversation=<conversation-id> [--project=<project>].
+Codex 在读取原生 transcript 时，优先用 native id 在 `~/.codex/sessions` 和 `~/.codex/archived_sessions` 中查找；没有 native id 时按 workspace cwd 与 session 创建时间选最近 transcript。
 
-GitHub Copilot:
-  Waypoint injects its own session id as --session-id=<id> on new sessions.
-  If launch args already contain --continue/--resume/-r/--session-id, it does not inject another id.
-  For gh copilot, Waypoint inserts -- when needed before Copilot-specific args.
-  meta.nativeSessionRef.id = the Waypoint session id.
-  Resume command: copilot --resume=<id>, or gh copilot -- --resume=<id>.
+agy 通过扫描 `~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript.jsonl` 来匹配 `waypoint_session_id` 标记，匹配到的 brain 目录名即为 agy conversation id。
 
-Shell:
-  Plain shells do not have an agent-native session id. Waypoint keeps only its own PTY transcript and replay.
-```
+### Handover 文件生成
 
-### Handover File Generation
+Handover 不会把完整上下文塞进目标 agent 的命令行，而是先生成文件，再让目标 agent 读取该精确文件。
 
-Handover does not push the full context through a target agent's command line. Waypoint writes a file first, then asks the target agent to read that exact file.
+文件布局与模式选择：
 
-File layout and mode selection:
+| 项 | 说明 |
+|---|---|
+| 主文件 | `~/.waypoint/<workspace-name>/handover-<uuid>.md` |
+| Compact 模式完整证据文件 | `~/.waypoint/<workspace-name>/handover-<uuid>-full-evidence.md` |
+| `workspace-name` 取值 | workspace 路径最后一级目录名；无法解析时使用 `workspace` |
+| Recommended 模式 | 估算上下文超过 32,000 字符时使用 Compact，否则使用 Full |
+| 显式模式 | 用户可手动选择 Compact 或 Full |
 
-```text
-Main file:
-  ~/.waypoint/<workspace-name>/handover-<uuid>.md
+handover 文件收集的内容：
 
-Full evidence file for Compact mode:
-  ~/.waypoint/<workspace-name>/handover-<uuid>-full-evidence.md
+1. 源会话与目标会话的 agent、命令、workspace。
+2. Continue 面板中用户填写的 note。
+3. git branch 与 `git status --short`。
+4. unstaged 与 staged diff 的 stat、文件列表和受限长度的 diff preview。
+5. 最近对话时间线，尽量按原始 chat 顺序保留 User / Assistant 往返。
+6. 上一跳 inherited handover context。
+7. 附件的精确路径、MIME 类型和大小。
+8. agy 会话生成的 markdown artifacts（来自 `~/.gemini/antigravity-cli/brain/<conversation-id>/*.md`）。
 
-workspace-name:
-  The final path segment of the workspace directory, or workspace as a fallback.
+不同 agent 的上下文来源优先级对比：
 
-Mode:
-  Recommended uses Compact when the estimated context exceeds 32,000 characters.
-  Otherwise Recommended uses Full.
-  Users can explicitly choose Compact or Full.
-```
+| Agent | 首选来源 | 回退来源 |
+|---|---|---|
+| Claude Code | `~/.claude/projects/.../<native-id>.jsonl` 原生 transcript | Waypoint 自身的 terminal/chat buffer |
+| Codex | 有 native id：`~/.codex/sessions` 或 `archived_sessions` 中匹配 native id 的 transcript；无 native id：按 workspace 与创建时间选最近 transcript | Waypoint 自身的 terminal/chat buffer |
+| Antigravity CLI | 先通过 `waypoint_session_id` 标记反查 conversation id，再读 `~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/logs/transcript.jsonl` | Waypoint 自身的 terminal/chat buffer |
+| GitHub Copilot / Shell | Waypoint 自身的 terminal/chat buffer 与输入 ring | — |
 
-The handover file includes:
+> 对于 Copilot / Shell，如果 Waypoint 无法构造有序的 User / Assistant 时间线，会在同一个 timeline 区块中注明只捕获到用户输入，而不会把 assistant/context 与 user inputs 拆成两个独立 evidence 区块。
 
-```text
-1. Source and target agent, command, and workspace.
-2. The user's note from the Continue dialog.
-3. git branch and git status --short.
-4. Unstaged and staged diff stat, file lists, and diff previews.
-5. Recent source terminal context.
-6. Recent user inputs.
-7. Inherited context from the previous handover hop.
-8. Exact attachment paths, MIME types, and sizes.
-9. agy markdown artifacts from ~/.gemini/antigravity-cli/brain/<conversation-id>/*.md.
-```
+Full 与 Compact 模式差异：
 
-Source context priority:
+| 维度 | Full 模式 | Compact 模式 |
+|---|---|---|
+| 主文件对话内容 | 完整结构 + 最近有序对话 | 更短的有序对话 |
+| git 状态 | ✅ | ✅ |
+| diff stat | ✅ | ✅ |
+| 变更文件列表 | ✅ | ✅ |
+| 内联完整 diff preview | ✅ | ❌ |
+| 完整证据文件 | ❌ | ✅（`*-full-evidence.md`，含完整证据、git diff、staged diff） |
+| 目标 agent 读取方式 | 直接读主文件 | 主文件引用 evidence 文件路径，目标 agent 按需读取 |
 
-```text
-Claude Code:
-  Prefer ~/.claude/projects/.../<native-id>.jsonl.
-  Fall back to Waypoint's terminal/chat buffer.
+### Agent Handover 启动/注入策略
 
-Codex:
-  Prefer ~/.codex/sessions or archived_sessions transcripts matching the native id.
-  Without a native id, choose the newest transcript matching workspace and creation time.
-  Fall back to Waypoint's terminal/chat buffer.
+不同 agent 在 New Session 与 Existing Session 下的注入方式对比：
 
-Antigravity CLI:
-  Resolve the conversation id through the waypoint_session_id marker first.
-  Then read ~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/logs/transcript.jsonl.
-  Fall back to Waypoint's terminal/chat buffer.
+| Agent | New Session 启动形态 | 目录授权 | startup prompt 内容 | 其他说明 |
+|---|---|---|---|---|
+| Claude Code | `claude "<startup prompt>"` | — | 只读取 handover 文件，并包含新的 `waypoint_session_id` 标记 | 创建目标 session 后记录 `parentSessionId` 和 `handoverRootId` |
+| Codex | 默认命令带 `--no-alt-screen` | 通过 `--add-dir` 加入 handover 文件目录 | 指向 handover 文件，并包含新的 `waypoint_session_id` 标记 | 新建后等待更长启动延迟再注入，降低 Codex 未就绪时写入失败概率 |
+| Antigravity CLI (agy) | `agy --prompt-interactive "<startup prompt>"` | 通过 `--add-dir` 授权 handover 目录 | 只含 handover 文件路径和新的 `waypoint_session_id` 标记，避免长 diff/context 直接进入 agy TUI | — |
+| GitHub Copilot | `copilot -i "<startup prompt>"` | 通过 `--add-dir` 传入 handover 目录；`gh copilot` 形态通过 `--` 分隔参数 | startup prompt | — |
 
-GitHub Copilot / Shell:
-  Use Waypoint's terminal/chat buffer and input ring.
-```
+Existing Session / Forward 模式：
 
-Full versus Compact:
+- 先生成 handover 文件。
+- 通过 PTY bracketed paste 注入一段短提示：只读取该 handover 文件，确认 context loaded，然后等待下一步指令。
+- 注入前会检查目标进程是否已退出；失败时错误信息会包含 target session 的最近输出。
 
-```text
-Full:
-  The main handover file contains the structured context, recent conversation,
-  user inputs, git state, diff stat, file lists, and bounded diff previews.
+Create Handover File：
 
-Compact:
-  The main handover file keeps shorter context, user input, git status, diff stat,
-  and changed file lists. It omits inline full diff previews.
-  Waypoint also writes *-full-evidence.md with complete evidence, git diff, and staged diff.
-  The Compact handover references the evidence file path for exact follow-up reading.
-```
+- 顶栏的 handover-file 按钮只生成文件，不启动或注入任何 agent。
+- target 被标记为 Manual handover，便于将文件路径手动复制给外部工具。
 
-### Agent Handover Launch Strategy
+每次 handover 的目标 session 会记住这次 handover 摘要；如果之后继续从该目标 session 再 handover 到第三个 agent，Waypoint 会把上一跳 handover 作为 inherited context 一并写入新的 handover 文件。
 
-```text
-Claude Code:
-  New Session writes the handover file first.
-  Launch shape: claude "<startup prompt>".
-  The startup prompt asks Claude to read only the handover file and includes a new waypoint_session_id marker.
+## 故障排查
 
-Codex:
-  The default command includes --no-alt-screen for xterm stability.
-  New Session grants the handover directory with --add-dir.
-  The startup prompt points to the handover file and includes a new waypoint_session_id marker.
-  Waypoint waits longer before injection to reduce writes before Codex is ready.
+### `cargo` 或 `rustc` command not found
 
-Antigravity CLI:
-  New Session uses agy --prompt-interactive "<startup prompt>".
-  Waypoint grants the handover directory with --add-dir.
-  The startup prompt only carries the handover path and new waypoint_session_id marker,
-  avoiding large diff/context payloads in agy's TUI.
-
-GitHub Copilot:
-  New Session uses copilot -i "<startup prompt>".
-  The handover directory is passed with --add-dir; gh copilot gets -- before Copilot args.
-
-Existing Session / Forward:
-  Waypoint writes the handover file, then bracketed-pastes a short instruction into the target PTY.
-  The instruction tells the target to read only that file, acknowledge context loaded, and wait.
-  Before injection, Waypoint checks whether the target process already exited.
-
-Create Handover File:
-  The topbar handover-file action only writes the file; it does not start or inject into an agent.
-  The target is recorded as Manual handover so the file path can be used with external tools.
-```
-
-## Troubleshooting
-
-### `cargo` or `rustc` command not found
-
-Load Cargo into the current shell:
+在当前 shell 中加载 Cargo：
 
 ```bash
 source "$HOME/.cargo/env"
 ```
 
-Then check:
+然后检查：
 
 ```bash
 rustc --version
 cargo --version
 ```
 
-### `npm run tauri:dev` says Rust is not installed
+### `npm run tauri:dev` 提示 Rust 未安装
 
-Check what Tauri can detect:
+查看 Tauri 能检测到的环境：
 
 ```bash
 npm run tauri -- info
 ```
 
-If `rustc` is not detected, reload your shell environment or add Cargo to your shell profile.
+如果未检测到 `rustc`，重新加载 shell 环境或将 Cargo 加入 shell profile。
 
-### `Tauri runtime unavailable` in the browser
+### 浏览器中提示 `Tauri runtime unavailable`
 
-This is expected outside the desktop shell. Tauri APIs for PTY sessions, local file access, and native commands only exist inside the Tauri app.
+这是预期行为。Tauri 的 PTY 会话、本地文件访问、原生命令等 API 只存在于 Tauri 桌面外壳内部。
 
-### Continue fails with `failed to write handover`
+### Continue 时报 `failed to write handover`
 
-The target agent may have exited before Waypoint could inject the handover prompt, or it may be waiting on login/configuration.
+目标 agent 可能已在 Waypoint 注入 handover prompt 前退出，或正在等待登录/配置。
 
-Try starting the target agent directly first. If it immediately exits, resolve its own authentication or CLI setup before using it as a handover target.
+请先直接启动目标 agent，确认它能保持在可交互状态。如果它立即退出，先解决其自身的认证或 CLI 配置问题，再将其作为 handover 目标。
 
-## Documentation
+## 相关文档
 
-- [Technical design](AGENTRELAY_TECHNICAL_DESIGN.md)
-- [Architecture summary](AGENTRELAY_ARCHITECTURE_SUMMARY.md)
+- [技术设计](AGENTRELAY_TECHNICAL_DESIGN.md)
+- [架构摘要](AGENTRELAY_ARCHITECTURE_SUMMARY.md)
