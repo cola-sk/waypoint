@@ -1,13 +1,18 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- Finder uses the alpha channel as-is, so the app tile carries its own rounded corners. -->
-  <rect width="1024" height="1024" rx="216" fill="#FFFDFC"/>
-  <!-- Hexagon waypoint mark -->
-  <path
-    d="M512 256L756 393V667L512 804L268 667V393L512 256Z"
-    stroke="#FF6F4C"
-    stroke-width="72"
-    stroke-linejoin="round"
-  />
-  <!-- Center dot -->
-  <circle cx="512" cy="512" r="64" fill="#FF6F4C"/>
+  <!-- 整体 0.85 等比缩放居中,留出 ~15% padding,使 Dock 图标与 macOS 标准 app 大小一致 -->
+  <g transform="translate(512 512) scale(0.85) translate(-512 -512)">
+    <!-- Finder uses the alpha channel as-is, so the app tile carries its own rounded corners. -->
+    <rect width="1024" height="1024" rx="216" fill="#FFFDFC"/>
+    <!-- Hexagon waypoint mark -->
+    <g transform="translate(512 512) scale(0.82) translate(-512 -512)">
+      <path
+        d="M512 256L756 393V667L512 804L268 667V393L512 256Z"
+        stroke="#FF6F4C"
+        stroke-width="72"
+        stroke-linejoin="round"
+      />
+      <!-- Center dot -->
+      <circle cx="512" cy="512" r="64" fill="#FF6F4C"/>
+    </g>
+  </g>
 </svg>

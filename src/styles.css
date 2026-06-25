@@ -2637,6 +2637,47 @@ textarea:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.checkbox-field {
+  display: flex;
+  min-width: 0;
+  padding: 4px 0;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-primary);
+}
+
+.checkbox-label input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: auto;
+  height: auto;
+  margin: 0;
+  margin-top: 3px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.checkbox-label > span {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.checkbox-hint {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .input-group-with-btn {
   position: relative;
   display: flex;

@@ -31,11 +31,16 @@ function assertTauriRuntime() {
 const DEFAULT_TERMINAL_ROWS = 30;
 const DEFAULT_TERMINAL_COLS = 160;
 
-export function createAgentSession(agentId: string, cwd: string): Promise<SessionInfo> {
+export function createAgentSession(
+  agentId: string,
+  cwd: string,
+  dangerous = false,
+): Promise<SessionInfo> {
   assertTauriRuntime();
   return invoke("create_agent_session", {
     agentId,
     cwd,
+    dangerous,
     rows: DEFAULT_TERMINAL_ROWS,
     cols: DEFAULT_TERMINAL_COLS,
   });

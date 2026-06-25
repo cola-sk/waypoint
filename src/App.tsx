@@ -69,6 +69,19 @@ function formatHandoverChars(value: number) {
   return `${value} chars`;
 }
 
+const DANGEROUS_FLAGS: Record<string, string> = {
+  "claude-code": "--dangerously-skip-permissions",
+  codex: "--dangerously-bypass-approvals-and-sandbox",
+};
+
+function supportsDangerousFlag(agentId: string): boolean {
+  return agentId in DANGEROUS_FLAGS;
+}
+
+function dangerousFlagLabel(agentId: string): string {
+  return DANGEROUS_FLAGS[agentId] ?? "";
+}
+
 function sessionStateLabel(status: SessionInfo["status"]) {
   if (status === "running") {
     return "Live";
@@ -471,6 +484,7 @@ function App() {
     useState<string>(NONE_WORKSPACE_VALUE);
   const [newConversationCustomWorkspace, setNewConversationCustomWorkspace] = useState("");
   const [newConversationWorkspaceHistory, setNewConversationWorkspaceHistory] = useState<string[]>([]);
+  const [newConversationDangerous, setNewConversationDangerous] = useState(false);
   const [noneWorkspaceSessionIds, setNoneWorkspaceSessionIds] = useState<string[]>([]);
   const [hiddenWorkspacePaths, setHiddenWorkspacePaths] = useState<string[]>([]);
   const [collapsedWorkspacePaths, setCollapsedWorkspacePaths] = useState<string[]>([]);
@@ -896,6 +910,7 @@ function App() {
     setSelectedAgentId(firstAvailableAgent);
     setNewConversationWorkspaceValue(normalizedWorkspaceValue || NONE_WORKSPACE_VALUE);
     setNewConversationCustomWorkspace("");
+    setNewConversationDangerous(false);
     setNewConversationOpen(true);
   }
 
@@ -922,7 +937,7 @@ function App() {
         setError("无法解析可用目录，请先选择一个工作区目录。");
         return;
       }
-      const session = await createAgentSession(selectedAgentId, launchPath);
+      const session = await createAgentSession(selectedAgentId, launchPath, newConversationDangerous);
       if (useNoneWorkspace) {
         markSessionAsNoneWorkspace(session.id);
       } else {
@@ -1925,6 +1940,25 @@ function App() {
                 <span className={`status-dot ${newConversationAgent?.available ? "running" : "error"}`} />
                 <span>{newConversationAgent?.resolvedCommand ?? newConversationAgent?.command ?? "Detecting..."}</span>
               </div>
+
+              {supportsDangerousFlag(selectedAgentId) ? (
+                <div className="checkbox-field">
+                  <label htmlFor="new-conversation-dangerous" className="checkbox-label">
+                    <input
+                      id="new-conversation-dangerous"
+                      type="checkbox"
+                      checked={newConversationDangerous}
+                      onChange={(event) => setNewConversationDangerous(event.target.checked)}
+                    />
+                    <span>
+                      跳过权限确认（{dangerousFlagLabel(selectedAgentId)}）
+                      <span className="checkbox-hint">
+                        危险：将跳过该 Agent 的工具调用确认。请仅在可信工作区使用。
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              ) : null}
 
               <div className="field">
                 <label htmlFor="new-conversation-workspace">

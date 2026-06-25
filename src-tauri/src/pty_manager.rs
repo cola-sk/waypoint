@@ -5,7 +5,7 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::Command,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -326,12 +326,13 @@ pub fn create_agent_session(
     app: AppHandle,
     agent_id: String,
     cwd: String,
+    dangerous: Option<bool>,
     rows: Option<u16>,
     cols: Option<u16>,
 ) -> Result<SessionInfo, String> {
     state
         .manager
-        .create_agent_session(app, &agent_id, cwd, rows, cols)
+        .create_agent_session(app, &agent_id, cwd, dangerous.unwrap_or(false), rows, cols)
 }
 
 #[tauri::command]
@@ -567,6 +568,7 @@ impl SessionManager {
         app: AppHandle,
         agent_id: &str,
         cwd: String,
+        dangerous: bool,
         rows: Option<u16>,
         cols: Option<u16>,
     ) -> Result<SessionInfo, String> {
@@ -580,6 +582,10 @@ impl SessionManager {
                 definition.name
             )
         })?;
+        let mut args = resolved.args;
+        if dangerous {
+            apply_dangerous_flag(agent_id, &mut args);
+        }
         self.spawn_session(
             app,
             definition.id,
@@ -587,7 +593,7 @@ impl SessionManager {
             definition.name.to_string(),
             resolved.display,
             resolved.executable,
-            resolved.args,
+            args,
             cwd,
             rows,
             cols,
@@ -729,6 +735,12 @@ impl SessionManager {
         let mut cmd = CommandBuilder::new(&executable);
         for arg in &args {
             cmd.arg(arg);
+        }
+        // portable-pty clears the inherited env on spawn, so we must
+        // re-inject the user's login-shell env (PATH, HOME, etc.) or
+        // agent-spawned MCP servers (npx/uvx/node) won't be found.
+        for (key, value) in login_shell_env() {
+            cmd.env(key, value);
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
@@ -1355,7 +1367,7 @@ impl SessionManager {
             );
         }
 
-        let target_info = self.create_agent_session(app, target_agent_id, cwd, rows, cols)?;
+        let target_info = self.create_agent_session(app, target_agent_id, cwd, false, rows, cols)?;
         let target = self.get(&target_info.id)?;
         let handover = self.inject_handover(
             &source,
@@ -3063,6 +3075,41 @@ fn run_login_shell_status(command: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Capture the user's full login-shell environment.
+///
+/// GUI-launched apps (DMG install, Finder, launchd) inherit a minimal PATH
+/// (`/usr/bin:/bin:/usr/sbin:/sbin`) and miss homebrew / nvm / `~/.local/bin`.
+/// On top of that, `portable-pty`'s `CommandBuilder` calls `env_clear()` when
+/// spawning, so the child PTY process would otherwise have no PATH/HOME at
+/// all. Agent CLIs (claude/codex) resolve their own absolute path via
+/// `command -v`, but the MCP servers they spawn (`npx`, `uvx`, `node`) rely
+/// on PATH lookup and fail without this.
+fn login_shell_env() -> &'static [(String, String)] {
+    static CACHE: OnceLock<Vec<(String, String)>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let output = Command::new(&shell)
+            .arg("-lc")
+            .arg("env")
+            .output()
+            .ok();
+        let Some(output) = output else {
+            return Vec::new();
+        };
+        let mut vars: Vec<(String, String)> = Vec::new();
+        for line in output.stdout.lines().flatten() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            if key.is_empty() || key.contains('\0') {
+                continue;
+            }
+            vars.push((key.to_string(), value.to_string()));
+        }
+        vars
+    })
+}
+
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -4226,6 +4273,21 @@ fn append_claude_session_id(args: &mut Vec<String>, session_id: &str) {
         .unwrap_or(args.len());
     args.insert(insert_at, session_id.to_string());
     args.insert(insert_at, "--session-id".to_string());
+}
+
+fn apply_dangerous_flag(agent_id: &str, args: &mut Vec<String>) {
+    let flag = match agent_id {
+        "claude-code" => "--dangerously-skip-permissions",
+        "codex" => "--dangerously-bypass-approvals-and-sandbox",
+        _ => return,
+    };
+    if !args.iter().any(|arg| arg == flag) {
+        let insert_at = args
+            .iter()
+            .position(|arg| !arg.starts_with('-'))
+            .unwrap_or(args.len());
+        args.insert(insert_at, flag.to_string());
+    }
 }
 
 fn claude_args_have_session_identity(args: &[String]) -> bool {

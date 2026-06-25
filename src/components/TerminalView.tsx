@@ -31,6 +31,9 @@ const MIN_COLS = 10;
 const MAX_ROWS = 240;
 const MAX_COLS = 600;
 const SCROLLBAR_GUTTER_COLS = 2;
+const IMAGE_PLACEHOLDER_PATTERN = /\[paste image (\d+)\]/gi;
+const BRACKETED_PASTE_START = "\x1b[200~";
+const BRACKETED_PASTE_END = "\x1b[201~";
 
 function clampDimension(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -105,14 +108,61 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
   const [isSavingAttachment, setIsSavingAttachment] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const activateAndQueueRef = useRef<((data: string) => void) | null>(null);
+  const pushInputRef = useRef<((data: string) => void) | null>(null);
+  const placeholderSlotByAttachmentIdRef = useRef<Map<string, number>>(new Map());
+  const attachmentPathByPlaceholderSlotRef = useRef<Map<number, string>>(new Map());
+  const nextPlaceholderSlotRef = useRef(1);
+  const pendingInputLineRef = useRef("");
+  const pendingInputReliableRef = useRef(true);
+  const pendingSaveCountRef = useRef(0);
+  const queuedInputsRef = useRef<string[]>([]);
+
+  const registerAttachmentPlaceholders = useCallback((items: SessionAttachmentInfo[]) => {
+    const slotByAttachmentId = placeholderSlotByAttachmentIdRef.current;
+    const pathBySlot = attachmentPathByPlaceholderSlotRef.current;
+    const ordered = [...items].sort((a, b) => a.createdAt - b.createdAt);
+    for (const attachment of ordered) {
+      let slot = slotByAttachmentId.get(attachment.id);
+      if (slot === undefined) {
+        slot = nextPlaceholderSlotRef.current;
+        nextPlaceholderSlotRef.current += 1;
+        slotByAttachmentId.set(attachment.id, slot);
+      }
+      pathBySlot.set(slot, attachment.path);
+    }
+  }, []);
+
+  const resolveImagePlaceholders = useCallback((value: string): string => {
+    return value.replace(IMAGE_PLACEHOLDER_PATTERN, (matched, slotText: string) => {
+      const slot = Number.parseInt(slotText, 10);
+      if (!Number.isFinite(slot)) {
+        return matched;
+      }
+      return attachmentPathByPlaceholderSlotRef.current.get(slot) ?? matched;
+    });
+  }, []);
+
+  const placeholderTokenForAttachment = useCallback((attachment: SessionAttachmentInfo): string | null => {
+    const slot = placeholderSlotByAttachmentIdRef.current.get(attachment.id);
+    if (slot === undefined) {
+      return null;
+    }
+    return `[paste image ${slot}]`;
+  }, []);
 
   useEffect(() => {
     let disposed = false;
     setAttachments([]);
     setAttachmentError(null);
+    placeholderSlotByAttachmentIdRef.current.clear();
+    attachmentPathByPlaceholderSlotRef.current.clear();
+    nextPlaceholderSlotRef.current = 1;
+    pendingInputLineRef.current = "";
+    pendingInputReliableRef.current = true;
     listSessionAttachments(sessionId)
       .then((items) => {
         if (!disposed) {
+          registerAttachmentPlaceholders(items);
           setAttachments(items);
         }
       })
@@ -124,13 +174,13 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
     return () => {
       disposed = true;
     };
-  }, [sessionId]);
+  }, [registerAttachmentPlaceholders, sessionId]);
 
   const saveImageFiles = useCallback(
-    async (files: File[]) => {
+    async (files: File[]): Promise<SessionAttachmentInfo[]> => {
       const imageFiles = files.filter(isImageFile);
       if (imageFiles.length === 0) {
-        return;
+        return [];
       }
       setIsSavingAttachment(true);
       setAttachmentError(null);
@@ -140,6 +190,7 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
           const dataBase64 = await fileToBase64(file);
           saved.push(await saveSessionAttachment(sessionId, file.type || "image/png", dataBase64));
         }
+        registerAttachmentPlaceholders(saved);
         setAttachments((current) => {
           const byId = new Map(current.map((attachment) => [attachment.id, attachment]));
           for (const attachment of saved) {
@@ -147,19 +198,26 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
           }
           return Array.from(byId.values()).sort((a, b) => a.createdAt - b.createdAt);
         });
+        return saved;
       } catch (err) {
         setAttachmentError(String(err));
+        return [];
       } finally {
         setIsSavingAttachment(false);
       }
     },
-    [sessionId],
+    [registerAttachmentPlaceholders, sessionId],
   );
 
   const handleDeleteAttachment = async (attachment: SessionAttachmentInfo) => {
     setAttachmentError(null);
     try {
       await deleteSessionAttachment(sessionId, attachment.path);
+      const slot = placeholderSlotByAttachmentIdRef.current.get(attachment.id);
+      if (slot !== undefined) {
+        placeholderSlotByAttachmentIdRef.current.delete(attachment.id);
+        attachmentPathByPlaceholderSlotRef.current.delete(slot);
+      }
       setAttachments((current) => current.filter((item) => item.id !== attachment.id));
     } catch (err) {
       setAttachmentError(String(err));
@@ -290,6 +348,24 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
     };
     const handleWindowResize = () => debouncedFitAndResize();
     const handleObservedResize: ResizeObserverCallback = () => debouncedFitAndResize();
+    const flushQueuedInputs = () => {
+      const queue = [...queuedInputsRef.current];
+      queuedInputsRef.current = [];
+      for (const queuedData of queue) {
+        const transformed = transformOutboundInput(queuedData);
+        if (transformed) {
+          if (!isLive) {
+            if (isFocusOrMouseSequence(transformed)) {
+              continue;
+            }
+            activateAndQueue(transformed);
+          } else {
+            writeSession(sessionId, transformed).catch(handleWriteFailure);
+          }
+        }
+      }
+    };
+
     const handlePaste = (event: ClipboardEvent) => {
       const files = clipboardImageFiles(event.clipboardData?.items);
       if (files.length === 0) {
@@ -297,7 +373,34 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
       }
       event.preventDefault();
       event.stopPropagation();
-      void saveImageFiles(files);
+      
+      pendingSaveCountRef.current += 1;
+      void (async () => {
+        try {
+          const saved = await saveImageFiles(files);
+          if (saved.length > 0) {
+            const tokenText = saved
+              .map((attachment) => placeholderTokenForAttachment(attachment))
+              .filter((token): token is string => Boolean(token))
+              .join(" ");
+            if (tokenText) {
+              const transformed = transformOutboundInput(`${tokenText} `);
+              if (transformed) {
+                if (!isLive) {
+                  activateAndQueue(transformed);
+                } else {
+                  writeSession(sessionId, transformed).catch(handleWriteFailure);
+                }
+              }
+            }
+          }
+        } finally {
+          pendingSaveCountRef.current -= 1;
+          if (pendingSaveCountRef.current === 0) {
+            flushQueuedInputs();
+          }
+        }
+      })();
     };
     const handleDragOver = (event: DragEvent) => {
       if (!dataTransferHasImage(event.dataTransfer?.items)) {
@@ -313,7 +416,34 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
       }
       event.preventDefault();
       event.stopPropagation();
-      void saveImageFiles(files);
+      
+      pendingSaveCountRef.current += 1;
+      void (async () => {
+        try {
+          const saved = await saveImageFiles(files);
+          if (saved.length > 0) {
+            const tokenText = saved
+              .map((attachment) => placeholderTokenForAttachment(attachment))
+              .filter((token): token is string => Boolean(token))
+              .join(" ");
+            if (tokenText) {
+              const transformed = transformOutboundInput(`${tokenText} `);
+              if (transformed) {
+                if (!isLive) {
+                  activateAndQueue(transformed);
+                } else {
+                  writeSession(sessionId, transformed).catch(handleWriteFailure);
+                }
+              }
+            }
+          }
+        } finally {
+          pendingSaveCountRef.current -= 1;
+          if (pendingSaveCountRef.current === 0) {
+            flushQueuedInputs();
+          }
+        }
+      })();
     };
 
     window.addEventListener("resize", handleWindowResize);
@@ -335,11 +465,126 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
     let pendingInput = "";
     const queuedLiveOutput: Array<string | Uint8Array> = [];
 
+    const transformOutboundInput = (data: string): string => {
+      if (isFocusOrMouseSequence(data) || data === BRACKETED_PASTE_START || data === BRACKETED_PASTE_END) {
+        return data;
+      }
+      let output = "";
+      let i = 0;
+      while (i < data.length) {
+        const char = data[i];
+
+        if (char === "\x1b") {
+          let seqLen = 1;
+          if (i + 1 < data.length) {
+            const next = data[i + 1];
+            if (next === "[") {
+              // CSI sequence
+              seqLen = 2;
+              while (i + seqLen < data.length) {
+                const c = data[i + seqLen];
+                const code = c.charCodeAt(0);
+                seqLen++;
+                if (code >= 0x40 && code <= 0x7E) {
+                  break;
+                }
+              }
+            } else if (next === "]") {
+              // OSC sequence
+              seqLen = 2;
+              while (i + seqLen < data.length) {
+                const c = data[i + seqLen];
+                seqLen++;
+                if (c === "\x07") {
+                  break;
+                }
+                if (c === "\\" && data[i + seqLen - 2] === "\x1b") {
+                  break;
+                }
+              }
+            } else {
+              seqLen = 2;
+            }
+          }
+
+          const seq = data.slice(i, i + seqLen);
+          output += seq;
+
+          // If the sequence is a history navigation key (Up/Down arrow, PageUp/PageDown),
+          // we mark the input line as unreliable.
+          const isUpDown = seq === "\x1b[A" || seq === "\x1b[B";
+          const isPageUpDown = seq.startsWith("\x1b[5~") || seq.startsWith("\x1b[6~");
+          if (isUpDown || isPageUpDown) {
+            pendingInputReliableRef.current = false;
+          }
+
+          i += seqLen;
+          continue;
+        }
+
+        if (char === "\r" || char === "\n") {
+          if (
+            pendingInputReliableRef.current &&
+            pendingInputLineRef.current.includes("[paste image")
+          ) {
+            const resolved = resolveImagePlaceholders(pendingInputLineRef.current);
+            if (resolved !== pendingInputLineRef.current) {
+              const backspaces = "\x7f".repeat(pendingInputLineRef.current.length);
+              output += `${backspaces}${resolved}`;
+            } else {
+              output += char;
+            }
+          } else {
+            output += char;
+          }
+          pendingInputLineRef.current = "";
+          pendingInputReliableRef.current = true;
+          i++;
+          continue;
+        }
+
+        if (!pendingInputReliableRef.current) {
+          output += char;
+          i++;
+          continue;
+        }
+
+        if (char === "\x7f" || char === "\b") {
+          pendingInputLineRef.current = pendingInputLineRef.current.slice(0, -1);
+          output += char;
+          i++;
+          continue;
+        }
+
+        if (char === "\t") {
+          pendingInputLineRef.current += char;
+          output += char;
+          i++;
+          continue;
+        }
+
+        const code = char.charCodeAt(0);
+        if (code >= 0x20 && code !== 0x7f) {
+          pendingInputLineRef.current += char;
+          output += char;
+          i++;
+          continue;
+        }
+
+        pendingInputReliableRef.current = false;
+        output += char;
+        i++;
+      }
+      return output;
+    };
+
     const markSessionNotLive = (nextStatus: "readonly" | "error") => {
       if (disposed) return;
       isLive = false;
       isActivating = false;
       pendingInput = "";
+      pendingInputLineRef.current = "";
+      pendingInputReliableRef.current = true;
       queuedLiveOutput.splice(0);
       setStatus(nextStatus);
       setIsRestoring(false);
@@ -414,19 +659,30 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
     };
 
     activateAndQueueRef.current = activateAndQueue;
+    pushInputRef.current = (data: string) => {
+      if (pendingSaveCountRef.current > 0) {
+        queuedInputsRef.current.push(data);
+        return;
+      }
+      const transformed = transformOutboundInput(data);
+      if (!transformed) {
+        return;
+      }
+      if (!isLive) {
+        if (isFocusOrMouseSequence(transformed)) {
+          return;
+        }
+        activateAndQueue(transformed);
+        return;
+      }
+      writeSession(sessionId, transformed).catch(handleWriteFailure);
+    };
 
     const dataDisposable = terminal.onData((data) => {
       if (isReplaying) {
         return;
       }
-      if (!isLive) {
-        if (isFocusOrMouseSequence(data)) {
-          return;
-        }
-        activateAndQueue(data);
-        return;
-      }
-      writeSession(sessionId, data).catch(handleWriteFailure);
+      pushInputRef.current?.(data);
     });
 
     listen<SessionEvent>("session:exited", (event) => {
@@ -507,6 +763,7 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
       disposed = true;
       setIsRestoring(false);
       activateAndQueueRef.current = null;
+      pushInputRef.current = null;
       window.clearTimeout(resizeTimeout);
       detachSession(sessionId).catch(() => undefined);
       dataDisposable.dispose();
@@ -524,8 +781,10 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
       terminal.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
+      pendingInputLineRef.current = "";
+      pendingInputReliableRef.current = true;
     };
-  }, [sessionId, saveImageFiles]);
+  }, [placeholderTokenForAttachment, resolveImagePlaceholders, sessionId, saveImageFiles]);
 
   const handleContainerClick = () => {
     terminalRef.current?.focus();
@@ -578,36 +837,6 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
             </div>
           ) : null}
         </div>
-        {(attachments.length > 0 || isSavingAttachment || attachmentError) && (
-          <div className="terminal-attachment-tray" onClick={(event) => event.stopPropagation()}>
-            <div className="terminal-attachment-list">
-              {attachments.map((attachment) => (
-                <div className="terminal-attachment-item" key={attachment.id} title={attachment.path}>
-                  {attachment.previewDataUrl ? (
-                    <img src={attachment.previewDataUrl} alt={attachment.filename} />
-                  ) : (
-                    <span className="terminal-attachment-placeholder" aria-hidden="true" />
-                  )}
-                  <div className="terminal-attachment-meta">
-                    <span>{attachment.filename}</span>
-                    <small>{Math.ceil(attachment.sizeBytes / 1024)} KB</small>
-                  </div>
-                  <button
-                    type="button"
-                    className="terminal-attachment-remove"
-                    onClick={() => void handleDeleteAttachment(attachment)}
-                    title="Remove attachment"
-                    aria-label={`Remove ${attachment.filename}`}
-                  >
-                    x
-                  </button>
-                </div>
-              ))}
-              {isSavingAttachment ? <span className="terminal-attachment-saving">Saving screenshot...</span> : null}
-              {attachmentError ? <span className="terminal-attachment-error">{attachmentError}</span> : null}
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );
