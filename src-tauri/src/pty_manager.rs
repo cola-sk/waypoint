@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env, fs,
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
@@ -45,6 +45,8 @@ const HANDOVER_INJECT_DELAY_MS: u64 = 350;
 const CODEX_HANDOVER_STARTUP_DELAY_MS: u64 = 1_800;
 const MAX_PTY_ROWS: u16 = 240;
 const MAX_PTY_COLS: u16 = 600;
+const MAX_ATTACHMENT_BYTES: usize = 15 * 1024 * 1024;
+const MAX_ATTACHMENT_PREVIEW_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Default)]
 pub struct AppState {
@@ -90,6 +92,10 @@ struct SessionMeta {
     first_user_message: Option<String>,
     #[serde(default)]
     native_session_ref: Option<NativeSessionRef>,
+    #[serde(default)]
+    parent_session_id: Option<String>,
+    #[serde(default)]
+    handover_root_id: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -98,6 +104,8 @@ pub struct NativeSessionRef {
     provider: String,
     id: Option<String>,
     name: Option<String>,
+    #[serde(default)]
+    project: Option<String>,
     resume_command: Option<String>,
     discovered_at: u64,
 }
@@ -117,6 +125,8 @@ pub struct SessionInfo {
     last_active_at: u64,
     first_user_message: Option<String>,
     native_session_ref: Option<NativeSessionRef>,
+    parent_session_id: Option<String>,
+    handover_root_id: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -150,11 +160,33 @@ pub struct HandoverResult {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct HandoverFileResult {
+    prompt: String,
+    source_session: SessionInfo,
+    handover_mode: String,
+    handover_path: String,
+    evidence_path: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HandoverDraft {
     prompt: String,
     effective_mode: String,
     estimated_chars: usize,
     evidence_path: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionAttachmentInfo {
+    id: String,
+    filename: String,
+    path: String,
+    mime: String,
+    size_bytes: u64,
+    created_at: u64,
+    preview_data_url: Option<String>,
 }
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -262,6 +294,12 @@ struct NativeResumeCommand {
     native_session_ref: Option<NativeSessionRef>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AgyResumeRef {
+    conversation_id: String,
+    project: Option<String>,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PtyDataEvent {
@@ -364,6 +402,35 @@ pub fn write_session(
 }
 
 #[tauri::command]
+pub fn save_session_attachment(
+    state: State<'_, AppState>,
+    session_id: String,
+    mime: String,
+    data_base64: String,
+) -> Result<SessionAttachmentInfo, String> {
+    state
+        .manager
+        .save_session_attachment(&session_id, &mime, &data_base64)
+}
+
+#[tauri::command]
+pub fn list_session_attachments(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Vec<SessionAttachmentInfo>, String> {
+    state.manager.list_session_attachments(&session_id)
+}
+
+#[tauri::command]
+pub fn delete_session_attachment(
+    state: State<'_, AppState>,
+    session_id: String,
+    path: String,
+) -> Result<(), String> {
+    state.manager.delete_session_attachment(&session_id, &path)
+}
+
+#[tauri::command]
 pub fn resize_session(
     state: State<'_, AppState>,
     session_id: String,
@@ -451,6 +518,18 @@ pub fn get_handover_draft(
         note,
         handover_mode.unwrap_or_default(),
     )
+}
+
+#[tauri::command]
+pub fn create_handover_file(
+    state: State<'_, AppState>,
+    source_session_id: String,
+    note: Option<String>,
+    handover_mode: Option<HandoverContentMode>,
+) -> Result<HandoverFileResult, String> {
+    state
+        .manager
+        .create_handover_file(&source_session_id, note, handover_mode.unwrap_or_default())
 }
 
 #[tauri::command]
@@ -544,6 +623,8 @@ impl SessionManager {
             None,
             None,
             None,
+            None,
+            None,
         )
     }
 
@@ -566,6 +647,8 @@ impl SessionManager {
         created_at_override: Option<u64>,
         mut native_session_ref: Option<NativeSessionRef>,
         first_user_message: Option<String>,
+        parent_session_id: Option<String>,
+        handover_root_id: Option<String>,
     ) -> Result<SessionInfo, String> {
         let cwd_path = PathBuf::from(&cwd);
         if !cwd_path.is_dir() {
@@ -596,6 +679,7 @@ impl SessionManager {
                 provider: agent_id.to_string(),
                 id: Some(id.clone()),
                 name: None,
+                project: None,
                 resume_command: Some(format!("{} --resume={}", display_command, shell_quote(&id))),
                 discovered_at: now,
             });
@@ -610,6 +694,7 @@ impl SessionManager {
                 provider: agent_id.to_string(),
                 id: Some(id.clone()),
                 name: None,
+                project: None,
                 resume_command: Some(format!("{} --resume {}", display_command, shell_quote(&id))),
                 discovered_at: now,
             });
@@ -677,6 +762,8 @@ impl SessionManager {
             last_active_at: now,
             first_user_message,
             native_session_ref,
+            parent_session_id,
+            handover_root_id,
         };
 
         let session = Arc::new(PtySession {
@@ -710,6 +797,7 @@ impl SessionManager {
                     Ok(0) => {
                         reader_session.finalize_open_assistant_message();
                         reader_session.mark_status(SessionStatus::Exited);
+                        cache_agy_resume_ref_on_session(&reader_session);
                         let _ = reader_app.emit(
                             "session:exited",
                             SessionEvent {
@@ -740,6 +828,7 @@ impl SessionManager {
                     Err(err) if err.raw_os_error() == Some(5) => {
                         reader_session.finalize_open_assistant_message();
                         reader_session.mark_status(SessionStatus::Exited);
+                        cache_agy_resume_ref_on_session(&reader_session);
                         let _ = reader_app.emit(
                             "session:exited",
                             SessionEvent {
@@ -751,6 +840,7 @@ impl SessionManager {
                     Err(err) => {
                         reader_session.finalize_open_assistant_message();
                         reader_session.mark_status(SessionStatus::Error);
+                        cache_agy_resume_ref_on_session(&reader_session);
                         let _ = reader_app.emit(
                             "session:error",
                             SessionErrorEvent {
@@ -864,9 +954,12 @@ impl SessionManager {
             }
         }
 
-        let meta = load_session_meta(session_id)?;
+        let mut meta = load_session_meta(session_id)?;
         if !PathBuf::from(&meta.cwd).is_dir() {
             return Err(format!("workspace directory does not exist: {}", meta.cwd));
+        }
+        if cache_agy_resume_ref_in_meta(&mut meta) {
+            persist_session_meta(&meta)?;
         }
 
         let command = native_resume_command_for(&meta)?.ok_or_else(|| {
@@ -893,6 +986,8 @@ impl SessionManager {
             Some(meta.created_at),
             command.native_session_ref,
             meta.first_user_message.clone(),
+            meta.parent_session_id.clone(),
+            meta.handover_root_id.clone(),
         )
     }
 
@@ -901,16 +996,91 @@ impl SessionManager {
         if !matches!(session.info().status, SessionStatus::Running) {
             return Err("session is not running".to_string());
         }
+        let data_to_write = if should_append_agy_session_marker(&session, &data) {
+            format!("{data}<!-- waypoint_session_id: {session_id} -->\r")
+        } else {
+            data.clone()
+        };
         session.append_input(&data);
         session.capture_user_input(&data);
         session
             .writer
             .lock()
-            .write_all(data.as_bytes())
+            .write_all(data_to_write.as_bytes())
             .map_err(|err| format!("failed to write to PTY: {err}"))?;
         session.meta.lock().last_active_at = unix_timestamp();
         session.persist_meta();
         Ok(())
+    }
+
+    fn save_session_attachment(
+        &self,
+        session_id: &str,
+        mime: &str,
+        data_base64: &str,
+    ) -> Result<SessionAttachmentInfo, String> {
+        let info = self.session_info_for_storage(session_id)?;
+        let (normalized_mime, extension) = normalize_attachment_mime(mime)?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data_base64)
+            .map_err(|err| format!("failed to decode attachment: {err}"))?;
+        if bytes.is_empty() {
+            return Err("attachment is empty".to_string());
+        }
+        if bytes.len() > MAX_ATTACHMENT_BYTES {
+            return Err(format!(
+                "attachment is too large: max {} MB",
+                MAX_ATTACHMENT_BYTES / 1024 / 1024
+            ));
+        }
+
+        let dir = session_attachment_dir(&info.cwd, session_id)?;
+        fs::create_dir_all(&dir).map_err(|err| {
+            format!(
+                "failed to create attachment directory {}: {err}",
+                dir.display()
+            )
+        })?;
+        let suffix = Uuid::new_v4().to_string();
+        let filename = format!(
+            "screenshot-{}-{}.{}",
+            unix_timestamp_ms(),
+            &suffix[..8],
+            extension
+        );
+        let path = dir.join(filename);
+        fs::write(&path, &bytes)
+            .map_err(|err| format!("failed to write attachment {}: {err}", path.display()))?;
+
+        attachment_info_from_path(&path, Some(normalized_mime), true)
+    }
+
+    fn list_session_attachments(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<SessionAttachmentInfo>, String> {
+        let info = self.session_info_for_storage(session_id)?;
+        list_session_attachment_infos(&info.cwd, session_id, true)
+    }
+
+    fn delete_session_attachment(&self, session_id: &str, path: &str) -> Result<(), String> {
+        let info = self.session_info_for_storage(session_id)?;
+        let attachments_dir = fs::canonicalize(session_attachment_dir(&info.cwd, session_id)?)
+            .map_err(|err| format!("failed to resolve attachment directory: {err}"))?;
+        let target = fs::canonicalize(path)
+            .map_err(|err| format!("failed to resolve attachment path: {err}"))?;
+        if !target.starts_with(&attachments_dir) {
+            return Err("attachment path is outside this session".to_string());
+        }
+        fs::remove_file(&target)
+            .map_err(|err| format!("failed to delete attachment {}: {err}", target.display()))
+    }
+
+    fn session_info_for_storage(&self, session_id: &str) -> Result<SessionInfo, String> {
+        if let Some(session) = self.sessions.lock().get(session_id).cloned() {
+            return Ok(session.info());
+        }
+        load_session_meta(session_id).map(|meta| meta.to_info())
     }
 
     fn send_chat_message(&self, session_id: &str, message: &str) -> Result<(), String> {
@@ -918,10 +1088,22 @@ impl SessionManager {
         if !matches!(session.info().status, SessionStatus::Running) {
             return Err("session is not running".to_string());
         }
-        let payload = message.trim();
-        if payload.is_empty() {
+        let clean_msg = message.trim();
+        if clean_msg.is_empty() {
             return Ok(());
         }
+        
+        let is_first_message = {
+            let meta = session.meta.lock();
+            meta.first_user_message.is_none()
+        };
+        let info = session.info();
+        let payload = if is_first_message && info.agent_id == "agy" {
+            format!("{}\n<!-- waypoint_session_id: {} -->", clean_msg, session_id)
+        } else {
+            clean_msg.to_string()
+        };
+
         let normalized = payload.replace('\n', "\r");
         let injected = format!("{normalized}\r");
         session
@@ -929,9 +1111,9 @@ impl SessionManager {
             .lock()
             .write_all(injected.as_bytes())
             .map_err(|err| format!("failed to write chat message to PTY: {err}"))?;
-        session.append_chat_user_message(payload);
+        session.append_chat_user_message(clean_msg);
         session.append_input(&format!("{payload}\n"));
-        session.remember_first_user_message(payload);
+        session.remember_first_user_message(clean_msg);
         session.meta.lock().last_active_at = unix_timestamp();
         session.persist_meta();
         Ok(())
@@ -1015,6 +1197,7 @@ impl SessionManager {
             .kill()
             .map_err(|err| format!("failed to kill session: {err}"))?;
         session.mark_status(SessionStatus::Exited);
+        cache_agy_resume_ref_on_session(&session);
         Ok(())
     }
 
@@ -1065,6 +1248,7 @@ impl SessionManager {
         }
 
         let handover = self.inject_handover(&source, &target, note, handover_mode, false)?;
+        let target_info = target.info();
 
         Ok(HandoverResult {
             prompt: handover.prompt,
@@ -1154,6 +1338,7 @@ impl SessionManager {
         let target_info = self.create_agent_session(app, target_agent_id, cwd, rows, cols)?;
         let target = self.get(&target_info.id)?;
         let handover = self.inject_handover(&source, &target, note, handover_mode, true)?;
+        let target_info = target.info();
 
         Ok(HandoverResult {
             prompt: handover.prompt,
@@ -1187,8 +1372,9 @@ impl SessionManager {
             "Claude Code is not available in PATH. Install it or make sure your login shell can resolve it."
                 .to_string()
         })?;
+        let target_id = Uuid::new_v4().to_string();
         let planned_target = SessionInfo {
-            id: "pending".to_string(),
+            id: target_id.clone(),
             agent_id: definition.id.to_string(),
             agent_name: definition.name.to_string(),
             title: "Claude Code new session".to_string(),
@@ -1200,6 +1386,8 @@ impl SessionManager {
             last_active_at: unix_timestamp(),
             first_user_message: None,
             native_session_ref: None,
+            parent_session_id: None,
+            handover_root_id: None,
         };
         let handover = self.write_handover_for(
             source,
@@ -1209,12 +1397,12 @@ impl SessionManager {
             handover_mode,
             &cwd,
         )?;
-        let startup_prompt = handover_reference_startup_prompt(&handover.main_path);
+        let startup_prompt = handover_reference_startup_prompt(&handover.main_path, &target_id);
 
         let mut args = resolved.args;
         args.push(startup_prompt);
 
-        let target_info = self.spawn_session(
+        let target_info = self.spawn_session_with_identity(
             app,
             definition.id,
             definition.name,
@@ -1226,8 +1414,17 @@ impl SessionManager {
             rows,
             cols,
             Vec::new(),
+            Some(target_id),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         )?;
         let target = self.get(&target_info.id)?;
+        self.record_handover_link(&source_info, &target);
+        let target_info = target.info();
         self.remember_handover(&target, &handover.prompt);
 
         Ok(HandoverResult {
@@ -1262,8 +1459,9 @@ impl SessionManager {
             "Antigravity CLI is not available in PATH. Install it or make sure your login shell can resolve it."
                 .to_string()
         })?;
+        let target_id = Uuid::new_v4().to_string();
         let planned_target = SessionInfo {
-            id: "pending".to_string(),
+            id: target_id.clone(),
             agent_id: definition.id.to_string(),
             agent_name: definition.name.to_string(),
             title: "Antigravity CLI new session".to_string(),
@@ -1275,6 +1473,8 @@ impl SessionManager {
             last_active_at: unix_timestamp(),
             first_user_message: None,
             native_session_ref: None,
+            parent_session_id: None,
+            handover_root_id: None,
         };
         let handover = self.write_handover_for(
             source,
@@ -1284,7 +1484,7 @@ impl SessionManager {
             handover_mode,
             &cwd,
         )?;
-        let startup_prompt = handover_reference_startup_prompt(&handover.main_path);
+        let startup_prompt = handover_reference_startup_prompt(&handover.main_path, &target_id);
         let mut args = resolved.args;
         if let Some(parent) = handover.main_path.parent() {
             args.push("--add-dir".to_string());
@@ -1292,7 +1492,7 @@ impl SessionManager {
         }
         args.push("--prompt-interactive".to_string());
         args.push(startup_prompt);
-        let target_info = self.spawn_session(
+        let target_info = self.spawn_session_with_identity(
             app,
             definition.id,
             definition.name,
@@ -1304,8 +1504,17 @@ impl SessionManager {
             rows,
             cols,
             Vec::new(),
+            Some(target_id),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         )?;
         let target = self.get(&target_info.id)?;
+        self.record_handover_link(&source_info, &target);
+        let target_info = target.info();
         self.remember_handover(&target, &handover.prompt);
 
         Ok(HandoverResult {
@@ -1340,8 +1549,9 @@ impl SessionManager {
             "Codex CLI is not available in PATH. Install it or make sure your login shell can resolve it."
                 .to_string()
         })?;
+        let target_id = Uuid::new_v4().to_string();
         let planned_target = SessionInfo {
-            id: "pending".to_string(),
+            id: target_id.clone(),
             agent_id: definition.id.to_string(),
             agent_name: definition.name.to_string(),
             title: "Codex new session".to_string(),
@@ -1353,6 +1563,8 @@ impl SessionManager {
             last_active_at: unix_timestamp(),
             first_user_message: None,
             native_session_ref: None,
+            parent_session_id: None,
+            handover_root_id: None,
         };
         let handover = self.write_handover_for(
             source,
@@ -1362,7 +1574,7 @@ impl SessionManager {
             handover_mode,
             &cwd,
         )?;
-        let startup_prompt = handover_reference_startup_prompt(&handover.main_path);
+        let startup_prompt = handover_reference_startup_prompt(&handover.main_path, &target_id);
 
         let mut args = resolved.args;
         if let Some(parent) = handover.main_path.parent() {
@@ -1371,7 +1583,7 @@ impl SessionManager {
         }
         args.push(startup_prompt);
 
-        let target_info = self.spawn_session(
+        let target_info = self.spawn_session_with_identity(
             app,
             definition.id,
             definition.name,
@@ -1383,8 +1595,17 @@ impl SessionManager {
             rows,
             cols,
             Vec::new(),
+            Some(target_id),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         )?;
         let target = self.get(&target_info.id)?;
+        self.record_handover_link(&source_info, &target);
+        let target_info = target.info();
         self.remember_handover(&target, &handover.prompt);
 
         Ok(HandoverResult {
@@ -1420,8 +1641,9 @@ impl SessionManager {
                 .to_string()
         })?;
         let display_command = format!("{} -i <handover>", resolved.display);
+        let target_id = Uuid::new_v4().to_string();
         let planned_target = SessionInfo {
-            id: "pending".to_string(),
+            id: target_id.clone(),
             agent_id: definition.id.to_string(),
             agent_name: definition.name.to_string(),
             title: "GitHub Copilot new session".to_string(),
@@ -1433,6 +1655,8 @@ impl SessionManager {
             last_active_at: unix_timestamp(),
             first_user_message: None,
             native_session_ref: None,
+            parent_session_id: None,
+            handover_root_id: None,
         };
         let handover = self.write_handover_for(
             source,
@@ -1442,7 +1666,7 @@ impl SessionManager {
             handover_mode,
             &cwd,
         )?;
-        let startup_prompt = handover_reference_startup_prompt(&handover.main_path);
+        let startup_prompt = handover_reference_startup_prompt(&handover.main_path, &target_id);
 
         let mut args = resolved.args;
         if let Some(parent) = handover.main_path.parent() {
@@ -1452,7 +1676,7 @@ impl SessionManager {
         append_copilot_cli_option(&mut args, "-i".to_string());
         append_copilot_cli_option(&mut args, startup_prompt);
 
-        let target_info = self.spawn_session(
+        let target_info = self.spawn_session_with_identity(
             app,
             definition.id,
             definition.name,
@@ -1464,8 +1688,17 @@ impl SessionManager {
             rows,
             cols,
             Vec::new(),
+            Some(target_id),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         )?;
         let target = self.get(&target_info.id)?;
+        self.record_handover_link(&source_info, &target);
+        let target_info = target.info();
         self.remember_handover(&target, &handover.prompt);
 
         Ok(HandoverResult {
@@ -1514,14 +1747,31 @@ impl SessionManager {
             )));
         }
         inject_with_retry(target, &short_instruction)?;
+        self.record_handover_link(&source_info, target);
         self.remember_handover(target, &handover.prompt);
         target.meta.lock().last_active_at = unix_timestamp();
 
         Ok(handover)
     }
 
+    fn record_handover_link(&self, source: &SessionInfo, target: &Arc<PtySession>) {
+        let mut meta = target.meta.lock();
+        meta.parent_session_id = Some(source.id.clone());
+        meta.handover_root_id = Some(
+            source
+                .handover_root_id
+                .clone()
+                .filter(|id| !id.trim().is_empty())
+                .unwrap_or_else(|| source.id.clone()),
+        );
+        meta.last_active_at = unix_timestamp();
+        drop(meta);
+        target.persist_meta();
+    }
+
     fn remember_handover(&self, target: &Arc<PtySession>, prompt: &str) {
-        *target.inherited_handover.lock() = tail_chars(prompt, HANDOVER_INHERITED_STORE_CHARS);
+        *target.inherited_handover.lock() =
+            format_handover_for_inheritance(prompt, HANDOVER_INHERITED_STORE_CHARS);
     }
 
     fn get_handover_preview(&self, source_session_id: &str) -> Result<HandoverPreview, String> {
@@ -1574,6 +1824,35 @@ impl SessionManager {
                 requested_mode,
             ),
         )
+    }
+
+    fn create_handover_file(
+        &self,
+        source_session_id: &str,
+        note: Option<String>,
+        requested_mode: HandoverContentMode,
+    ) -> Result<HandoverFileResult, String> {
+        let source = self.get(source_session_id)?;
+        let source_info = source.info();
+        let target_info = planned_file_handover_target_info(&source_info);
+        let handover = self.write_handover_for(
+            &source,
+            &source_info,
+            &target_info,
+            note,
+            requested_mode,
+            &source_info.cwd,
+        )?;
+
+        Ok(HandoverFileResult {
+            prompt: handover.prompt,
+            source_session: source_info,
+            handover_mode: handover.effective_mode,
+            handover_path: handover.main_path.display().to_string(),
+            evidence_path: handover
+                .evidence_path
+                .map(|path| path.display().to_string()),
+        })
     }
 
     fn build_handover_preview_for(&self, source: &Arc<PtySession>) -> HandoverPreview {
@@ -1732,6 +2011,17 @@ impl SessionManager {
         })
     }
 
+    fn resolve_and_cache_agy_conversation_id(
+        &self,
+        source: &Arc<PtySession>,
+        source_info: &SessionInfo,
+    ) {
+        if source_info.agent_id != "agy" {
+            return;
+        }
+        cache_agy_resume_ref_on_session(source);
+    }
+
     fn build_handover_prompt_for(
         &self,
         source: &Arc<PtySession>,
@@ -1740,6 +2030,8 @@ impl SessionManager {
         note: Option<String>,
         diff_preview_limit: usize,
     ) -> String {
+        self.resolve_and_cache_agy_conversation_id(source, source_info);
+
         let recent_context =
             build_handover_source_context(source, source_info, HANDOVER_CONTEXT_CHARS);
         let recent_user_inputs =
@@ -1755,14 +2047,22 @@ impl SessionManager {
             HANDOVER_DIFF_FILES_CHARS,
             GIT_OUTPUT_LIMIT_CHARS,
         );
+        let attachments = format_handover_attachments(
+            &list_session_attachment_infos(&source_info.cwd, &source_info.id, false)
+                .unwrap_or_default(),
+        );
+        let artifacts = build_agy_artifacts_context(&source_info.id);
+
         build_handover_prompt(
             &source_info,
             &target_info,
             note.as_deref().unwrap_or_default(),
             &git_context,
+            &attachments,
             &inherited_handover,
             &recent_context,
             &recent_user_inputs,
+            &artifacts,
         )
     }
 
@@ -1774,6 +2074,8 @@ impl SessionManager {
         note: Option<String>,
         evidence_path: Option<&str>,
     ) -> String {
+        self.resolve_and_cache_agy_conversation_id(source, source_info);
+
         let recent_context =
             build_handover_source_context(source, source_info, COMPACT_HANDOVER_CONTEXT_CHARS);
         let recent_user_inputs =
@@ -1789,15 +2091,23 @@ impl SessionManager {
             COMPACT_HANDOVER_DIFF_FILES_CHARS,
             COMPACT_GIT_STATUS_CHARS,
         );
+        let attachments = format_handover_attachments(
+            &list_session_attachment_infos(&source_info.cwd, &source_info.id, false)
+                .unwrap_or_default(),
+        );
+        let artifacts = build_agy_artifacts_context(&source_info.id);
+
         build_compact_handover_prompt(
             source_info,
             target_info,
             note.as_deref().unwrap_or_default(),
             &git_context,
+            &attachments,
             &inherited_handover,
             &recent_context,
             &recent_user_inputs,
             evidence_path,
+            &artifacts,
         )
     }
 
@@ -1808,6 +2118,8 @@ impl SessionManager {
         target_info: &SessionInfo,
         note: Option<String>,
     ) -> String {
+        self.resolve_and_cache_agy_conversation_id(source, source_info);
+
         let recent_context =
             build_handover_source_context(source, source_info, HANDOVER_CONTEXT_CHARS);
         let recent_user_inputs =
@@ -1824,6 +2136,11 @@ impl SessionManager {
             .unwrap_or_else(|| "git diff unavailable".to_string());
         let staged_diff = git_command(&source_info.cwd, &["diff", "--staged"])
             .unwrap_or_else(|| "git staged diff unavailable".to_string());
+        let attachments = format_handover_attachments(
+            &list_session_attachment_infos(&source_info.cwd, &source_info.id, false)
+                .unwrap_or_default(),
+        );
+        let artifacts = build_agy_artifacts_context(&source_info.id);
 
         build_full_handover_evidence(
             source_info,
@@ -1833,9 +2150,11 @@ impl SessionManager {
             &git_status,
             &git_diff,
             &staged_diff,
+            &attachments,
             &inherited_handover,
             &recent_context,
             &recent_user_inputs,
+            &artifacts,
         )
     }
 
@@ -1845,6 +2164,54 @@ impl SessionManager {
             .get(session_id)
             .cloned()
             .ok_or_else(|| format!("unknown session: {session_id}"))
+    }
+}
+
+fn build_agy_artifacts_context(session_id: &str) -> String {
+    let Some(conversation_id) = find_agy_conversation_id(session_id) else {
+        return String::new();
+    };
+    let Some(home) = home_dir() else {
+        return String::new();
+    };
+    let brain_dir = home.join(".gemini").join("antigravity-cli").join("brain").join(&conversation_id);
+    if !brain_dir.is_dir() {
+        return String::new();
+    }
+    
+    let mut artifact_blocks = Vec::new();
+    if let Ok(entries) = fs::read_dir(brain_dir) {
+        let mut sorted_entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
+        sorted_entries.sort_by_key(|entry| entry.file_name());
+        
+        for entry in sorted_entries {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                    if ext == "md" {
+                        let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                        if let Ok(content) = fs::read_to_string(&path) {
+                            if !content.trim().is_empty() {
+                                artifact_blocks.push(format!(
+                                    "### [{filename}](file://{})\n\n{}\n",
+                                    path.display(),
+                                    content.trim()
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    if artifact_blocks.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "## Session Artifacts\n\nThe following technical proposals and artifacts were generated during this session:\n\n{}",
+            artifact_blocks.join("\n---\n\n")
+        )
     }
 }
 
@@ -2034,6 +2401,109 @@ impl PtySession {
     }
 }
 
+fn cache_agy_resume_ref_on_session(session: &Arc<PtySession>) -> bool {
+    let changed = {
+        let mut meta = session.meta.lock();
+        cache_agy_resume_ref_in_meta(&mut meta)
+    };
+    if changed {
+        session.persist_meta();
+    }
+    changed
+}
+
+fn should_append_agy_session_marker(session: &Arc<PtySession>, data: &str) -> bool {
+    if !data.contains('\r') && !data.contains('\n') {
+        return false;
+    }
+    {
+        let meta = session.meta.lock();
+        if meta.agent_id != "agy" || meta.first_user_message.is_some() {
+            return false;
+        }
+    }
+
+    let mut pending = session.pending_user_input.lock().clone();
+    !extract_submitted_user_inputs(&mut pending, data).is_empty()
+}
+
+fn cache_agy_resume_ref_in_meta(meta: &mut SessionMeta) -> bool {
+    if meta.agent_id != "agy" {
+        return false;
+    }
+
+    let existing = meta.native_session_ref.clone();
+    let existing_id = existing
+        .as_ref()
+        .and_then(|session_ref| session_ref.id.clone())
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty());
+    let existing_project = existing
+        .as_ref()
+        .and_then(|session_ref| session_ref.project.clone())
+        .map(|project| project.trim().to_string())
+        .filter(|project| !project.is_empty());
+
+    let resume_ref = resolve_agy_resume_ref(&meta.id).or_else(|| {
+        existing_id.clone().map(|conversation_id| {
+            let project = existing_project
+                .clone()
+                .or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|session_ref| session_ref.resume_command.as_deref())
+                        .and_then(parse_agy_resume_ref)
+                        .and_then(|resume_ref| resume_ref.project)
+                })
+                .or_else(|| {
+                    find_agy_resume_ref_in_waypoint_transcript(&meta.id)
+                        .and_then(|resume_ref| resume_ref.project)
+                });
+            AgyResumeRef {
+                conversation_id,
+                project,
+            }
+        })
+    });
+
+    let Some(resume_ref) = resume_ref else {
+        return false;
+    };
+
+    let resume_command = format_agy_resume_command("agy", &resume_ref);
+    let name = existing
+        .as_ref()
+        .and_then(|session_ref| session_ref.name.clone());
+    let discovered_at = existing
+        .as_ref()
+        .map(|session_ref| session_ref.discovered_at)
+        .filter(|value| *value > 0)
+        .unwrap_or_else(unix_timestamp);
+    let next = NativeSessionRef {
+        provider: "agy".to_string(),
+        id: Some(resume_ref.conversation_id),
+        name,
+        project: resume_ref.project,
+        resume_command: Some(resume_command),
+        discovered_at,
+    };
+
+    let changed = existing
+        .as_ref()
+        .map(|current| {
+            current.provider != next.provider
+                || current.id != next.id
+                || current.project != next.project
+                || current.resume_command != next.resume_command
+        })
+        .unwrap_or(true);
+    if changed {
+        meta.native_session_ref = Some(next);
+        meta.last_active_at = unix_timestamp();
+    }
+    changed
+}
+
 impl SessionMeta {
     fn to_info(&self) -> SessionInfo {
         SessionInfo {
@@ -2049,6 +2519,8 @@ impl SessionMeta {
             last_active_at: self.last_active_at,
             first_user_message: self.first_user_message.clone(),
             native_session_ref: self.native_session_ref.clone(),
+            parent_session_id: self.parent_session_id.clone(),
+            handover_root_id: self.handover_root_id.clone(),
         }
     }
 }
@@ -2098,6 +2570,105 @@ fn session_meta_path(session_id: &str) -> Result<PathBuf, String> {
 
 fn session_transcript_path(session_id: &str) -> Result<PathBuf, String> {
     Ok(session_dir(session_id)?.join("transcript.log"))
+}
+
+fn session_attachment_dir(cwd: &str, session_id: &str) -> Result<PathBuf, String> {
+    Ok(handover_workspace_dir(cwd)?
+        .join("attachments")
+        .join(session_id))
+}
+
+fn normalize_attachment_mime(mime: &str) -> Result<(&'static str, &'static str), String> {
+    match mime.trim().to_ascii_lowercase().as_str() {
+        "image/png" => Ok(("image/png", "png")),
+        "image/jpeg" | "image/jpg" => Ok(("image/jpeg", "jpg")),
+        "image/webp" => Ok(("image/webp", "webp")),
+        "image/gif" => Ok(("image/gif", "gif")),
+        other => Err(format!("unsupported attachment type: {other}")),
+    }
+}
+
+fn mime_from_attachment_path(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        _ => None,
+    }
+}
+
+fn attachment_info_from_path(
+    path: &Path,
+    mime_override: Option<&str>,
+    include_preview: bool,
+) -> Result<SessionAttachmentInfo, String> {
+    let metadata = fs::metadata(path)
+        .map_err(|err| format!("failed to inspect attachment {}: {err}", path.display()))?;
+    let filename = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| format!("invalid attachment path: {}", path.display()))?;
+    let mime = mime_override
+        .map(ToOwned::to_owned)
+        .or_else(|| mime_from_attachment_path(path).map(ToOwned::to_owned))
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let created_at = metadata
+        .created()
+        .or_else(|_| metadata.modified())
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or_else(unix_timestamp);
+    let preview_data_url = if include_preview && metadata.len() <= MAX_ATTACHMENT_PREVIEW_BYTES {
+        fs::read(path).ok().map(|bytes| {
+            format!(
+                "data:{};base64,{}",
+                mime,
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            )
+        })
+    } else {
+        None
+    };
+
+    Ok(SessionAttachmentInfo {
+        id: filename.clone(),
+        filename,
+        path: path.display().to_string(),
+        mime,
+        size_bytes: metadata.len(),
+        created_at,
+        preview_data_url,
+    })
+}
+
+fn list_session_attachment_infos(
+    cwd: &str,
+    session_id: &str,
+    include_preview: bool,
+) -> Result<Vec<SessionAttachmentInfo>, String> {
+    let dir = session_attachment_dir(cwd, session_id)?;
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let entries = fs::read_dir(&dir)
+        .map_err(|err| format!("failed to read attachment directory {}: {err}", dir.display()))?;
+    let mut attachments = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && mime_from_attachment_path(path).is_some())
+        .filter_map(|path| attachment_info_from_path(&path, None, include_preview).ok())
+        .collect::<Vec<_>>();
+    attachments.sort_by_key(|attachment| attachment.created_at);
+    Ok(attachments)
 }
 
 fn persist_session_meta(meta: &SessionMeta) -> Result<(), String> {
@@ -2293,22 +2864,31 @@ fn native_resume_command_for(meta: &SessionMeta) -> Result<Option<NativeResumeCo
     let native_id = meta
         .native_session_ref
         .as_ref()
-        .and_then(|session_ref| session_ref.id.clone());
+        .and_then(|session_ref| session_ref.id.clone())
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty());
+
+    let mut resolved_native_id = native_id.clone();
+    let mut resolved_project = meta
+        .native_session_ref
+        .as_ref()
+        .and_then(|session_ref| session_ref.project.clone());
 
     let (args, display_command) = match meta.agent_id.as_str() {
         "claude-code" => {
-            let mut args = resolved.args;
-            if let Some(native_id) = native_id {
-                args.push("--resume".to_string());
-                args.push(native_id.clone());
-                (
-                    args,
-                    format!("{} --resume {}", resolved.display, shell_quote(&native_id)),
-                )
-            } else {
-                args.push("--continue".to_string());
-                (args, format!("{} --continue", resolved.display))
+            let Some(native_id) = native_id else {
+                return Ok(None);
+            };
+            if find_claude_native_transcript_path(&meta.cwd, &native_id).is_none() {
+                return Ok(None);
             }
+            let mut args = resolved.args;
+            args.push("--resume".to_string());
+            args.push(native_id.clone());
+            (
+                args,
+                format!("{} --resume {}", resolved.display, shell_quote(&native_id)),
+            )
         }
         "codex" => {
             let mut args = resolved.args;
@@ -2325,22 +2905,45 @@ fn native_resume_command_for(meta: &SessionMeta) -> Result<Option<NativeResumeCo
             }
         }
         "agy" => {
-            let mut args = resolved.args;
-            if let Some(native_id) = native_id {
-                args.push("--conversation".to_string());
-                args.push(native_id.clone());
-                (
-                    args,
-                    format!(
-                        "{} --conversation {}",
-                        resolved.display,
-                        shell_quote(&native_id)
-                    ),
-                )
-            } else {
-                args.push("--continue".to_string());
-                (args, format!("{} --continue", resolved.display))
+            let mut agy_ref = match native_id {
+                Some(id) => {
+                    let project = meta
+                        .native_session_ref
+                        .as_ref()
+                        .and_then(|session_ref| session_ref.project.clone())
+                        .or_else(|| {
+                            meta.native_session_ref
+                                .as_ref()
+                                .and_then(|session_ref| session_ref.resume_command.as_deref())
+                                .and_then(parse_agy_resume_ref)
+                                .and_then(|resume_ref| resume_ref.project)
+                        });
+                    AgyResumeRef {
+                        conversation_id: id,
+                        project,
+                    }
+                }
+                None => {
+                    if let Some(resume_ref) = resolve_agy_resume_ref(&meta.id) {
+                        resume_ref
+                    } else {
+                        return Ok(None);
+                    }
+                }
+            };
+            if agy_ref.project.is_none() {
+                agy_ref.project = find_agy_resume_ref_in_waypoint_transcript(&meta.id)
+                    .and_then(|resume_ref| resume_ref.project);
             }
+            resolved_native_id = Some(agy_ref.conversation_id.clone());
+            resolved_project = agy_ref.project.clone();
+            let mut args = resolved.args;
+            args.push(format!("--conversation={}", agy_ref.conversation_id));
+            if let Some(project) = agy_ref.project.as_ref() {
+                args.push(format!("--project={project}"));
+            }
+            let display_command = format_agy_resume_command(&resolved.display, &agy_ref);
+            (args, display_command)
         }
         "copilot" => {
             let Some(native_id) = native_id else {
@@ -2362,14 +2965,12 @@ fn native_resume_command_for(meta: &SessionMeta) -> Result<Option<NativeResumeCo
         display_command: display_command.clone(),
         native_session_ref: Some(NativeSessionRef {
             provider: meta.agent_id.clone(),
-            id: meta
-                .native_session_ref
-                .as_ref()
-                .and_then(|session_ref| session_ref.id.clone()),
+            id: resolved_native_id,
             name: meta
                 .native_session_ref
                 .as_ref()
                 .and_then(|session_ref| session_ref.name.clone()),
+            project: resolved_project,
             resume_command: Some(display_command),
             discovered_at: now,
         }),
@@ -2478,7 +3079,28 @@ fn planned_handover_target_info(agent_id: &str, cwd: &str) -> Result<SessionInfo
         last_active_at: now,
         first_user_message: None,
         native_session_ref: None,
+        parent_session_id: None,
+        handover_root_id: None,
     })
+}
+
+fn planned_file_handover_target_info(source: &SessionInfo) -> SessionInfo {
+    SessionInfo {
+        id: "file".to_string(),
+        agent_id: "manual".to_string(),
+        agent_name: "Manual handover".to_string(),
+        title: "Handover file".to_string(),
+        command: "handover file".to_string(),
+        cwd: source.cwd.clone(),
+        status: SessionStatus::Running,
+        attached: false,
+        created_at: unix_timestamp(),
+        last_active_at: unix_timestamp(),
+        first_user_message: None,
+        native_session_ref: None,
+        parent_session_id: None,
+        handover_root_id: None,
+    }
 }
 
 fn reserve_handover_paths(cwd: &str) -> Result<HandoverPaths, String> {
@@ -2529,10 +3151,11 @@ fn handover_workspace_dir(cwd: &str) -> Result<PathBuf, String> {
     Ok(PathBuf::from(home).join(".waypoint").join(workspace_name))
 }
 
-fn handover_reference_startup_prompt(path: &Path) -> String {
+fn handover_reference_startup_prompt(path: &Path, session_id: &str) -> String {
     format!(
-        "Initialization step for this new session: read only this exact handover file now: {}. This single-file read is explicitly allowed. Do not list/search directories, do not use glob patterns, and do not read any other files during this initialization turn. After loading that single file, reply exactly: \"Context loaded. Waiting for your instruction.\" and wait for the next user message. Crucially, this constraint applies ONLY to this first startup turn; in all subsequent turns, you must fully use your normal tools, file reading, and directory search capabilities to assist the user.",
-        path.display()
+        "Initialization step for this new session: read only this exact handover file now: {}. This single-file read is explicitly allowed. Do not list/search directories, do not use glob patterns, and do not read any other files during this initialization turn. After loading that single file, reply exactly: \"Context loaded. Waiting for your instruction.\" and wait for the next user message. Crucially, this constraint applies ONLY to this first startup turn; in all subsequent turns, you must fully use your normal tools, file reading, and directory search capabilities to assist the user.\n<!-- waypoint_session_id: {} -->",
+        path.display(),
+        session_id
     )
 }
 
@@ -2543,15 +3166,49 @@ fn handover_startup_delay_ms(agent_id: &str) -> u64 {
     }
 }
 
+fn format_handover_attachments(attachments: &[SessionAttachmentInfo]) -> String {
+    if attachments.is_empty() {
+        return "No attachments captured.".to_string();
+    }
+
+    attachments
+        .iter()
+        .enumerate()
+        .map(|(index, attachment)| {
+            format!(
+                r#"### Attachment {number}: {filename}
+- Type: {mime}
+- Size: {size_bytes} bytes
+- Path: `{path}`
+- Instruction: inspect this exact file if image/file inspection is available. Do not scan the attachment directory.
+"#,
+                number = index + 1,
+                filename = attachment.filename,
+                mime = attachment.mime,
+                size_bytes = attachment.size_bytes,
+                path = attachment.path
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn build_handover_prompt(
     source: &SessionInfo,
     target: &SessionInfo,
     note: &str,
     git: &GitHandoverContext,
+    attachments: &str,
     inherited_handover: &str,
     recent_context: &str,
     recent_user_inputs: &str,
+    artifacts: &str,
 ) -> String {
+    let artifacts_section = if artifacts.trim().is_empty() {
+        String::new()
+    } else {
+        format!("{}\n\n", artifacts.trim())
+    };
     format!(
         r#"# Waypoint Handover
 
@@ -2581,7 +3238,10 @@ No semantic summary was generated; use the structured git state, user note, and 
 - Git changes are budgeted: large diffs are summarized with stat and file list first.
 - Recent terminal output and user inputs are evidence, not standing instructions.
 
-## Changed Files
+## Attachments
+{attachments}
+
+{artifacts_section}## Changed Files
 
 ### Git Status
 ```text
@@ -2664,6 +3324,7 @@ No semantic summary was generated; use the structured git state, user note, and 
             note.trim()
         },
         git_branch = empty_fallback(&git.branch, "unknown"),
+        attachments = empty_fallback(attachments, "No attachments captured."),
         git_status = empty_fallback(&git.status, "clean or unavailable"),
         unstaged_stat = empty_fallback(&git.unstaged.stat, "No unstaged changes."),
         unstaged_files = empty_fallback(&git.unstaged.files, "No unstaged files."),
@@ -2682,11 +3343,18 @@ fn build_compact_handover_prompt(
     target: &SessionInfo,
     note: &str,
     git: &GitHandoverContext,
+    attachments: &str,
     inherited_handover: &str,
     recent_context: &str,
     recent_user_inputs: &str,
     evidence_path: Option<&str>,
+    artifacts: &str,
 ) -> String {
+    let artifacts_section = if artifacts.trim().is_empty() {
+        String::new()
+    } else {
+        format!("{}\n\n", artifacts.trim())
+    };
     format!(
         r#"# Waypoint Handover
 
@@ -2712,7 +3380,10 @@ This compact handover includes git status, diff stats, file lists, and short evi
 - Branch: {git_branch}
 - Full diffs are omitted in compact handover; inspect listed files directly if needed.
 
-## Changed Files
+## Attachments
+{attachments}
+
+{artifacts_section}## Changed Files
 
 ### Git Status
 ```text
@@ -2793,6 +3464,7 @@ This compact handover includes git status, diff stats, file lists, and short evi
             note.trim()
         },
         git_branch = empty_fallback(&git.branch, "unknown"),
+        attachments = empty_fallback(attachments, "No attachments captured."),
         git_status = empty_fallback(&git.status, "clean or unavailable"),
         unstaged_stat = empty_fallback(&git.unstaged.stat, "No unstaged changes."),
         unstaged_files = empty_fallback(&git.unstaged.files, "No unstaged files."),
@@ -2815,10 +3487,17 @@ fn build_full_handover_evidence(
     git_status: &str,
     git_diff: &str,
     staged_diff: &str,
+    attachments: &str,
     inherited_handover: &str,
     recent_context: &str,
     recent_user_inputs: &str,
+    artifacts: &str,
 ) -> String {
+    let artifacts_section = if artifacts.trim().is_empty() {
+        String::new()
+    } else {
+        format!("{}\n\n", artifacts.trim())
+    };
     format!(
         r#"# Waypoint Full Handover Evidence
 
@@ -2857,7 +3536,10 @@ This file contains larger raw evidence for a compact handover. The target agent 
 {staged_diff}
 ```
 
-## Inherited Handover Context
+## Attachments
+{attachments}
+
+{artifacts_section}## Inherited Handover Context
 {inherited_handover}
 
 ## Recent Source Terminal Context
@@ -2887,6 +3569,7 @@ This file contains larger raw evidence for a compact handover. The target agent 
         git_status = empty_fallback(git_status, "clean or unavailable"),
         git_diff = empty_fallback(git_diff, "No unstaged diff."),
         staged_diff = empty_fallback(staged_diff, "No staged diff."),
+        attachments = empty_fallback(attachments, "No attachments captured."),
         inherited_handover = empty_fallback(inherited_handover, "No inherited handover context."),
         recent_context = empty_fallback(recent_context, "No recent terminal context captured."),
         recent_user_inputs = empty_fallback(recent_user_inputs, "No recent user input captured."),
@@ -2900,6 +3583,190 @@ fn format_full_evidence_reference(evidence_path: Option<&str>) -> String {
         ),
         None => "No separate full evidence file was generated for this handover.".to_string(),
     }
+}
+
+fn format_handover_for_inheritance(prompt: &str, limit: usize) -> String {
+    let mut parts = Vec::new();
+
+    if let Some(earlier) = extract_first_markdown_section(
+        prompt,
+        &["## Inherited Handover Context", "## Prior Handover Context"],
+    )
+    .filter(|content| is_meaningful_inherited_context(content))
+    {
+        parts.push(format!(
+            "### Earlier Handover Context\n{}",
+            dedupe_repeated_handover_lines(&earlier)
+        ));
+    }
+
+    let mut hop_parts = Vec::new();
+    push_inheritance_section(
+        &mut hop_parts,
+        "#### Summary",
+        extract_first_markdown_section(prompt, &["## Summary"]),
+    );
+    push_inheritance_section(
+        &mut hop_parts,
+        "#### Source",
+        extract_first_markdown_section(prompt, &["## Source Session", "## Source"]),
+    );
+    push_inheritance_section(
+        &mut hop_parts,
+        "#### Target",
+        extract_first_markdown_section(prompt, &["## Target Session", "## Target"]),
+    );
+    push_inheritance_section(
+        &mut hop_parts,
+        "#### User Note",
+        extract_first_markdown_section(prompt, &["## User Note"]),
+    );
+    push_inheritance_section(
+        &mut hop_parts,
+        "#### Current State",
+        extract_first_markdown_section(prompt, &["## Current State", "## Git Context"]),
+    );
+    push_inheritance_section(
+        &mut hop_parts,
+        "#### Changed Files",
+        extract_first_markdown_section(prompt, &["## Changed Files"])
+            .map(|content| remove_diff_preview_sections(&content)),
+    );
+
+    if !hop_parts.is_empty() {
+        parts.push(format!(
+            "### Previous Handover Hop\n{}",
+            hop_parts.join("\n\n")
+        ));
+    }
+
+    let mut evidence_parts = Vec::new();
+    push_inheritance_section(
+        &mut evidence_parts,
+        "#### Recent Source Context",
+        extract_first_markdown_section(
+            prompt,
+            &[
+                "### Recent Source Terminal Context",
+                "### Recent Source Context",
+                "## Recent Source Terminal Context",
+            ],
+        )
+        .map(|content| dedupe_repeated_handover_lines(&content)),
+    );
+    push_inheritance_section(
+        &mut evidence_parts,
+        "#### Recent User Inputs",
+        extract_first_markdown_section(
+            prompt,
+            &[
+                "### Recent User Inputs (best effort)",
+                "## Recent User Inputs (best effort)",
+            ],
+        ),
+    );
+
+    if !evidence_parts.is_empty() {
+        parts.push(format!(
+            "### Previous Handover Evidence\n{}",
+            evidence_parts.join("\n\n")
+        ));
+    }
+
+    let snapshot = parts.join("\n\n");
+    if snapshot.trim().is_empty() {
+        return "No inherited handover context.".to_string();
+    }
+    tail_chars(&snapshot, limit)
+}
+
+fn push_inheritance_section(parts: &mut Vec<String>, heading: &str, content: Option<String>) {
+    let Some(content) = content else {
+        return;
+    };
+    let content = content.trim();
+    if content.is_empty() {
+        return;
+    }
+    parts.push(format!("{heading}\n{content}"));
+}
+
+fn extract_first_markdown_section(markdown: &str, headings: &[&str]) -> Option<String> {
+    headings
+        .iter()
+        .find_map(|heading| extract_markdown_section(markdown, heading))
+}
+
+fn extract_markdown_section(markdown: &str, heading: &str) -> Option<String> {
+    let target = heading.trim();
+    let heading_level = target.chars().take_while(|c| *c == '#').count();
+    if heading_level == 0 {
+        return None;
+    }
+
+    let mut capturing = false;
+    let mut lines = Vec::new();
+    for line in markdown.lines() {
+        if !capturing {
+            if line.trim() == target {
+                capturing = true;
+            }
+            continue;
+        }
+
+        if is_markdown_heading_at_or_above(line, heading_level) {
+            break;
+        }
+        lines.push(line);
+    }
+
+    let content = lines.join("\n").trim().to_string();
+    if content.is_empty() {
+        None
+    } else {
+        Some(content)
+    }
+}
+
+fn is_markdown_heading_at_or_above(line: &str, level: usize) -> bool {
+    let trimmed = line.trim_start();
+    let hashes = trimmed.chars().take_while(|c| *c == '#').count();
+    if hashes == 0 || hashes > level {
+        return false;
+    }
+    trimmed.chars().nth(hashes) == Some(' ')
+}
+
+fn is_meaningful_inherited_context(content: &str) -> bool {
+    let trimmed = content.trim();
+    !trimmed.is_empty() && trimmed != "No inherited handover context."
+}
+
+fn remove_diff_preview_sections(content: &str) -> String {
+    let mut lines = Vec::new();
+    let mut skipping_diff_preview = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "#### Diff Preview" {
+            skipping_diff_preview = true;
+            continue;
+        }
+        if skipping_diff_preview && trimmed.starts_with("#### ") {
+            skipping_diff_preview = false;
+        }
+        if skipping_diff_preview && trimmed.starts_with("### ") {
+            skipping_diff_preview = false;
+        }
+        if skipping_diff_preview {
+            continue;
+        }
+        lines.push(line);
+    }
+
+    collapse_blank_lines(&lines.join("\n"), 2)
+        .trim()
+        .to_string()
 }
 
 fn inject_with_retry(target: &Arc<PtySession>, prompt: &str) -> Result<(), String> {
@@ -3034,6 +3901,7 @@ fn native_transcript_messages_for(
 enum NativeTranscriptKind {
     Claude,
     Codex,
+    Agy,
 }
 
 struct NativeTranscriptMessage {
@@ -3042,18 +3910,14 @@ struct NativeTranscriptMessage {
 }
 
 fn native_transcript_kind(source_info: &SessionInfo) -> Option<NativeTranscriptKind> {
-    let native_ref = source_info.native_session_ref.as_ref()?;
-    let native_id = native_ref.id.as_deref()?.trim();
-    if native_id.is_empty() {
-        return None;
-    }
-
     match source_info.agent_id.as_str() {
         "claude-code" => Some(NativeTranscriptKind::Claude),
         "codex" => Some(NativeTranscriptKind::Codex),
-        _ => match native_ref.provider.as_str() {
+        "agy" => Some(NativeTranscriptKind::Agy),
+        _ => match source_info.native_session_ref.as_ref()?.provider.as_str() {
             "claude-code" | "claude" => Some(NativeTranscriptKind::Claude),
             "codex" => Some(NativeTranscriptKind::Codex),
+            "agy" => Some(NativeTranscriptKind::Agy),
             _ => None,
         },
     }
@@ -3066,17 +3930,204 @@ fn native_transcript_path(
     let native_id = source_info
         .native_session_ref
         .as_ref()
-        .and_then(|session_ref| session_ref.id.as_deref())?
+        .and_then(|session_ref| session_ref.id.as_deref())
+        .unwrap_or_default()
         .trim();
-    if native_id.is_empty() {
-        return None;
-    }
 
     match kind {
         NativeTranscriptKind::Claude => {
-            find_claude_native_transcript_path(&source_info.cwd, native_id)
+            if native_id.is_empty() {
+                None
+            } else {
+                find_claude_native_transcript_path(&source_info.cwd, native_id)
+            }
         }
-        NativeTranscriptKind::Codex => find_codex_native_transcript_path(native_id),
+        NativeTranscriptKind::Codex => {
+            if !native_id.is_empty() {
+                find_codex_native_transcript_path(native_id)
+            } else {
+                find_latest_codex_native_transcript_path(&source_info.cwd, source_info.created_at)
+            }
+        }
+        NativeTranscriptKind::Agy => {
+            let agy_id = if native_id.is_empty() {
+                resolve_agy_resume_ref(&source_info.id)?.conversation_id
+            } else {
+                native_id.to_string()
+            };
+            find_agy_native_transcript_path(&agy_id)
+        }
+    }
+}
+
+fn find_agy_conversation_id(session_id: &str) -> Option<String> {
+    let home = home_dir()?;
+    let brain_dir = home.join(".gemini").join("antigravity-cli").join("brain");
+    if !brain_dir.is_dir() {
+        return None;
+    }
+    let pattern = format!("waypoint_session_id: {session_id}");
+    let entries = fs::read_dir(brain_dir).ok()?;
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            let transcript_path = path.join(".system_generated").join("logs").join("transcript.jsonl");
+            if transcript_path.is_file() {
+                if let Ok(content) = fs::read_to_string(&transcript_path) {
+                    if content.contains(&pattern) {
+                        return path.file_name().map(|name| name.to_string_lossy().into_owned());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn resolve_agy_resume_ref(session_id: &str) -> Option<AgyResumeRef> {
+    let transcript_ref = find_agy_resume_ref_in_waypoint_transcript(session_id);
+    if let Some(conversation_id) = find_agy_conversation_id(session_id) {
+        let project = transcript_ref
+            .as_ref()
+            .filter(|resume_ref| resume_ref.conversation_id == conversation_id)
+            .and_then(|resume_ref| resume_ref.project.clone());
+        return Some(AgyResumeRef {
+            conversation_id,
+            project,
+        });
+    }
+    transcript_ref
+}
+
+fn find_agy_resume_ref_in_waypoint_transcript(session_id: &str) -> Option<AgyResumeRef> {
+    let path = session_transcript_path(session_id).ok()?;
+    let content = fs::read_to_string(path).ok()?;
+    parse_agy_resume_ref(&content)
+}
+
+fn parse_agy_resume_ref(text: &str) -> Option<AgyResumeRef> {
+    let cleaned = strip_ansi_escape_sequences(text);
+    let lines = cleaned.lines().collect::<Vec<_>>();
+
+    lines
+        .iter()
+        .rev()
+        .filter(|line| line.contains("Resume in the same project"))
+        .find_map(|line| parse_agy_resume_ref_line(line))
+        .or_else(|| {
+            lines
+                .iter()
+                .rev()
+                .find_map(|line| parse_agy_resume_ref_line(line))
+        })
+}
+
+fn parse_agy_resume_ref_line(line: &str) -> Option<AgyResumeRef> {
+    if !line.contains("agy") || !line.contains("--conversation") {
+        return None;
+    }
+
+    let tokens = line.split_whitespace().collect::<Vec<_>>();
+    let mut conversation_id = None;
+    let mut project = None;
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = clean_cli_token(tokens[index]);
+        if token == "--conversation" {
+            conversation_id = tokens
+                .get(index + 1)
+                .and_then(|value| clean_cli_value(value));
+            index += 2;
+            continue;
+        }
+        if token == "--project" {
+            project = tokens
+                .get(index + 1)
+                .and_then(|value| clean_cli_value(value));
+            index += 2;
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("--conversation=") {
+            conversation_id = clean_cli_value(value);
+        } else if let Some(value) = token.strip_prefix("--project=") {
+            project = clean_cli_value(value);
+        }
+        index += 1;
+    }
+
+    conversation_id.map(|conversation_id| AgyResumeRef {
+        conversation_id,
+        project,
+    })
+}
+
+fn clean_cli_token(token: &str) -> String {
+    token
+        .trim_matches(|ch| matches!(ch, '\'' | '"' | '`' | '(' | ')' | ',' | ';'))
+        .to_string()
+}
+
+fn clean_cli_value(value: &str) -> Option<String> {
+    let value = clean_cli_token(value);
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn strip_ansi_escape_sequences(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\x1b' {
+            output.push(ch);
+            continue;
+        }
+
+        if chars.peek() == Some(&'[') {
+            chars.next();
+            for next in chars.by_ref() {
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+        }
+    }
+    output
+}
+
+fn format_agy_resume_command(display: &str, agy_ref: &AgyResumeRef) -> String {
+    let mut command = format!(
+        "{} --conversation={}",
+        display,
+        shell_quote(&agy_ref.conversation_id)
+    );
+    if let Some(project) = agy_ref
+        .project
+        .as_ref()
+        .filter(|project| !project.trim().is_empty())
+    {
+        command.push_str(&format!(" --project={}", shell_quote(project)));
+    }
+    command
+}
+
+fn find_agy_native_transcript_path(conversation_id: &str) -> Option<PathBuf> {
+    let home = home_dir()?;
+    let expected = home
+        .join(".gemini")
+        .join("antigravity-cli")
+        .join("brain")
+        .join(conversation_id)
+        .join(".system_generated")
+        .join("logs")
+        .join("transcript.jsonl");
+    if expected.is_file() {
+        Some(expected)
+    } else {
+        None
     }
 }
 
@@ -3155,6 +4206,23 @@ fn find_codex_native_transcript_path(native_id: &str) -> Option<PathBuf> {
         .find(|path| codex_transcript_has_session_id(path, native_id))
 }
 
+fn find_latest_codex_native_transcript_path(cwd: &str, created_at: u64) -> Option<PathBuf> {
+    let home = home_dir()?;
+    let mut candidates = Vec::new();
+    collect_jsonl_paths(&home.join(".codex").join("sessions"), 6, &mut candidates);
+
+    let normalized_cwd = normalize_existing_path(cwd);
+    candidates
+        .into_iter()
+        .filter(|path| codex_transcript_matches_workspace(path, cwd, normalized_cwd.as_deref()))
+        .filter(|path| {
+            path_modified_secs(path)
+                .map(|modified| modified.saturating_add(5) >= created_at)
+                .unwrap_or(true)
+        })
+        .max_by_key(|path| path_modified_secs(path).unwrap_or_default())
+}
+
 fn codex_transcript_has_session_id(path: &Path, native_id: &str) -> bool {
     let Ok(file) = File::open(path) else {
         return false;
@@ -3176,6 +4244,52 @@ fn codex_transcript_has_session_id(path: &Path, native_id: &str) -> bool {
         }
     }
     false
+}
+
+fn codex_transcript_matches_workspace(
+    path: &Path,
+    cwd: &str,
+    normalized_cwd: Option<&str>,
+) -> bool {
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    for line in BufReader::new(file).lines().map_while(Result::ok).take(50) {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some("session_meta") {
+            continue;
+        }
+        let Some(transcript_cwd) = value.pointer("/payload/cwd").and_then(Value::as_str) else {
+            continue;
+        };
+        if transcript_cwd == cwd {
+            return true;
+        }
+        if let Some(normalized_cwd) = normalized_cwd {
+            if normalize_existing_path(transcript_cwd).as_deref() == Some(normalized_cwd) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn normalize_existing_path(path: &str) -> Option<String> {
+    fs::canonicalize(path)
+        .ok()
+        .map(|path| path.to_string_lossy().to_string())
+}
+
+fn path_modified_secs(path: &Path) -> Option<u64> {
+    fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
 }
 
 fn collect_jsonl_paths(root: &Path, max_depth: usize, paths: &mut Vec<PathBuf>) {
@@ -3211,8 +4325,24 @@ fn parse_native_transcript_messages<R: BufRead>(
         .filter_map(|value| match kind {
             NativeTranscriptKind::Claude => parse_claude_native_message(&value),
             NativeTranscriptKind::Codex => parse_codex_native_message(&value),
+            NativeTranscriptKind::Agy => parse_agy_native_message(&value),
         })
         .collect()
+}
+
+fn parse_agy_native_message(value: &Value) -> Option<NativeTranscriptMessage> {
+    let msg_type = value.get("type").and_then(Value::as_str)?;
+    let role = match msg_type {
+        "USER_INPUT" => ChatRole::User,
+        "PLANNER_RESPONSE" => ChatRole::Assistant,
+        _ => return None,
+    };
+    let content = value.get("content").and_then(Value::as_str)?;
+    let content = clean_native_message_content(content, role);
+    if content.trim().is_empty() || is_native_system_noise(&content) {
+        return None;
+    }
+    Some(NativeTranscriptMessage { role, content })
 }
 
 fn parse_claude_native_message(value: &Value) -> Option<NativeTranscriptMessage> {
@@ -3383,6 +4513,11 @@ fn clean_handover_message_content(content: &str, role: ChatRole) -> String {
         ChatRole::User => clean_terminal_input(content, CHAT_MESSAGE_CONTENT_LIMIT_CHARS),
         ChatRole::Assistant => clean_chat_chunk(content),
     };
+    let cleaned = if role == ChatRole::Assistant {
+        dedupe_repeated_handover_lines(&cleaned)
+    } else {
+        cleaned
+    };
     if !cleaned.trim().is_empty() {
         return cleaned;
     }
@@ -3500,7 +4635,7 @@ fn normalize_session_title(value: &str) -> String {
 }
 
 fn clean_chat_chunk(raw: &str) -> String {
-    let stripped = strip_ansi(raw);
+    let stripped = strip_orphan_ansi_fragments(&strip_ansi(raw));
     // Normalize \r\n -> \n first so that normal PTY newlines don't interfere with
     // the \r-based cursor-overwrite simulation below.
     let normalized_newlines = stripped.replace("\r\n", "\n");
@@ -3536,9 +4671,10 @@ fn clean_chat_chunk(raw: &str) -> String {
         cleaned_lines.push(normalized);
     }
 
-    collapse_blank_lines(&cleaned_lines.join("\n"), 2)
+    let cleaned = collapse_blank_lines(&cleaned_lines.join("\n"), 2)
         .trim_end()
-        .to_string()
+        .to_string();
+    dedupe_repeated_handover_lines(&cleaned)
 }
 
 fn has_chat_repaint_hint(raw: &str) -> bool {
@@ -3604,6 +4740,16 @@ fn looks_like_tui_noise_line(line: &str) -> bool {
         if spinner_starts.contains(&first_char) {
             return true;
         }
+        if ('\u{2800}'..='\u{28ff}').contains(&first_char) {
+            let normalized: String = trimmed
+                .to_lowercase()
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect();
+            if normalized.contains("working") || normalized.contains("thinking") {
+                return true;
+            }
+        }
     }
 
     // Detect animation-artifact lines: high density of * and + mixed with alphanumeric.
@@ -3628,6 +4774,7 @@ fn looks_like_tui_noise_line(line: &str) -> bool {
 
     // Common TUI status / interactive UI keywords
     if normalized.contains("esctointerrupt")
+        || normalized.contains("esctocancel")
         || normalized.contains("forshortcuts")
         || normalized.contains("swirling")
         || normalized.contains("thundering")
@@ -3890,7 +5037,7 @@ fn unix_timestamp_ms() -> u64 {
 /// 5. Truncate to the last `limit` characters.
 fn clean_terminal_output(raw: &str, limit: usize) -> String {
     // Step 1: strip ANSI escape sequences
-    let stripped = strip_ansi(raw);
+    let stripped = strip_orphan_ansi_fragments(&strip_ansi(raw));
 
     // Step 2: simulate \r overwriting per line and remove control chars
     let mut clean_lines: Vec<String> = Vec::new();
@@ -3955,12 +5102,12 @@ fn clean_terminal_output(raw: &str, limit: usize) -> String {
         }
     }
 
-    // Step 5: truncate to last `limit` chars
-    tail_chars(&result, limit)
+    // Step 5: collapse duplicate repaint lines and truncate to last `limit` chars
+    tail_chars(&dedupe_repeated_handover_lines(&result), limit)
 }
 
 fn clean_terminal_input(raw: &str, limit: usize) -> String {
-    let stripped = strip_ansi(raw);
+    let stripped = strip_orphan_ansi_fragments(&strip_ansi(raw));
     let mut lines: Vec<String> = Vec::new();
     let mut current = String::new();
 
@@ -3987,6 +5134,107 @@ fn clean_terminal_input(raw: &str, limit: usize) -> String {
     }
 
     tail_chars(&lines.join("\n"), limit)
+}
+
+fn dedupe_repeated_handover_lines(input: &str) -> String {
+    let mut seen = HashSet::new();
+    let mut output = Vec::new();
+
+    for line in input.lines() {
+        let normalized = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        let should_dedupe = normalized.chars().count() >= 24
+            && !normalized.starts_with("```")
+            && normalized.chars().any(|c| c.is_alphanumeric());
+
+        if should_dedupe && !seen.insert(normalized) {
+            continue;
+        }
+        output.push(line);
+    }
+
+    collapse_blank_lines(&output.join("\n"), 2)
+}
+
+fn strip_orphan_ansi_fragments(input: &str) -> String {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(input.len());
+    let mut i = 0;
+
+    while i < chars.len() {
+        if chars[i] == '[' {
+            if let Some(next) = orphan_csi_fragment_end(&chars, i + 1) {
+                i = next;
+                continue;
+            }
+        }
+
+        if chars[i].is_ascii_digit() || chars[i] == ';' {
+            if let Some(next) = orphan_sgr_fragment_end(&chars, i) {
+                i = next;
+                continue;
+            }
+            if let Some(next) = orphan_cursor_erase_fragment_end(&chars, i) {
+                i = next;
+                continue;
+            }
+        }
+
+        output.push(chars[i]);
+        i += 1;
+    }
+
+    output
+}
+
+fn orphan_csi_fragment_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut cursor = start;
+    while cursor < chars.len() && cursor.saturating_sub(start) <= 24 {
+        let ch = chars[cursor];
+        if ch.is_ascii_digit() || ch == ';' || ch == '?' {
+            cursor += 1;
+            continue;
+        }
+        if matches!(ch, 'm' | 'K' | 'J' | 'H' | 'X') {
+            return Some(cursor + 1);
+        }
+        return None;
+    }
+    None
+}
+
+fn orphan_sgr_fragment_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut cursor = start;
+    let mut saw_semicolon = chars[start] == ';';
+    while cursor < chars.len() && cursor.saturating_sub(start) <= 32 {
+        let ch = chars[cursor];
+        if ch.is_ascii_digit() {
+            cursor += 1;
+            continue;
+        }
+        if ch == ';' {
+            saw_semicolon = true;
+            cursor += 1;
+            continue;
+        }
+        if ch == 'm' && saw_semicolon {
+            return Some(cursor + 1);
+        }
+        return None;
+    }
+    None
+}
+
+fn orphan_cursor_erase_fragment_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut cursor = start;
+    while cursor < chars.len() && chars[cursor].is_ascii_digit() && cursor.saturating_sub(start) < 4
+    {
+        cursor += 1;
+    }
+    if cursor > start + 1 && cursor < chars.len() && chars[cursor] == 'X' {
+        Some(cursor + 1)
+    } else {
+        None
+    }
 }
 
 fn strip_ansi(input: &str) -> String {
@@ -4052,6 +5300,7 @@ fn strip_ansi(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    static HOME_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn test_strip_ansi() {
@@ -4082,6 +5331,19 @@ mod tests {
         assert!(!result.contains("shortcuts"));
         assert!(!result.contains("Noodling"));
         assert!(!result.contains("Native installation exists"));
+    }
+
+    #[test]
+    fn test_clean_terminal_output_filters_repaint_artifacts() {
+        let input = "### 为什么按 Agent 分类？;238;232;213m1. 工具视角\n[1m重复标题\n⣻ Working...esc to cancelGemini 3.5 Flash (High)\n最终内容";
+        let result = clean_terminal_output(input, 10000);
+
+        assert!(result.contains("### 为什么按 Agent 分类？1. 工具视角"));
+        assert!(result.contains("重复标题"));
+        assert!(result.contains("最终内容"));
+        assert!(!result.contains("238;232;213m"));
+        assert!(!result.contains("Working"));
+        assert!(!result.contains("[1m"));
     }
 
     #[test]
@@ -4195,6 +5457,8 @@ mod tests {
             last_active_at: 1,
             first_user_message: None,
             native_session_ref: None,
+            parent_session_id: None,
+            handover_root_id: None,
         };
         let target = SessionInfo {
             id: "target".to_string(),
@@ -4209,6 +5473,8 @@ mod tests {
             last_active_at: 2,
             first_user_message: None,
             native_session_ref: None,
+            parent_session_id: None,
+            handover_root_id: None,
         };
         let git = GitHandoverContext {
             branch: "feature/handover".to_string(),
@@ -4230,10 +5496,12 @@ mod tests {
             &target,
             "finish P0",
             &git,
+            "No attachments captured.",
             "",
             "log",
             "input",
             None,
+            "",
         );
 
         assert!(result.contains("## Summary"));
@@ -4245,6 +5513,87 @@ mod tests {
         assert!(result.contains("## Recommended Next Steps"));
         assert!(result.contains("finish P0"));
         assert!(result.contains("src-tauri/src/pty_manager.rs"));
+    }
+
+    #[test]
+    fn test_handover_inheritance_snapshot_excludes_boilerplate_and_preserves_order() {
+        let prompt = r#"# Waypoint Handover
+
+## Summary
+Continuation from Codex session "A" in `/tmp/workspace`.
+
+## Source Session
+- Agent: Codex
+- Title: A
+
+## Target Session
+- Agent: Claude Code
+- Title: B
+
+## User Note
+Keep going.
+
+## Current State
+- Branch: main
+
+## Changed Files
+
+### Git Status
+```text
+ M src/main.rs
+```
+
+#### Diff Preview
+```diff
+diff --git a/src/main.rs b/src/main.rs
+```
+
+## Inherited Handover Context
+older handover context
+
+## Evidence
+
+### Recent Source Terminal Context
+```text
+User:
+先做 A
+
+Assistant:
+这是一段很长的重复内容用于模拟 TUI repaint 造成的重复行
+这是一段很长的重复内容用于模拟 TUI repaint 造成的重复行
+最后结论
+```
+
+### Recent User Inputs (best effort)
+```text
+先做 A
+```
+
+## Recommended Next Steps
+- Should not be inherited.
+
+## Instructions
+- Should not be inherited.
+"#;
+
+        let result = format_handover_for_inheritance(prompt, 10000);
+
+        let older = result.find("older handover context").unwrap();
+        let hop = result.find("### Previous Handover Hop").unwrap();
+        let evidence = result.find("### Previous Handover Evidence").unwrap();
+        assert!(older < hop);
+        assert!(hop < evidence);
+        assert!(result.contains("Keep going."));
+        assert!(result.contains("最后结论"));
+        assert!(!result.contains("Recommended Next Steps"));
+        assert!(!result.contains("Instructions"));
+        assert!(!result.contains("diff --git"));
+        assert_eq!(
+            result
+                .matches("这是一段很长的重复内容用于模拟 TUI repaint 造成的重复行")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -4338,11 +5687,326 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_agy_native_transcript_preserves_messages() {
+        let jsonl = r#"
+{"type":"USER_INPUT","content":"Please generate a technical proposal."}
+{"type":"PLANNER_RESPONSE","content":"Sure! I will create a proposal."}
+{"type":"OTHER_EVENT","content":"some other stuff"}
+"#;
+
+        let messages = parse_native_transcript_messages(
+            std::io::Cursor::new(jsonl),
+            NativeTranscriptKind::Agy,
+        );
+        let context = format_native_transcript_context(&messages, 10000);
+        let inputs = format_native_user_inputs(&messages, 10000);
+
+        assert!(context.contains("User:\nPlease generate a technical proposal."));
+        assert!(context.contains("Assistant:\nSure! I will create a proposal."));
+        assert!(inputs.contains("Please generate a technical proposal."));
+        assert!(!context.contains("some other stuff"));
+    }
+
+    #[test]
+    fn test_find_agy_conversation_id() {
+        let _guard = HOME_MUTEX.lock().unwrap();
+        let old_home = env::var("HOME").ok();
+        let root = env::temp_dir().join(format!("waypoint-test-agy-{}", Uuid::new_v4()));
+        env::set_var("HOME", &root);
+
+        let conv_id = "test-conv-123";
+        let session_id = "test-session-456";
+        let log_dir = root
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("brain")
+            .join(conv_id)
+            .join(".system_generated")
+            .join("logs");
+        fs::create_dir_all(&log_dir).unwrap();
+
+        let transcript_path = log_dir.join("transcript.jsonl");
+        fs::write(
+            &transcript_path,
+            format!("some log lines\nwaypoint_session_id: {session_id}\nmore lines"),
+        )
+        .unwrap();
+
+        let found = find_agy_conversation_id(session_id);
+        assert_eq!(found, Some(conv_id.to_string()));
+
+        // Cleanup
+        if let Some(h) = old_home {
+            env::set_var("HOME", h);
+        } else {
+            env::remove_var("HOME");
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_cache_agy_resume_ref_in_meta_from_native_transcript_marker() {
+        let _guard = HOME_MUTEX.lock().unwrap();
+        let old_home = env::var("HOME").ok();
+        let root = env::temp_dir().join(format!("waypoint-test-agy-cache-{}", Uuid::new_v4()));
+        env::set_var("HOME", &root);
+
+        let conv_id = "test-conv-cache-123";
+        let session_id = "test-session-cache-456";
+        let log_dir = root
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("brain")
+            .join(conv_id)
+            .join(".system_generated")
+            .join("logs");
+        fs::create_dir_all(&log_dir).unwrap();
+        fs::write(
+            log_dir.join("transcript.jsonl"),
+            format!("first user turn\n<!-- waypoint_session_id: {session_id} -->"),
+        )
+        .unwrap();
+
+        let mut meta = SessionMeta {
+            id: session_id.to_string(),
+            agent_id: "agy".to_string(),
+            agent_name: "agy".to_string(),
+            title: "agy session".to_string(),
+            command: "agy".to_string(),
+            cwd: "/tmp".to_string(),
+            status: SessionStatus::Exited,
+            attached: false,
+            created_at: 123456,
+            last_active_at: 123456,
+            first_user_message: Some("hi".to_string()),
+            native_session_ref: None,
+            parent_session_id: None,
+            handover_root_id: None,
+        };
+
+        assert!(cache_agy_resume_ref_in_meta(&mut meta));
+        let native_ref = meta.native_session_ref.unwrap();
+        assert_eq!(native_ref.provider, "agy");
+        assert_eq!(native_ref.id, Some(conv_id.to_string()));
+        assert_eq!(
+            native_ref.resume_command,
+            Some(format!("agy --conversation='{}'", conv_id))
+        );
+
+        if let Some(h) = old_home {
+            env::set_var("HOME", h);
+        } else {
+            env::remove_var("HOME");
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_resolve_agy_resume_ref_prefers_native_marker_over_terminal_resume_text() {
+        let _guard = HOME_MUTEX.lock().unwrap();
+        let old_home = env::var("HOME").ok();
+        let root = env::temp_dir().join(format!("waypoint-test-agy-priority-{}", Uuid::new_v4()));
+        env::set_var("HOME", &root);
+
+        let session_id = "test-session-priority-456";
+        let native_conv_id = "native-marker-conv";
+        let log_dir = root
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("brain")
+            .join(native_conv_id)
+            .join(".system_generated")
+            .join("logs");
+        fs::create_dir_all(&log_dir).unwrap();
+        fs::write(
+            log_dir.join("transcript.jsonl"),
+            format!("<!-- waypoint_session_id: {session_id} -->"),
+        )
+        .unwrap();
+
+        let waypoint_dir = session_dir(session_id).unwrap();
+        fs::create_dir_all(&waypoint_dir).unwrap();
+        fs::write(
+            waypoint_dir.join("transcript.log"),
+            "Resume in the same project: agy --conversation=terminal-conv --project=default-cli-project",
+        )
+        .unwrap();
+
+        let found = resolve_agy_resume_ref(session_id).unwrap();
+        assert_eq!(found.conversation_id, native_conv_id);
+        assert_eq!(found.project, None);
+
+        if let Some(h) = old_home {
+            env::set_var("HOME", h);
+        } else {
+            env::remove_var("HOME");
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_parse_agy_resume_ref_prefers_same_project_command() {
+        let output = r#"
+Something else
+Resume: agy --conversation=c79caf4a-cdf9-4b20-a2fb-e6143ba1ddf9 (or -c)
+Resume in the same project: agy --conversation=c79caf4a-cdf9-4b20-a2fb-e6143ba1ddf9 --project=default-cli-project
+"#;
+
+        let found = parse_agy_resume_ref(output);
+
+        assert_eq!(
+            found,
+            Some(AgyResumeRef {
+                conversation_id: "c79caf4a-cdf9-4b20-a2fb-e6143ba1ddf9".to_string(),
+                project: Some("default-cli-project".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn test_build_agy_artifacts_context() {
+        let _guard = HOME_MUTEX.lock().unwrap();
+        let old_home = env::var("HOME").ok();
+        let root = env::temp_dir().join(format!("waypoint-test-agy-artifacts-{}", Uuid::new_v4()));
+        env::set_var("HOME", &root);
+
+        let conv_id = "test-conv-123";
+        let session_id = "test-session-456";
+        let brain_dir = root
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("brain")
+            .join(conv_id);
+
+        let log_dir = brain_dir.join(".system_generated").join("logs");
+        fs::create_dir_all(&log_dir).unwrap();
+
+        // 1. Write the transcript file containing the session ID tracking comment
+        let transcript_path = log_dir.join("transcript.jsonl");
+        fs::write(
+            &transcript_path,
+            format!("waypoint_session_id: {session_id}"),
+        )
+        .unwrap();
+
+        // 2. Write some markdown artifacts
+        let art1 = brain_dir.join("proposal.md");
+        fs::write(&art1, "# Technical Proposal\nProposal content.").unwrap();
+
+        let art2 = brain_dir.join("design.md");
+        fs::write(&art2, "# Design Details\nDesign content.").unwrap();
+
+        // 3. Call build_agy_artifacts_context
+        let result = build_agy_artifacts_context(session_id);
+
+        assert!(result.contains("## Session Artifacts"));
+        assert!(result.contains("### [proposal.md]"));
+        assert!(result.contains("# Technical Proposal"));
+        assert!(result.contains("### [design.md]"));
+        assert!(result.contains("# Design Details"));
+
+        // Cleanup
+        if let Some(h) = old_home {
+            env::set_var("HOME", h);
+        } else {
+            env::remove_var("HOME");
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_native_resume_command_for_agy_resolves_dynamically() {
+        let _guard = HOME_MUTEX.lock().unwrap();
+        let old_home = env::var("HOME").ok();
+        let root = env::temp_dir().join(format!("waypoint-test-agy-resume-{}", Uuid::new_v4()));
+        env::set_var("HOME", &root);
+
+        let conv_id = "test-conv-999";
+        let session_id = "test-session-888";
+        let log_dir = root
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("brain")
+            .join(conv_id)
+            .join(".system_generated")
+            .join("logs");
+        fs::create_dir_all(&log_dir).unwrap();
+
+        let transcript_path = log_dir.join("transcript.jsonl");
+        fs::write(
+            &transcript_path,
+            format!("waypoint_session_id: {session_id}"),
+        )
+        .unwrap();
+
+        let meta = SessionMeta {
+            id: session_id.to_string(),
+            agent_id: "agy".to_string(),
+            agent_name: "agy".to_string(),
+            title: "agy session".to_string(),
+            command: "agy".to_string(),
+            cwd: "/tmp".to_string(),
+            status: SessionStatus::Exited,
+            attached: false,
+            created_at: 123456,
+            last_active_at: 123456,
+            first_user_message: None,
+            native_session_ref: None,
+            parent_session_id: None,
+            handover_root_id: None,
+        };
+
+        let result = native_resume_command_for(&meta).unwrap();
+        assert!(result.is_some());
+        let resume_cmd = result.unwrap();
+        assert!(resume_cmd.executable.ends_with("agy"));
+        assert!(resume_cmd
+            .args
+            .contains(&format!("--conversation={conv_id}")));
+
+        let ns_ref = resume_cmd.native_session_ref.unwrap();
+        assert_eq!(ns_ref.id, Some(conv_id.to_string()));
+
+        // Cleanup
+        if let Some(h) = old_home {
+            env::set_var("HOME", h);
+        } else {
+            env::remove_var("HOME");
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn test_claude_project_dir_name_matches_native_storage() {
         assert_eq!(
             claude_project_dir_name("/Users/liuzhe.x/coding/mcp-deck"),
             "-Users-liuzhe-x-coding-mcp-deck"
         );
+    }
+
+    #[test]
+    fn test_codex_transcript_matches_workspace_by_session_meta() {
+        let root = env::temp_dir().join(format!("waypoint-test-{}", Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let transcript = root.join("codex.jsonl");
+        std::fs::write(
+            &transcript,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"cwd\":\"{}\"}}}}\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let normalized = normalize_existing_path(workspace.to_str().unwrap());
+        assert!(codex_transcript_matches_workspace(
+            &transcript,
+            workspace.to_str().unwrap(),
+            normalized.as_deref()
+        ));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

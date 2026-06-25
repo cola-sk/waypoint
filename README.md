@@ -156,6 +156,158 @@ Waypoint collects recent terminal context, workspace git status, git diff, and s
 
 Existing sessions can also receive a handover through **Existing Session** mode.
 
+### Native Session IDs And Resume
+
+Waypoint stores its own session metadata in `~/.waypoint/sessions/<session-id>/meta.json`. For agents with native resume support, it also records a `nativeSessionRef` with the provider, native id, optional project, resume command, and discovery time. When a historical session is reactivated, the backend refreshes this native reference first, then builds the agent-specific resume command.
+
+Agent-specific native id behavior:
+
+```text
+Claude Code:
+  Waypoint injects its own session id as Claude's --session-id on new sessions.
+  If the launch args already contain --resume/-r/--session-id, it does not inject another id.
+  meta.nativeSessionRef.id = the Waypoint session id.
+  Before resume, Waypoint checks ~/.claude/projects/<workspace-as-claude-project>/<id>.jsonl.
+  If that path is missing, it searches ~/.claude/projects for a matching <id>.jsonl filename.
+  Resume command: claude --resume <id>.
+
+Codex:
+  Waypoint does not force a native id when creating a Codex session.
+  If meta already has a native id, resume uses codex resume <id>.
+  If no native id is known, resume falls back to codex resume --last.
+  For native transcript lookup, Waypoint searches ~/.codex/sessions and
+  ~/.codex/archived_sessions by native id. Without a native id, it selects the
+  newest transcript matching the workspace cwd and session creation time.
+
+Antigravity CLI (agy):
+  agy does not support caller-supplied conversation ids.
+  On the first real user submission in an agy PTY session, Waypoint sends:
+    <!-- waypoint_session_id: <waypoint-session-id> -->
+  This marker is persisted in agy's native transcript.
+  On natural exit, kill/stop, resume, and handover construction, Waypoint scans:
+    ~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript.jsonl
+  The brain directory containing the waypoint_session_id marker is the agy conversation id.
+  meta.nativeSessionRef.id = the agy conversation id.
+  If Waypoint's own terminal transcript includes agy's "Resume in the same project" line,
+  Waypoint parses --project=<project> as supplemental resume metadata.
+  Resume command: agy --conversation=<conversation-id> [--project=<project>].
+
+GitHub Copilot:
+  Waypoint injects its own session id as --session-id=<id> on new sessions.
+  If launch args already contain --continue/--resume/-r/--session-id, it does not inject another id.
+  For gh copilot, Waypoint inserts -- when needed before Copilot-specific args.
+  meta.nativeSessionRef.id = the Waypoint session id.
+  Resume command: copilot --resume=<id>, or gh copilot -- --resume=<id>.
+
+Shell:
+  Plain shells do not have an agent-native session id. Waypoint keeps only its own PTY transcript and replay.
+```
+
+### Handover File Generation
+
+Handover does not push the full context through a target agent's command line. Waypoint writes a file first, then asks the target agent to read that exact file.
+
+File layout and mode selection:
+
+```text
+Main file:
+  ~/.waypoint/<workspace-name>/handover-<uuid>.md
+
+Full evidence file for Compact mode:
+  ~/.waypoint/<workspace-name>/handover-<uuid>-full-evidence.md
+
+workspace-name:
+  The final path segment of the workspace directory, or workspace as a fallback.
+
+Mode:
+  Recommended uses Compact when the estimated context exceeds 32,000 characters.
+  Otherwise Recommended uses Full.
+  Users can explicitly choose Compact or Full.
+```
+
+The handover file includes:
+
+```text
+1. Source and target agent, command, and workspace.
+2. The user's note from the Continue dialog.
+3. git branch and git status --short.
+4. Unstaged and staged diff stat, file lists, and diff previews.
+5. Recent source terminal context.
+6. Recent user inputs.
+7. Inherited context from the previous handover hop.
+8. Exact attachment paths, MIME types, and sizes.
+9. agy markdown artifacts from ~/.gemini/antigravity-cli/brain/<conversation-id>/*.md.
+```
+
+Source context priority:
+
+```text
+Claude Code:
+  Prefer ~/.claude/projects/.../<native-id>.jsonl.
+  Fall back to Waypoint's terminal/chat buffer.
+
+Codex:
+  Prefer ~/.codex/sessions or archived_sessions transcripts matching the native id.
+  Without a native id, choose the newest transcript matching workspace and creation time.
+  Fall back to Waypoint's terminal/chat buffer.
+
+Antigravity CLI:
+  Resolve the conversation id through the waypoint_session_id marker first.
+  Then read ~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/logs/transcript.jsonl.
+  Fall back to Waypoint's terminal/chat buffer.
+
+GitHub Copilot / Shell:
+  Use Waypoint's terminal/chat buffer and input ring.
+```
+
+Full versus Compact:
+
+```text
+Full:
+  The main handover file contains the structured context, recent conversation,
+  user inputs, git state, diff stat, file lists, and bounded diff previews.
+
+Compact:
+  The main handover file keeps shorter context, user input, git status, diff stat,
+  and changed file lists. It omits inline full diff previews.
+  Waypoint also writes *-full-evidence.md with complete evidence, git diff, and staged diff.
+  The Compact handover references the evidence file path for exact follow-up reading.
+```
+
+### Agent Handover Launch Strategy
+
+```text
+Claude Code:
+  New Session writes the handover file first.
+  Launch shape: claude "<startup prompt>".
+  The startup prompt asks Claude to read only the handover file and includes a new waypoint_session_id marker.
+
+Codex:
+  The default command includes --no-alt-screen for xterm stability.
+  New Session grants the handover directory with --add-dir.
+  The startup prompt points to the handover file and includes a new waypoint_session_id marker.
+  Waypoint waits longer before injection to reduce writes before Codex is ready.
+
+Antigravity CLI:
+  New Session uses agy --prompt-interactive "<startup prompt>".
+  Waypoint grants the handover directory with --add-dir.
+  The startup prompt only carries the handover path and new waypoint_session_id marker,
+  avoiding large diff/context payloads in agy's TUI.
+
+GitHub Copilot:
+  New Session uses copilot -i "<startup prompt>".
+  The handover directory is passed with --add-dir; gh copilot gets -- before Copilot args.
+
+Existing Session / Forward:
+  Waypoint writes the handover file, then bracketed-pastes a short instruction into the target PTY.
+  The instruction tells the target to read only that file, acknowledge context loaded, and wait.
+  Before injection, Waypoint checks whether the target process already exited.
+
+Create Handover File:
+  The topbar handover-file action only writes the file; it does not start or inject into an agent.
+  The target is recorded as Manual handover so the file path can be used with external tools.
+```
+
 ## Troubleshooting
 
 ### `cargo` or `rustc` command not found

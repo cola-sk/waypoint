@@ -4,8 +4,10 @@ import type {
   ChatMessage,
   HandoverContentMode,
   HandoverDraft,
+  HandoverFileResult,
   HandoverPreview,
   HandoverResult,
+  SessionAttachmentInfo,
   SessionInfo,
   SessionSnapshot,
 } from "../types";
@@ -98,6 +100,27 @@ export function attachSession(sessionId: string): Promise<SessionSnapshot> {
   return invoke("attach_session", { sessionId });
 }
 
+export function saveSessionAttachment(
+  sessionId: string,
+  mime: string,
+  dataBase64: string,
+): Promise<SessionAttachmentInfo> {
+  assertTauriRuntime();
+  return invoke("save_session_attachment", { sessionId, mime, dataBase64 });
+}
+
+export function listSessionAttachments(sessionId: string): Promise<SessionAttachmentInfo[]> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve([]);
+  }
+  return invoke("list_session_attachments", { sessionId });
+}
+
+export function deleteSessionAttachment(sessionId: string, path: string): Promise<void> {
+  assertTauriRuntime();
+  return invoke("delete_session_attachment", { sessionId, path });
+}
+
 export function reactivateSession(sessionId: string): Promise<SessionInfo> {
   assertTauriRuntime();
   return invoke("reactivate_session", {
@@ -182,6 +205,19 @@ export function getHandoverDraft(params: {
 }): Promise<HandoverDraft> {
   assertTauriRuntime();
   return invoke("get_handover_draft", params);
+}
+
+export function createHandoverFile(
+  sourceSessionId: string,
+  note: string,
+  handoverMode: HandoverContentMode,
+): Promise<HandoverFileResult> {
+  assertTauriRuntime();
+  return invoke("create_handover_file", {
+    sourceSessionId,
+    note,
+    handoverMode,
+  });
 }
 
 export function listChatMessages(sessionId: string): Promise<ChatMessage[]> {

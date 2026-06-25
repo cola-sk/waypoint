@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   Bot,
+  Check,
   ChevronDown,
   ChevronRight,
+  Copy,
+  FilePlus,
   Folder,
   FolderPlus,
   MoreHorizontal,
@@ -22,6 +25,7 @@ import WptLogo from "./components/WptLogo";
 import {
   continueSession,
   createAgentSession,
+  createHandoverFile,
   defaultWorkspace,
   deleteSession,
   detectEditors,
@@ -38,16 +42,13 @@ import type {
   AgentPresetInfo,
   HandoverContentMode,
   HandoverDraft,
+  HandoverFileResult,
   HandoverPreview,
   HandoverResult,
   SessionInfo,
   WorkspaceFolder,
 } from "./types";
 import type { EditorInfo } from "./api/tauri";
-
-function agentTreeKey(folderPath: string, agentId: string) {
-  return `${folderPath}::${agentId}`;
-}
 
 function formatSessionTime(timestamp: number) {
   if (!timestamp) {
@@ -96,6 +97,41 @@ function sessionDisplayTitle(session: SessionInfo) {
   return `${title.slice(0, 39).trimEnd()}...`;
 }
 
+type SessionTreeNode = {
+  session: SessionInfo;
+  children: SessionTreeNode[];
+};
+
+function buildSessionForest(folderSessions: SessionInfo[]): SessionTreeNode[] {
+  const sorted = [...folderSessions].sort((a, b) => a.createdAt - b.createdAt);
+  const nodes = new Map<string, SessionTreeNode>();
+  sorted.forEach((session) => {
+    nodes.set(session.id, { session, children: [] });
+  });
+
+  const roots: SessionTreeNode[] = [];
+  sorted.forEach((session) => {
+    const node = nodes.get(session.id);
+    if (!node) {
+      return;
+    }
+    const parentId = session.parentSessionId?.trim();
+    const parent = parentId && parentId !== session.id ? nodes.get(parentId) : null;
+    if (parent) {
+      parent.children.push(node);
+    } else {
+      roots.push(node);
+    }
+  });
+
+  const sortNodes = (items: SessionTreeNode[]) => {
+    items.sort((a, b) => a.session.createdAt - b.session.createdAt);
+    items.forEach((item) => sortNodes(item.children));
+  };
+  sortNodes(roots);
+  return roots;
+}
+
 function normalizeWorkspacePath(value: string) {
   const trimmed = value.trim();
   if (!trimmed) {
@@ -138,43 +174,6 @@ function normalizeWorkspaceFolders(folders: WorkspaceFolder[]): WorkspaceFolder[
   return normalized;
 }
 
-function normalizeWorkspaceAgentHistory(
-  value: unknown,
-): Record<string, { agentId: string; agentName: string }[]> {
-  if (!value || typeof value !== "object") {
-    return {};
-  }
-  const result: Record<string, { agentId: string; agentName: string }[]> = {};
-  for (const [path, agents] of Object.entries(value as Record<string, unknown>)) {
-    const normalizedPath = normalizeWorkspacePath(path);
-    if (!normalizedPath || !Array.isArray(agents)) {
-      continue;
-    }
-    const seenAgentIds = new Set<string>();
-    const normalizedAgents = agents.flatMap((agent) => {
-      if (!agent || typeof agent !== "object") {
-        return [];
-      }
-      const candidate = agent as Partial<{ agentId: string; agentName: string }>;
-      let agentId = candidate.agentId?.trim();
-      let agentName = candidate.agentName?.trim();
-      if (agentId === "gemini") {
-        agentId = "agy";
-        agentName = "Antigravity CLI";
-      }
-      if (!agentId || !agentName || seenAgentIds.has(agentId)) {
-        return [];
-      }
-      seenAgentIds.add(agentId);
-      return [{ agentId, agentName }];
-    });
-    if (normalizedAgents.length > 0) {
-      result[normalizedPath] = normalizedAgents;
-    }
-  }
-  return result;
-}
-
 function normalizeWorkspacePathHistory(value: unknown): string[] {
   if (!Array.isArray(value)) {
     return [];
@@ -201,6 +200,7 @@ const NONE_WORKSPACE_STORAGE_KEY = "waypoint_none_workspace_session_ids";
 const HIDDEN_WORKSPACE_STORAGE_KEY = "waypoint_hidden_workspace_paths";
 const PINNED_ITEMS_STORAGE_KEY = "waypoint_pinned_items";
 const NEW_CONVERSATION_WORKSPACE_HISTORY_STORAGE_KEY = "waypoint_new_conversation_workspace_history";
+const COLLAPSED_WORKSPACE_STORAGE_KEY = "waypoint_collapsed_workspace_paths";
 const NONE_WORKSPACE_VALUE = "__none_workspace__";
 const CUSTOM_WORKSPACE_VALUE = "__custom_workspace__";
 const NEW_CONVERSATION_WORKSPACE_HISTORY_LIMIT = 20;
@@ -318,18 +318,16 @@ function SingleEditorButton({ editor, cwd }: { editor: EditorInfo; cwd: string }
     }
   }
 
-  const label = btnState === "opening" ? "打开中…" : btnState === "done" ? "已打开" : editor.name;
-
   return (
     <button
-      className={`icon-action open-in-editor-btn open-in-editor-btn--${btnState}`}
+      className={`icon-only topbar-icon-action open-in-editor-btn open-in-editor-btn--${btnState}`}
       type="button"
       onClick={handleClick}
       disabled={btnState === "opening"}
       title={`在 ${editor.name} 中打开: ${cwd}`}
+      aria-label={`在 ${editor.name} 中打开: ${cwd}`}
     >
       <EditorIcon editorId={editor.id} />
-      <span>{label}</span>
     </button>
   );
 }
@@ -389,31 +387,25 @@ function OpenInEditorButton({ cwd, editors }: { cwd: string; editors: EditorInfo
     return <SingleEditorButton editor={editors[0]} cwd={cwd} />;
   }
 
-  const label =
-    btnState === "opening"
-      ? "打开中…"
-      : btnState === "done"
-      ? "已打开"
-      : `在 ${selectedEditor.name} 中打开`;
-
   return (
     <div className="custom-editor-dropdown" onClick={(e) => e.stopPropagation()}>
       <button
-        className={`icon-action open-in-editor-btn open-in-editor-btn--main open-in-editor-btn--${btnState}`}
+        className={`icon-only topbar-icon-action open-in-editor-btn open-in-editor-btn--main open-in-editor-btn--${btnState}`}
         type="button"
         onClick={handleOpenClick}
         disabled={btnState === "opening"}
         title={`在 ${selectedEditor.name} 中打开: ${cwd}`}
+        aria-label={`在 ${selectedEditor.name} 中打开: ${cwd}`}
       >
         <EditorIcon editorId={selectedEditor.id} />
-        <span>{label}</span>
       </button>
 
       <button
-        className="icon-action editor-dropdown-toggle"
+        className="icon-only editor-dropdown-toggle"
         type="button"
         onClick={() => setIsOpen(!isOpen)}
         title="选择其他编辑器"
+        aria-label="选择其他编辑器"
       >
         <ChevronDown size={14} />
       </button>
@@ -461,9 +453,12 @@ function App() {
   const [handoverPreview, setHandoverPreview] = useState<HandoverPreview | null>(null);
   const [handoverDraft, setHandoverDraft] = useState<HandoverDraft | null>(null);
   const [handoverResult, setHandoverResult] = useState<HandoverResult | null>(null);
+  const [handoverFileResult, setHandoverFileResult] = useState<HandoverFileResult | null>(null);
   const [isHandoverPreviewLoading, setIsHandoverPreviewLoading] = useState(false);
   const [isHandoverDraftLoading, setIsHandoverDraftLoading] = useState(false);
   const [handoverDraftError, setHandoverDraftError] = useState<string | null>(null);
+  const [isCreatingHandoverFile, setIsCreatingHandoverFile] = useState(false);
+  const [copiedHandoverPath, setCopiedHandoverPath] = useState(false);
   const [isForwarding, setIsForwarding] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleteSessionId, setDeleteSessionId] = useState<string | null>(null);
@@ -476,6 +471,7 @@ function App() {
   const [newConversationWorkspaceHistory, setNewConversationWorkspaceHistory] = useState<string[]>([]);
   const [noneWorkspaceSessionIds, setNoneWorkspaceSessionIds] = useState<string[]>([]);
   const [hiddenWorkspacePaths, setHiddenWorkspacePaths] = useState<string[]>([]);
+  const [collapsedWorkspacePaths, setCollapsedWorkspacePaths] = useState<string[]>([]);
   const [pinnedItems, setPinnedItems] = useState<PinnedItem[]>([]);
   const [isSelectingWorkspaceDirectory, setIsSelectingWorkspaceDirectory] = useState(false);
 
@@ -484,7 +480,6 @@ function App() {
   const [detectedEditors, setDetectedEditors] = useState<EditorInfo[]>([]);
   const [activeNewMenuFolder, setActiveNewMenuFolder] = useState<string | null>(null);
   const [activeWorkspaceMenuFolder, setActiveWorkspaceMenuFolder] = useState<string | null>(null);
-  const [expandedAgents, setExpandedAgents] = useState<Record<string, boolean>>({});
 
   // Sidebar resizer state & logic
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
@@ -519,10 +514,6 @@ function App() {
       document.removeEventListener("mouseup", handleMouseUp);
     };
   }, [isDragging]);
-  const [workspaceAgentHistory, setWorkspaceAgentHistory] = useState<
-    Record<string, { agentId: string; agentName: string }[]>
-  >({});
-
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === activeSessionId) ?? null,
     [activeSessionId, sessions],
@@ -538,6 +529,10 @@ function App() {
   const hiddenWorkspacePathSet = useMemo(
     () => new Set(hiddenWorkspacePaths),
     [hiddenWorkspacePaths],
+  );
+  const collapsedWorkspacePathSet = useMemo(
+    () => new Set(collapsedWorkspacePaths),
+    [collapsedWorkspacePaths],
   );
   const noneWorkspaceSessions = useMemo(
     () =>
@@ -571,6 +566,8 @@ function App() {
   const shownHandoverMode = handoverResult?.handoverMode ?? handoverDraft?.effectiveMode ?? effectiveHandoverMode;
   const shownHandoverPath = handoverResult?.handoverPath ?? null;
   const shownEvidencePath = handoverResult?.evidencePath ?? handoverDraft?.evidencePath ?? null;
+  const activeHandoverFile =
+    handoverFileResult?.sourceSession.id === activeSessionId ? handoverFileResult : null;
   const pendingDeleteSession = useMemo(
     () => sessions.find((session) => session.id === deleteSessionId) ?? null,
     [deleteSessionId, sessions],
@@ -651,6 +648,10 @@ function App() {
       }];
     });
   }, [noneWorkspaceSessionIdSet, pinnedItems, sessions, workspaceNameByPath]);
+  const sessionById = useMemo(
+    () => new Map(sessions.map((session) => [session.id, session])),
+    [sessions],
+  );
 
   async function refreshSessions(nextActiveId?: string) {
     const nextSessions = await listSessions();
@@ -701,6 +702,16 @@ function App() {
       }
       const next = current.filter((id) => id !== sessionId);
       localStorage.setItem(NONE_WORKSPACE_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  }
+
+  function toggleWorkspaceCollapsed(path: string) {
+    setCollapsedWorkspacePaths((current) => {
+      const next = current.includes(path)
+        ? current.filter((item) => item !== path)
+        : [...current, path];
+      localStorage.setItem(COLLAPSED_WORKSPACE_STORAGE_KEY, JSON.stringify(next));
       return next;
     });
   }
@@ -843,63 +854,6 @@ function App() {
     });
   }
 
-  // Update workspace agent history
-  function updateWorkspaceAgentHistory(path: string, agentId: string, agentName: string) {
-    const normalizedPath = normalizeWorkspacePath(path);
-    if (!normalizedPath) {
-      return;
-    }
-    const saved = localStorage.getItem("waypoint_workspace_agent_history");
-    let history: Record<string, { agentId: string; agentName: string }[]> = {};
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (parsed && typeof parsed === "object") {
-          history = parsed;
-        }
-      } catch (e) {
-        console.error("[Waypoint] Failed to parse workspace agent history:", e);
-      }
-    }
-    
-    if (!history[normalizedPath] || !Array.isArray(history[normalizedPath])) {
-      history[normalizedPath] = [];
-    }
-    
-    if (!history[normalizedPath].some(a => a.agentId === agentId)) {
-      history[normalizedPath].push({ agentId, agentName });
-      setWorkspaceAgentHistory(history);
-      localStorage.setItem("waypoint_workspace_agent_history", JSON.stringify(history));
-    }
-  }
-
-  // Remove agent from history for a folder path
-  function handleRemoveAgentFromHistory(path: string, agentId: string) {
-    const saved = localStorage.getItem("waypoint_workspace_agent_history");
-    if (!saved) return;
-    try {
-      const history = JSON.parse(saved);
-      if (history && typeof history === "object" && Array.isArray(history[path])) {
-        history[path] = history[path].filter((a: any) => a.agentId !== agentId);
-        if (history[path].length === 0) {
-          delete history[path];
-        }
-        setWorkspaceAgentHistory(history);
-        localStorage.setItem("waypoint_workspace_agent_history", JSON.stringify(history));
-      }
-    } catch (e) {
-      console.error("[Waypoint] Failed to remove agent from history:", e);
-    }
-  }
-
-  function toggleAgentGroup(path: string, agentId: string) {
-    const key = agentTreeKey(path, agentId);
-    setExpandedAgents((current) => ({
-      ...current,
-      [key]: !(current[key] ?? false),
-    }));
-  }
-
   // Create session for a specific agent and path
   async function handleCreateSessionForPath(agentId: string, path: string) {
     setError(null);
@@ -914,7 +868,6 @@ function App() {
       const session = await createAgentSession(agentId, normalizedPath);
       rememberNewConversationWorkspace(session.cwd);
       revealWorkspacePath(session.cwd);
-      updateWorkspaceAgentHistory(session.cwd, session.agentId, session.agentName);
       await refreshSessions(session.id);
     } catch (err) {
       setError(String(err));
@@ -973,7 +926,6 @@ function App() {
       } else {
         rememberNewConversationWorkspace(session.cwd);
         revealWorkspacePath(session.cwd);
-        updateWorkspaceAgentHistory(session.cwd, session.agentId, session.agentName);
       }
       setNewConversationOpen(false);
       await refreshSessions(session.id);
@@ -1023,7 +975,6 @@ function App() {
         markSessionAsNoneWorkspace(nextSession.id);
       } else {
         revealWorkspacePath(nextSession.cwd);
-        updateWorkspaceAgentHistory(nextSession.cwd, nextSession.agentId, nextSession.agentName);
       }
       await refreshSessions(nextSession.id);
       setError(
@@ -1067,6 +1018,53 @@ function App() {
     setHandoverDraftError(null);
   }
 
+  async function copyTextToClipboard(value: string) {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return;
+    }
+
+    const textarea = document.createElement("textarea");
+    textarea.value = value;
+    textarea.setAttribute("readonly", "true");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    document.body.removeChild(textarea);
+    if (!copied) {
+      throw new Error("Clipboard copy failed");
+    }
+  }
+
+  async function handleCreateHandoverFile() {
+    if (!activeSessionId || isCreatingHandoverFile) return;
+    setError(null);
+    setCopiedHandoverPath(false);
+    setIsCreatingHandoverFile(true);
+    try {
+      const result = await createHandoverFile(activeSessionId, "", "recommended");
+      setHandoverFileResult(result);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setIsCreatingHandoverFile(false);
+    }
+  }
+
+  async function handleCopyHandoverPath() {
+    if (!activeHandoverFile?.handoverPath) return;
+    setError(null);
+    try {
+      await copyTextToClipboard(activeHandoverFile.handoverPath);
+      setCopiedHandoverPath(true);
+      window.setTimeout(() => setCopiedHandoverPath(false), 1600);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
   async function handleContinue() {
     if (!activeSessionId) return;
     if (handoverMode === "existing" && !handoverTargetId) return;
@@ -1085,11 +1083,6 @@ function App() {
               handoverNote,
               handoverContentMode,
             );
-      updateWorkspaceAgentHistory(
-        result.targetSession.cwd,
-        result.targetSession.agentId,
-        result.targetSession.agentName,
-      );
       revealWorkspacePath(result.targetSession.cwd);
       setHandoverNote("");
       setHandoverOpen(false);
@@ -1181,14 +1174,23 @@ function App() {
       }
       return;
     }
+    setError(null);
     setActiveSessionId(session.id);
   }
 
-  function renderSessionItem(session: SessionInfo) {
+  function renderSessionItem(
+    session: SessionInfo,
+    options: { childCount?: number; parentSession?: SessionInfo | null } = {},
+  ) {
     const pinned = isSessionPinned(session.id);
+    const parentLabel = options.parentSession
+      ? `from ${sessionDisplayTitle(options.parentSession)}`
+      : null;
     return (
       <div
-        className={`workspace-session-item chat-history-item ${session.id === activeSessionId ? "active" : ""} ${
+        className={`workspace-session-item chat-history-item ${options.parentSession ? "linked-child" : ""} ${
+          options.childCount ? "linked-parent" : ""
+        } ${session.id === activeSessionId ? "active" : ""} ${
           pinned ? "pinned" : ""
         }`}
         key={`session-${session.id}`}
@@ -1200,11 +1202,18 @@ function App() {
           <span className="session-copy">
             <span className="session-label">{sessionDisplayTitle(session)}</span>
             <span className="session-subtitle">
-              {formatSessionTime(session.createdAt)} · {sessionStateHint(session.status)}
+              <span className={`session-agent-badge agent-${session.agentId}`}>{session.agentName}</span>
+              <span className="session-meta-text">
+                {formatSessionTime(session.createdAt)} · {sessionStateHint(session.status)}
+                {parentLabel ? ` · ${parentLabel}` : ""}
+              </span>
             </span>
           </span>
         </div>
         <div className="session-actions">
+          {options.childCount ? (
+            <span className="session-lineage-count">{options.childCount} next</span>
+          ) : null}
           <span className={`session-state ${session.status}`}>{sessionStateLabel(session.status)}</span>
           <button
             className={`session-pin-btn ${pinned ? "active" : ""}`}
@@ -1246,6 +1255,31 @@ function App() {
             <Trash2 size={10} />
           </button>
         </div>
+      </div>
+    );
+  }
+
+  function renderSessionNode(node: SessionTreeNode, depth = 0, lineage = new Set<string>()): ReactNode {
+    if (lineage.has(node.session.id)) {
+      return null;
+    }
+    const nextLineage = new Set(lineage);
+    nextLineage.add(node.session.id);
+    const parentSession = node.session.parentSessionId
+      ? sessionById.get(node.session.parentSessionId) ?? null
+      : null;
+
+    return (
+      <div className="session-tree-node" data-depth={depth} key={node.session.id}>
+        {renderSessionItem(node.session, {
+          childCount: node.children.length,
+          parentSession,
+        })}
+        {node.children.length > 0 ? (
+          <div className="session-tree-children">
+            {node.children.map((child) => renderSessionNode(child, depth + 1, nextLineage))}
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -1391,16 +1425,24 @@ function App() {
           }
         }
 
-        // Load workspace agent history
-        const savedHistory = localStorage.getItem("waypoint_workspace_agent_history");
-        if (savedHistory) {
+        const savedCollapsedWorkspaces = localStorage.getItem(COLLAPSED_WORKSPACE_STORAGE_KEY);
+        if (savedCollapsedWorkspaces) {
           try {
-            const parsed = JSON.parse(savedHistory);
-            const normalized = normalizeWorkspaceAgentHistory(parsed);
-            setWorkspaceAgentHistory(normalized);
-            localStorage.setItem("waypoint_workspace_agent_history", JSON.stringify(normalized));
+            const parsed = JSON.parse(savedCollapsedWorkspaces);
+            if (Array.isArray(parsed)) {
+              const normalized = Array.from(
+                new Set(
+                  parsed
+                    .filter((item): item is string => typeof item === "string")
+                    .map((item) => normalizeWorkspacePath(item))
+                    .filter(Boolean),
+                ),
+              );
+              setCollapsedWorkspacePaths(normalized);
+              localStorage.setItem(COLLAPSED_WORKSPACE_STORAGE_KEY, JSON.stringify(normalized));
+            }
           } catch (e) {
-            console.error("[Waypoint] Failed to parse workspace agent history:", e);
+            console.error("[Waypoint] Failed to parse collapsed workspaces:", e);
           }
         }
 
@@ -1515,46 +1557,84 @@ function App() {
           </div>
 
           <div className="workspace-tree">
-            <div className="workspace-folder-node none-workspace-node">
-              <div className="workspace-folder-header">
-                <div className="workspace-folder-info" title="none">
-                  <Folder size={14} className="folder-icon" />
-                  <span className="folder-name">无工作区会话</span>
-                </div>
-                <div className="workspace-folder-actions">
-                  <button
-                    type="button"
-                    className="new-session-btn"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setActiveNewMenuFolder(null);
-                      setActiveWorkspaceMenuFolder(null);
-                      openNewConversationModal(NONE_WORKSPACE_VALUE);
+            {(() => {
+              const noneCollapsed = collapsedWorkspacePathSet.has(NONE_WORKSPACE_VALUE);
+              return (
+                <div className={`workspace-folder-node none-workspace-node ${noneCollapsed ? "collapsed" : ""}`}>
+                  <div
+                    className="workspace-folder-header"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => toggleWorkspaceCollapsed(NONE_WORKSPACE_VALUE)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        toggleWorkspaceCollapsed(NONE_WORKSPACE_VALUE);
+                      }
                     }}
-                    title="新建无工作区会话"
+                    aria-expanded={!noneCollapsed}
                   >
-                    <Plus size={12} />
-                    <span>New</span>
-                  </button>
-                </div>
-              </div>
-              <div className="workspace-sessions-list">
-                {noneWorkspaceSessions.length > 0 ? (
-                  noneWorkspaceSessions.map((session) => renderSessionItem(session))
-                ) : (
-                  <div className="no-sessions">暂无会话</div>
-                )}
-              </div>
-            </div>
-
-            {workspacesWithSessions.map(({ folder, sessions: folderSessions }) => (
-              <div className="workspace-folder-node" key={folder.path}>
-                <div className="workspace-folder-header">
-                  <div className="workspace-folder-info" title={folder.path}>
-                    <Folder size={14} className="folder-icon" />
-                    <span className="folder-name">{folder.name}</span>
+                    <div className="workspace-folder-info" title="none">
+                      {noneCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                      <Folder size={14} className="folder-icon" />
+                      <span className="folder-name">无工作区会话</span>
+                    </div>
+                    <div className="workspace-folder-actions" onClick={(event) => event.stopPropagation()}>
+                      <button
+                        type="button"
+                        className="new-session-btn"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setActiveNewMenuFolder(null);
+                          setActiveWorkspaceMenuFolder(null);
+                          openNewConversationModal(NONE_WORKSPACE_VALUE);
+                        }}
+                        title="新建无工作区会话"
+                      >
+                        <Plus size={12} />
+                        <span>New</span>
+                      </button>
+                    </div>
                   </div>
-                  <div className="workspace-folder-actions">
+                  {!noneCollapsed ? (
+                    <div className="workspace-sessions-list">
+                      {(() => {
+                        const tree = buildSessionForest(noneWorkspaceSessions);
+                        return tree.length > 0 ? (
+                          tree.map((node) => renderSessionNode(node))
+                        ) : (
+                          <div className="no-sessions">暂无会话</div>
+                        );
+                      })()}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })()}
+
+            {workspacesWithSessions.map(({ folder, sessions: folderSessions }) => {
+              const collapsed = collapsedWorkspacePathSet.has(folder.path);
+              return (
+                <div className={`workspace-folder-node ${collapsed ? "collapsed" : ""}`} key={folder.path}>
+                  <div
+                    className="workspace-folder-header"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => toggleWorkspaceCollapsed(folder.path)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        toggleWorkspaceCollapsed(folder.path);
+                      }
+                    }}
+                    aria-expanded={!collapsed}
+                  >
+                    <div className="workspace-folder-info" title={folder.path}>
+                      {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                      <Folder size={14} className="folder-icon" />
+                      <span className="folder-name">{folder.name}</span>
+                    </div>
+                    <div className="workspace-folder-actions" onClick={(event) => event.stopPropagation()}>
                     <div className="popover-wrapper new-session-popover-wrapper">
                       <button
                         type="button"
@@ -1627,139 +1707,25 @@ function App() {
                         </div>
                       )}
                     </div>
+                    </div>
                   </div>
+
+                  {!collapsed ? (
+                    <div className="workspace-sessions-list">
+                      {(() => {
+                        const tree = buildSessionForest(folderSessions);
+
+                        if (tree.length === 0) {
+                          return <div className="no-sessions">暂无会话</div>;
+                        }
+
+                        return tree.map((node) => renderSessionNode(node));
+                      })()}
+                    </div>
+                  ) : null}
                 </div>
-
-                <div className="workspace-sessions-list">
-                  {(() => {
-                    const history = workspaceAgentHistory[folder.path] || [];
-                    const agentGroups = new Map<
-                      string,
-                      { agentId: string; agentName: string; sessions: SessionInfo[]; rememberedOnly: boolean }
-                    >();
-
-                    folderSessions.forEach((session) => {
-                      if (!agentGroups.has(session.agentId)) {
-                        agentGroups.set(session.agentId, {
-                          agentId: session.agentId,
-                          agentName: session.agentName,
-                          sessions: [],
-                          rememberedOnly: false,
-                        });
-                      }
-                      agentGroups.get(session.agentId)?.sessions.push(session);
-                    });
-
-                    history.forEach((histAgent) => {
-                      if (!agentGroups.has(histAgent.agentId)) {
-                        agentGroups.set(histAgent.agentId, {
-                          agentId: histAgent.agentId,
-                          agentName: histAgent.agentName,
-                          sessions: [],
-                          rememberedOnly: true,
-                        });
-                      }
-                    });
-
-                    const groups = Array.from(agentGroups.values()).map((group) => ({
-                      ...group,
-                      sessions: [...group.sessions].sort((a, b) => a.createdAt - b.createdAt),
-                    }));
-
-                    groups.sort((a, b) => {
-                      const aOldest = a.sessions[0]?.createdAt ?? 0;
-                      const bOldest = b.sessions[0]?.createdAt ?? 0;
-                      if (aOldest !== bOldest) {
-                        return aOldest - bOldest;
-                      }
-                      return a.agentName.localeCompare(b.agentName);
-                    });
-
-                    if (groups.length === 0) {
-                      return <div className="no-sessions">无活跃会话或历史记录</div>;
-                    }
-
-                    return groups.map((group) => {
-                      const groupKey = agentTreeKey(folder.path, group.agentId);
-                      const activeInGroup = group.sessions.some((session) => session.id === activeSessionId);
-                      const expanded = expandedAgents[groupKey] ?? activeInGroup;
-                      const runningCount = group.sessions.filter((session) => session.status === "running").length;
-                      const agentAvailable = agents.some(
-                        (agent) => agent.id === group.agentId && agent.available,
-                      );
-
-                      return (
-                        <div className="agent-history-group" key={groupKey}>
-                          <div
-                            role="button"
-                            tabIndex={0}
-                            className={`agent-history-header ${activeInGroup ? "active" : ""}`}
-                            onClick={() => toggleAgentGroup(folder.path, group.agentId)}
-                            onKeyDown={(event) => {
-                              if (event.key === "Enter" || event.key === " ") {
-                                event.preventDefault();
-                                toggleAgentGroup(folder.path, group.agentId);
-                              }
-                            }}
-                          >
-                            {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-                            <Bot size={13} />
-                            <span className="agent-history-name">{group.agentName}</span>
-                            <button
-                              type="button"
-                              className="agent-history-new-btn"
-                              disabled={isLaunching || !agentAvailable}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                handleCreateSessionForPath(group.agentId, folder.path);
-                              }}
-                              onKeyDown={(event) => event.stopPropagation()}
-                              title={
-                                agentAvailable
-                                  ? `在当前目录新建 ${group.agentName} 会话`
-                                  : `${group.agentName} 当前不可用`
-                              }
-                            >
-                              <Plus size={12} />
-                            </button>
-                            <span className="agent-history-badges">
-                              <span className="agent-history-count">
-                                {group.sessions.length > 0 ? `${group.sessions.length}` : "0"}
-                              </span>
-                              {runningCount > 0 ? (
-                                <span className="agent-history-live">{runningCount} live</span>
-                              ) : null}
-                            </span>
-                          </div>
-
-                          {expanded ? (
-                            <div className="agent-history-children">
-                              {group.sessions.length === 0 ? (
-                                <div className="agent-empty-history">
-                                  <span>暂无历史会话</span>
-                                  {group.rememberedOnly ? (
-                                    <button
-                                      type="button"
-                                      className="session-remove-history-btn"
-                                      onClick={() => handleRemoveAgentFromHistory(folder.path, group.agentId)}
-                                      title="删除该 Agent 历史记录"
-                                    >
-                                      <X size={10} />
-                                    </button>
-                                  ) : null}
-                                </div>
-                              ) : (
-                                group.sessions.map((session) => renderSessionItem(session))
-                              )}
-                            </div>
-                          ) : null}
-                        </div>
-                      );
-                    });
-                  })()}
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </section>
 
@@ -1792,23 +1758,50 @@ function App() {
 
       <section className="workspace">
         <header className="topbar">
-          <div>
+          <div className="topbar-session">
             <p className="eyebrow">Active Session</p>
             <h2>{activeSession?.title ?? "No session"}</h2>
             {activeSession ? (
               <p className="session-path">{activeSession.command} · {activeSession.cwd}</p>
             ) : null}
+            {activeHandoverFile ? (
+              <div className="handover-file-result" title={activeHandoverFile.handoverPath}>
+                <code>{activeHandoverFile.handoverPath}</code>
+                <button
+                  className="icon-only handover-copy-btn"
+                  type="button"
+                  onClick={handleCopyHandoverPath}
+                  title="Copy absolute path"
+                >
+                  {copiedHandoverPath ? (
+                    <Check aria-hidden="true" size={14} />
+                  ) : (
+                    <Copy aria-hidden="true" size={14} />
+                  )}
+                </button>
+              </div>
+            ) : null}
           </div>
           <div className="topbar-actions">
             <button
-              className="icon-action"
+              className="icon-only topbar-icon-action"
+              type="button"
+              onClick={handleCreateHandoverFile}
+              disabled={!activeSessionId || isCreatingHandoverFile}
+              title={isCreatingHandoverFile ? "Creating handover file" : "Create handover file"}
+              aria-label={isCreatingHandoverFile ? "Creating handover file" : "Create handover file"}
+            >
+              <FilePlus aria-hidden="true" size={16} />
+            </button>
+            <button
+              className="icon-only topbar-icon-action"
               type="button"
               onClick={openHandover}
               disabled={!activeSessionId}
-              title="Continue from session"
+              title="Handover to another session"
+              aria-label="Handover to another session"
             >
-              <Send aria-hidden="true" size={15} />
-              <span>Handover</span>
+              <Send aria-hidden="true" size={16} />
             </button>
             {activeSession?.cwd && (
               <OpenInEditorButton cwd={activeSession.cwd} editors={detectedEditors} />
@@ -1816,7 +1809,20 @@ function App() {
           </div>
         </header>
 
-        {error ? <div className="error-banner">{error}</div> : null}
+        {error ? (
+          <div className="error-banner" role="alert">
+            <span>{error}</span>
+            <button
+              type="button"
+              className="error-banner-close"
+              onClick={() => setError(null)}
+              title="Close"
+              aria-label="Close error"
+            >
+              <X aria-hidden="true" size={14} />
+            </button>
+          </div>
+        ) : null}
 
         <div className="output-layout">
           <div className="terminal-frame">

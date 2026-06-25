@@ -190,30 +190,159 @@ npm run tauri:dev
 6. waypoint 会把 handover prompt 注入已有目标 session。
 ```
 
-当前 handover 是 MVP 实现：它使用后端 ring buffer 作为最近上下文，并将完整 prompt 写入 `~/.waypoint/<workspace-name>/handover-*.md`。主流程是创建新 session 并继续上下文；Existing Session 模式作为高级能力保留，会通过 bracketed paste 注入一段指向 handover 文件的短提示。后续版本会加入可预览 prompt、可编辑 prompt、结构化 transcript、session lineage 和 agent-specific adapter。
+### Native session id 与恢复逻辑
 
-不同 agent 的 Continue 注入策略：
+waypoint 自己的 session id 存在 `~/.waypoint/sessions/<session-id>/meta.json` 中；如果某个 agent 支持原生恢复，waypoint 会在 `nativeSessionRef` 中记录该 agent 的 native id、可选 project、恢复命令和发现时间。恢复历史会话时，后端先重新解析/补全 native 信息，再生成对应 agent 的 resume 命令。
+
+不同 agent 的 native id 策略：
 
 ```text
-Antigravity CLI:
-  waypoint 将完整 handover 写入 ~/.waypoint/<workspace-name>/handover-*.md。
-  新 session 使用 agy --prompt-interactive "Read this exact handover file..."。
-  这样 Antigravity 只接收一段很短的启动 prompt，避免长 diff/context 卡住 TUI。
-  Antigravity 的 handover 文件使用 compact 模板：只包含 git status、少量最近上下文和操作指令，不内联完整 diff。
+Claude Code:
+  创建会话时，waypoint 将自己的 session id 作为 Claude 的 --session-id 注入。
+  如果启动参数里已经包含 --resume/-r/--session-id，则不重复注入。
+  meta.nativeSessionRef.id = waypoint session id。
+  恢复前会确认 ~/.claude/projects/<workspace-as-claude-project>/<id>.jsonl 存在；
+  如果标准路径不存在，会在 ~/.claude/projects 下按文件名兜底搜索 <id>.jsonl。
+  恢复命令：claude --resume <id>。
 
 Codex:
-  使用 codex --no-alt-screen 启动，减少嵌入式 xterm 中的 alternate screen 闪屏。
-  新 session 的启动提示直接包含 handover 文件路径。
+  Codex 当前不在创建时强行指定 native id。
+  如果 meta 里已有 native id，恢复命令为 codex resume <id>。
+  如果 meta 没有 native id，恢复命令退化为 codex resume --last。
+  读取原生 transcript 时，会优先用 native id 在 ~/.codex/sessions 和
+  ~/.codex/archived_sessions 里查找；如果没有 native id，则按 workspace cwd
+  和 session 创建时间查找最近的 Codex transcript。
+
+Antigravity CLI (agy):
+  agy 不支持在启动时由外部指定 conversation id。
+  waypoint 在 agy 第一次真实提交用户输入时，额外向 PTY 发送：
+    <!-- waypoint_session_id: <waypoint-session-id> -->
+  这个标记会落入 agy 的原生 transcript。
+  在 agy 进程自然退出、kill/stop、恢复前，以及构建 handover 时，
+  waypoint 会扫描 ~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript.jsonl，
+  grep waypoint_session_id 标记；匹配到的 brain 目录名就是 agy conversation id。
+  meta.nativeSessionRef.id = agy conversation id。
+  如果 waypoint 自己的终端 transcript 里出现 agy 打印的
+  "Resume in the same project" 行，会解析其中的 --project=<project> 作为补充。
+  恢复命令：agy --conversation=<conversation-id> [--project=<project>]。
 
 GitHub Copilot:
-  新 session 使用 copilot -i "Read this exact handover file..."。
-  waypoint 会将 handover 目录通过 --add-dir 加入允许访问范围。
+  创建会话时，waypoint 将自己的 session id 作为 --session-id=<id> 注入。
+  如果启动参数里已有 --continue/--resume/-r/--session-id，则不重复注入。
+  对 gh copilot 形式的命令，会在必要时通过 -- 分隔 Copilot CLI 参数。
+  meta.nativeSessionRef.id = waypoint session id。
+  恢复命令：copilot --resume=<id> 或 gh copilot -- --resume=<id>。
 
+Shell:
+  普通 Shell 没有 agent native session id，waypoint 只保留自己的 PTY transcript 和 replay。
+```
+
+### Handover 文件生成逻辑
+
+handover 不直接把完整上下文塞进目标 agent 的命令行。waypoint 会先生成文件，再让目标 agent 读取这个精确文件。
+
+文件路径与模式：
+
+```text
+主文件：
+  ~/.waypoint/<workspace-name>/handover-<uuid>.md
+
+Compact 模式的完整证据文件：
+  ~/.waypoint/<workspace-name>/handover-<uuid>-full-evidence.md
+
+workspace-name：
+  取 workspace 路径最后一级目录名；无法解析时使用 workspace。
+
+模式选择：
+  Recommended 模式下，如果估算上下文超过 32,000 字符，使用 Compact；
+  否则使用 Full。
+  用户也可以显式选择 Compact 或 Full。
+```
+
+handover 文件会收集以下信息：
+
+```text
+1. Source session / target session 的 agent、命令、workspace。
+2. 用户在 Continue 面板填写的 note。
+3. git branch、git status --short。
+4. unstaged diff 与 staged diff 的 stat、文件列表和 diff preview。
+5. 最近的 source terminal context。
+6. 最近用户输入。
+7. 上一跳 inherited handover context。
+8. 截图/图片附件的精确路径、类型和大小。
+9. agy 会话生成的 markdown artifacts：
+   从 ~/.gemini/antigravity-cli/brain/<conversation-id> 读取顶层 .md 文件。
+```
+
+上下文来源优先级：
+
+```text
 Claude Code:
-  新 session 的启动提示直接包含 handover 文件路径。
+  优先读取 ~/.claude/projects/.../<native-id>.jsonl 原生 transcript。
+  找不到时回退 waypoint 自己的 terminal/chat buffer。
 
-Shell / Existing Session:
-  暂时通过 PTY bracketed paste 注入一段指向 handover 文件的短提示。
+Codex:
+  优先读取 ~/.codex/sessions 或 archived_sessions 下匹配 native id 的 transcript。
+  没有 native id 时按 workspace 与创建时间选最近 transcript。
+  找不到时回退 waypoint 自己的 terminal/chat buffer。
+
+Antigravity CLI:
+  先通过 waypoint_session_id 反查 conversation id。
+  再读取 ~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/logs/transcript.jsonl。
+  找不到时回退 waypoint 自己的 terminal/chat buffer。
+
+GitHub Copilot / Shell:
+  主要使用 waypoint 自己的 terminal/chat buffer 与输入 ring。
+```
+
+Full 与 Compact 的差异：
+
+```text
+Full:
+  主 handover 文件中包含完整结构、最近上下文、用户输入、git 状态、
+  diff stat、文件列表和受限长度的 diff preview。
+
+Compact:
+  主 handover 文件只保留更短的上下文、用户输入、git 状态、diff stat 和文件列表；
+  不内联完整 diff preview。
+  同时生成 *-full-evidence.md，保存完整证据、完整 git diff 和 staged diff。
+  Compact 主文件会引用 evidence 文件路径，目标 agent 可按需读取该精确文件。
+```
+
+### 不同 agent 的 Handover 启动/注入策略
+
+```text
+Claude Code:
+  New Session 时先生成 handover 文件。
+  启动命令形态：claude "<startup prompt>"。
+  startup prompt 要求只读取 handover 文件，并包含新的 waypoint_session_id 标记。
+  创建目标 session 后记录 parentSessionId 和 handoverRootId。
+
+Codex:
+  默认命令带 --no-alt-screen，减少嵌入式 xterm 中的 alternate screen 闪屏。
+  New Session 时会把 handover 文件所在目录通过 --add-dir 加入允许访问范围。
+  启动 prompt 直接指向 handover 文件，并包含新的 waypoint_session_id 标记。
+  新建后等待更长启动延迟再注入，降低 Codex 尚未准备好时写入失败的概率。
+
+Antigravity CLI (agy):
+  New Session 使用 agy --prompt-interactive "<startup prompt>"。
+  waypoint 会通过 --add-dir 授权 handover 文件所在目录。
+  startup prompt 只包含 handover 文件路径和新的 waypoint_session_id 标记，
+  避免长 diff/context 直接进入 agy TUI。
+
+GitHub Copilot:
+  New Session 使用 copilot -i "<startup prompt>"。
+  handover 文件目录通过 --add-dir 传入；gh copilot 形态会通过 -- 分隔参数。
+
+Existing Session / Forward:
+  先生成 handover 文件。
+  通过 PTY bracketed paste 注入一段短提示：
+    只读取这个 handover 文件，确认 context loaded，然后等待下一步指令。
+  注入前会检查目标进程是否已经退出；失败时错误中会带最近 target 输出。
+
+Create Handover File:
+  右上角的 handover file 按钮只生成文件，不启动/注入任何 agent。
+  target 被标记为 Manual handover，适合手动复制文件路径给外部工具。
 ```
 
 每次 handover 的目标 session 会记住这次 handover 摘要；如果之后继续从该目标 session 再 handover 到第三个 agent，waypoint 会把上一跳 handover 作为 inherited context 一并写入新的 handover 文件。

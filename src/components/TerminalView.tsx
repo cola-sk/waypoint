@@ -1,15 +1,24 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import {
   attachSession,
+  deleteSessionAttachment,
   detachSession,
+  listSessionAttachments,
   reactivateSession,
   resizeSession,
+  saveSessionAttachment,
   writeSession,
 } from "../api/tauri";
-import type { PtyDataEvent, SessionErrorEvent, SessionEvent, SessionInfo } from "../types";
+import type {
+  PtyDataEvent,
+  SessionAttachmentInfo,
+  SessionErrorEvent,
+  SessionEvent,
+  SessionInfo,
+} from "../types";
 
 type TerminalViewProps = {
   sessionId: string;
@@ -43,6 +52,39 @@ function decodeBase64Bytes(base64: string): Uint8Array | null {
   }
 }
 
+function isImageFile(file: File): boolean {
+  return file.type.startsWith("image/");
+}
+
+function clipboardImageFiles(items: DataTransferItemList | undefined): File[] {
+  if (!items) {
+    return [];
+  }
+  return Array.from(items)
+    .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => Boolean(file));
+}
+
+function dataTransferHasImage(items: DataTransferItemList | undefined): boolean {
+  if (!items) {
+    return false;
+  }
+  return Array.from(items).some((item) => item.kind === "file" && item.type.startsWith("image/"));
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    const chunk = bytes.subarray(offset, offset + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return window.btoa(binary);
+}
+
 function isFocusOrMouseSequence(data: string): boolean {
   return (
     data === "\x1b[I" ||
@@ -59,7 +101,70 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
   const fitAddonRef = useRef<FitAddon | null>(null);
   const [status, setStatus] = useState("connecting");
   const [isRestoring, setIsRestoring] = useState(false);
+  const [attachments, setAttachments] = useState<SessionAttachmentInfo[]>([]);
+  const [isSavingAttachment, setIsSavingAttachment] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const activateAndQueueRef = useRef<((data: string) => void) | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    setAttachments([]);
+    setAttachmentError(null);
+    listSessionAttachments(sessionId)
+      .then((items) => {
+        if (!disposed) {
+          setAttachments(items);
+        }
+      })
+      .catch((err) => {
+        if (!disposed) {
+          setAttachmentError(String(err));
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [sessionId]);
+
+  const saveImageFiles = useCallback(
+    async (files: File[]) => {
+      const imageFiles = files.filter(isImageFile);
+      if (imageFiles.length === 0) {
+        return;
+      }
+      setIsSavingAttachment(true);
+      setAttachmentError(null);
+      try {
+        const saved: SessionAttachmentInfo[] = [];
+        for (const file of imageFiles) {
+          const dataBase64 = await fileToBase64(file);
+          saved.push(await saveSessionAttachment(sessionId, file.type || "image/png", dataBase64));
+        }
+        setAttachments((current) => {
+          const byId = new Map(current.map((attachment) => [attachment.id, attachment]));
+          for (const attachment of saved) {
+            byId.set(attachment.id, attachment);
+          }
+          return Array.from(byId.values()).sort((a, b) => a.createdAt - b.createdAt);
+        });
+      } catch (err) {
+        setAttachmentError(String(err));
+      } finally {
+        setIsSavingAttachment(false);
+      }
+    },
+    [sessionId],
+  );
+
+  const handleDeleteAttachment = async (attachment: SessionAttachmentInfo) => {
+    setAttachmentError(null);
+    try {
+      await deleteSessionAttachment(sessionId, attachment.path);
+      setAttachments((current) => current.filter((item) => item.id !== attachment.id));
+    } catch (err) {
+      setAttachmentError(String(err));
+    }
+  };
 
   useEffect(() => {
     const shell = shellRef.current;
@@ -185,11 +290,39 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
     };
     const handleWindowResize = () => debouncedFitAndResize();
     const handleObservedResize: ResizeObserverCallback = () => debouncedFitAndResize();
+    const handlePaste = (event: ClipboardEvent) => {
+      const files = clipboardImageFiles(event.clipboardData?.items);
+      if (files.length === 0) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      void saveImageFiles(files);
+    };
+    const handleDragOver = (event: DragEvent) => {
+      if (!dataTransferHasImage(event.dataTransfer?.items)) {
+        return;
+      }
+      event.preventDefault();
+      event.dataTransfer!.dropEffect = "copy";
+    };
+    const handleDrop = (event: DragEvent) => {
+      const files = Array.from(event.dataTransfer?.files ?? []).filter(isImageFile);
+      if (files.length === 0) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      void saveImageFiles(files);
+    };
 
     window.addEventListener("resize", handleWindowResize);
     window.addEventListener("focus", refreshAfterWindowRestore);
     window.addEventListener("pageshow", refreshAfterWindowRestore);
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    shell.addEventListener("paste", handlePaste, true);
+    shell.addEventListener("dragover", handleDragOver);
+    shell.addEventListener("drop", handleDrop);
     const resizeObserver = new ResizeObserver(handleObservedResize);
     resizeObserver.observe(shell);
     resizeObserver.observe(surface);
@@ -381,6 +514,9 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
       window.removeEventListener("focus", refreshAfterWindowRestore);
       window.removeEventListener("pageshow", refreshAfterWindowRestore);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      shell.removeEventListener("paste", handlePaste, true);
+      shell.removeEventListener("dragover", handleDragOver);
+      shell.removeEventListener("drop", handleDrop);
       resizeObserver.disconnect();
       unlistenPtyData?.();
       unlistenSessionExited?.();
@@ -389,7 +525,7 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
       terminalRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [sessionId]);
+  }, [sessionId, saveImageFiles]);
 
   const handleContainerClick = () => {
     terminalRef.current?.focus();
@@ -416,30 +552,62 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
           </span>
         </div>
       )}
-      <div className="terminal-shell" data-status={status} onClick={handleContainerClick} ref={shellRef}>
-        <div className="terminal-surface" ref={surfaceRef} />
-        {status === "connecting" ? (
-          <div className="terminal-restore-overlay" role="status" aria-live="polite">
-            <div className="terminal-restore-panel">
-              <span className="terminal-restore-spinner" aria-hidden="true" />
-              <div>
-                <strong>正在加载会话</strong>
-                <span>正在加载终端内容，请稍候...</span>
+      <div className="terminal-workbench">
+        <div className="terminal-shell" data-status={status} onClick={handleContainerClick} ref={shellRef}>
+          <div className="terminal-surface" ref={surfaceRef} />
+          {status === "connecting" ? (
+            <div className="terminal-restore-overlay" role="status" aria-live="polite">
+              <div className="terminal-restore-panel">
+                <span className="terminal-restore-spinner" aria-hidden="true" />
+                <div>
+                  <strong>正在加载会话</strong>
+                  <span>正在加载终端内容，请稍候...</span>
+                </div>
               </div>
             </div>
-          </div>
-        ) : null}
-        {isRestoring && status !== "connecting" ? (
-          <div className="terminal-restore-overlay" role="status" aria-live="polite">
-            <div className="terminal-restore-panel">
-              <span className="terminal-restore-spinner" aria-hidden="true" />
-              <div>
-                <strong>正在恢复会话</strong>
-                <span>正在连接 Agent 原生历史，恢复完成后会继续显示会话内容。</span>
+          ) : null}
+          {isRestoring && status !== "connecting" ? (
+            <div className="terminal-restore-overlay" role="status" aria-live="polite">
+              <div className="terminal-restore-panel">
+                <span className="terminal-restore-spinner" aria-hidden="true" />
+                <div>
+                  <strong>正在恢复会话</strong>
+                  <span>正在连接 Agent 原生历史，恢复完成后会继续显示会话内容。</span>
+                </div>
               </div>
             </div>
+          ) : null}
+        </div>
+        {(attachments.length > 0 || isSavingAttachment || attachmentError) && (
+          <div className="terminal-attachment-tray" onClick={(event) => event.stopPropagation()}>
+            <div className="terminal-attachment-list">
+              {attachments.map((attachment) => (
+                <div className="terminal-attachment-item" key={attachment.id} title={attachment.path}>
+                  {attachment.previewDataUrl ? (
+                    <img src={attachment.previewDataUrl} alt={attachment.filename} />
+                  ) : (
+                    <span className="terminal-attachment-placeholder" aria-hidden="true" />
+                  )}
+                  <div className="terminal-attachment-meta">
+                    <span>{attachment.filename}</span>
+                    <small>{Math.ceil(attachment.sizeBytes / 1024)} KB</small>
+                  </div>
+                  <button
+                    type="button"
+                    className="terminal-attachment-remove"
+                    onClick={() => void handleDeleteAttachment(attachment)}
+                    title="Remove attachment"
+                    aria-label={`Remove ${attachment.filename}`}
+                  >
+                    x
+                  </button>
+                </div>
+              ))}
+              {isSavingAttachment ? <span className="terminal-attachment-saving">Saving screenshot...</span> : null}
+              {attachmentError ? <span className="terminal-attachment-error">{attachmentError}</span> : null}
+            </div>
           </div>
-        ) : null}
+        )}
       </div>
     </div>
   );

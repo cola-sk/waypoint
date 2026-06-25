@@ -13,12 +13,15 @@ export type SessionInfo = {
   lastActiveAt: number;
   firstUserMessage?: string | null;
   nativeSessionRef?: NativeSessionRef | null;
+  parentSessionId?: string | null;
+  handoverRootId?: string | null;
 };
 
 export type NativeSessionRef = {
   provider: string;
   id?: string | null;
   name?: string | null;
+  project?: string | null;
   resumeCommand?: string | null;
   discoveredAt: number;
 };
@@ -55,6 +58,14 @@ export type HandoverResult = {
   evidencePath?: string | null;
 };
 
+export type HandoverFileResult = {
+  prompt: string;
+  sourceSession: SessionInfo;
+  handoverMode: "compact" | "full";
+  handoverPath: string;
+  evidencePath?: string | null;
+};
+
 export type HandoverContentMode = "recommended" | "compact" | "full";
 
 export type HandoverPreview = {
@@ -75,6 +86,16 @@ export type HandoverDraft = {
   effectiveMode: "compact" | "full";
   estimatedChars: number;
   evidencePath?: string | null;
+};
+
+export type SessionAttachmentInfo = {
+  id: string;
+  filename: string;
+  path: string;
+  mime: string;
+  sizeBytes: number;
+  createdAt: number;
+  previewDataUrl?: string | null;
 };
 
 export type AgentPresetInfo = {
