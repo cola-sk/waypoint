@@ -1096,14 +1096,17 @@ impl SessionManager {
         if clean_msg.is_empty() {
             return Ok(());
         }
-        
+
         let is_first_message = {
             let meta = session.meta.lock();
             meta.first_user_message.is_none()
         };
         let info = session.info();
         let payload = if is_first_message && info.agent_id == "agy" {
-            format!("{}\n<!-- waypoint_session_id: {} -->", clean_msg, session_id)
+            format!(
+                "{}\n<!-- waypoint_session_id: {} -->",
+                clean_msg, session_id
+            )
         } else {
             clean_msg.to_string()
         };
@@ -2215,22 +2218,30 @@ fn build_agy_artifacts_context(session_id: &str) -> String {
     let Some(home) = home_dir() else {
         return String::new();
     };
-    let brain_dir = home.join(".gemini").join("antigravity-cli").join("brain").join(&conversation_id);
+    let brain_dir = home
+        .join(".gemini")
+        .join("antigravity-cli")
+        .join("brain")
+        .join(&conversation_id);
     if !brain_dir.is_dir() {
         return String::new();
     }
-    
+
     let mut artifact_blocks = Vec::new();
     if let Ok(entries) = fs::read_dir(brain_dir) {
         let mut sorted_entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
         sorted_entries.sort_by_key(|entry| entry.file_name());
-        
+
         for entry in sorted_entries {
             let path = entry.path();
             if path.is_file() {
                 if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
                     if ext == "md" {
-                        let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                        let filename = path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string();
                         if let Ok(content) = fs::read_to_string(&path) {
                             if !content.trim().is_empty() {
                                 artifact_blocks.push(format!(
@@ -2245,7 +2256,7 @@ fn build_agy_artifacts_context(session_id: &str) -> String {
             }
         }
     }
-    
+
     if artifact_blocks.is_empty() {
         String::new()
     } else {
@@ -2700,8 +2711,12 @@ fn list_session_attachment_infos(
     if !dir.exists() {
         return Ok(Vec::new());
     }
-    let entries = fs::read_dir(&dir)
-        .map_err(|err| format!("failed to read attachment directory {}: {err}", dir.display()))?;
+    let entries = fs::read_dir(&dir).map_err(|err| {
+        format!(
+            "failed to read attachment directory {}: {err}",
+            dir.display()
+        )
+    })?;
     let mut attachments = entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
@@ -4007,11 +4022,16 @@ fn find_agy_conversation_id(session_id: &str) -> Option<String> {
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
         if path.is_dir() {
-            let transcript_path = path.join(".system_generated").join("logs").join("transcript.jsonl");
+            let transcript_path = path
+                .join(".system_generated")
+                .join("logs")
+                .join("transcript.jsonl");
             if transcript_path.is_file() {
                 if let Ok(content) = fs::read_to_string(&transcript_path) {
                     if content.contains(&pattern) {
-                        return path.file_name().map(|name| name.to_string_lossy().into_owned());
+                        return path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned());
                     }
                 }
             }
