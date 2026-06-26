@@ -31,9 +31,11 @@ waypoint 是一个桌面端本地 Agent CLI 会话路由器。它的目标是通
 
 - 自动识别本机 Agent CLI。
 - 选择 agent preset 创建 session。
-- 指定 workspace 目录创建 PTY session。
+- 指定 workspace 目录创建 PTY session；也可选择「None（不绑定工作区）」，会话归入独立分组，重启后仍保留。
 - 多个 session 并存，切换 UI 时不杀掉已有 PTY 进程。
 - 将一个 session 的上下文转发到另一个 session。
+- 新建会话时对 Claude Code / Codex 可勾选「跳过权限确认」dangerous 选项，标志会随 session 持久化，handover 与 native resume 时自动重新应用。
+- 在终端中粘贴或拖入图片时自动保存为会话附件，并在输入行插入 `[paste image N]` 占位符；按 Enter 提交前会反解为附件实际路径再发送给 agent。
 - Xterm 终端输入、输出和 resize。
 
 内置识别的 agent：
@@ -158,6 +160,25 @@ npm run tauri:dev
 6. 点击 Start。
 7. 确认右侧 terminal 启动到该目录下的对应 agent CLI。
 8. 创建第二个 session，切换回来确认第一个 session 没有退出。
+```
+
+### 新建会话选项与图片粘贴
+
+```text
+1. 点击「新对话」打开弹窗。
+2. Agent 选择 Claude Code 或 Codex 时，会显示「跳过权限确认」复选框：
+   - Claude Code 注入 --dangerously-skip-permissions
+   - Codex 注入 --dangerously-bypass-approvals-and-sandbox
+   该标志会写入 session meta，后续 handover、continue、native resume 都会自动重新应用。
+3. 工作区下拉框可选「None（不绑定工作区）」：
+   - 会话归入左侧「无工作区会话」分组。
+   - 启动目录由系统当前目录兜底。
+   - 标记持久化到 meta.json，重启后仍归入该分组。
+4. 在已挂起的 agent 终端中粘贴（Cmd+V）或拖入图片：
+   - Waypoint 把图片保存为会话附件。
+   - 输入行插入 [paste image N] 占位符。
+   - 按 Enter 提交前，占位符会被反解为附件实际文件路径，再连同回车一起发送给 agent。
+   - 半角/全角冒号（: / ：）也能正常输入到 agent。
 ```
 
 ### Continue / Handover 验收
