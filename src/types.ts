@@ -16,6 +16,7 @@ export type SessionInfo = {
   parentSessionId?: string | null;
   handoverRootId?: string | null;
   dangerous: boolean;
+  noneWorkspace: boolean;
 };
 
 export type NativeSessionRef = {
@@ -77,9 +78,6 @@ export type HandoverPreview = {
   terminalContextChars: number;
   userInputChars: number;
   inheritedContextChars: number;
-  gitStatusChars: number;
-  unstagedDiffChars: number;
-  stagedDiffChars: number;
 };
 
 export type HandoverDraft = {

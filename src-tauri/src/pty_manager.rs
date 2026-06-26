@@ -29,16 +29,9 @@ const HANDOVER_CONTEXT_CHARS: usize = 20_000;
 const HANDOVER_USER_INPUT_CHARS: usize = 4_000;
 const COMPACT_HANDOVER_CONTEXT_CHARS: usize = 4_000;
 const COMPACT_USER_INPUT_CHARS: usize = 1_500;
-const COMPACT_GIT_STATUS_CHARS: usize = 4_000;
-const HANDOVER_DIFF_PREVIEW_CHARS: usize = 4_000;
-const HANDOVER_DIFF_STAT_CHARS: usize = 2_500;
-const HANDOVER_DIFF_FILES_CHARS: usize = 2_000;
-const COMPACT_HANDOVER_DIFF_STAT_CHARS: usize = 2_000;
-const COMPACT_HANDOVER_DIFF_FILES_CHARS: usize = 2_000;
 const HANDOVER_INHERITED_CONTEXT_CHARS: usize = 12_000;
 const COMPACT_HANDOVER_INHERITED_CONTEXT_CHARS: usize = 6_000;
 const HANDOVER_INHERITED_STORE_CHARS: usize = 24_000;
-const GIT_OUTPUT_LIMIT_CHARS: usize = 30_000;
 const HANDOVER_LARGE_THRESHOLD_CHARS: usize = 24_000;
 const HANDOVER_INJECT_ATTEMPTS: usize = 8;
 const HANDOVER_INJECT_DELAY_MS: u64 = 350;
@@ -98,6 +91,8 @@ struct SessionMeta {
     handover_root_id: Option<String>,
     #[serde(default)]
     dangerous: bool,
+    #[serde(default)]
+    none_workspace: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -130,6 +125,7 @@ pub struct SessionInfo {
     parent_session_id: Option<String>,
     handover_root_id: Option<String>,
     dangerous: bool,
+    none_workspace: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -216,9 +212,6 @@ pub struct HandoverPreview {
     terminal_context_chars: usize,
     user_input_chars: usize,
     inherited_context_chars: usize,
-    git_status_chars: usize,
-    unstaged_diff_chars: usize,
-    staged_diff_chars: usize,
 }
 
 #[derive(Clone, Copy, Serialize, PartialEq, Eq, Debug)]
@@ -330,12 +323,19 @@ pub fn create_agent_session(
     agent_id: String,
     cwd: String,
     dangerous: Option<bool>,
+    none_workspace: Option<bool>,
     rows: Option<u16>,
     cols: Option<u16>,
 ) -> Result<SessionInfo, String> {
-    state
-        .manager
-        .create_agent_session(app, &agent_id, cwd, dangerous.unwrap_or(false), rows, cols)
+    state.manager.create_agent_session(
+        app,
+        &agent_id,
+        cwd,
+        dangerous.unwrap_or(false),
+        none_workspace.unwrap_or(false),
+        rows,
+        cols,
+    )
 }
 
 #[tauri::command]
@@ -572,6 +572,7 @@ impl SessionManager {
         agent_id: &str,
         cwd: String,
         dangerous: bool,
+        none_workspace: bool,
         rows: Option<u16>,
         cols: Option<u16>,
     ) -> Result<SessionInfo, String> {
@@ -602,6 +603,7 @@ impl SessionManager {
             cols,
             Vec::new(),
             dangerous,
+            none_workspace,
         )
     }
 
@@ -620,6 +622,7 @@ impl SessionManager {
         cols: Option<u16>,
         extra_env: Vec<(String, String)>,
         dangerous: bool,
+        none_workspace: bool,
     ) -> Result<SessionInfo, String> {
         self.spawn_session_with_identity(
             app,
@@ -641,6 +644,7 @@ impl SessionManager {
             None,
             None,
             dangerous,
+            none_workspace,
         )
     }
 
@@ -666,6 +670,7 @@ impl SessionManager {
         parent_session_id: Option<String>,
         handover_root_id: Option<String>,
         dangerous: bool,
+        none_workspace: bool,
     ) -> Result<SessionInfo, String> {
         let cwd_path = PathBuf::from(&cwd);
         if !cwd_path.is_dir() {
@@ -788,6 +793,7 @@ impl SessionManager {
             parent_session_id,
             handover_root_id,
             dangerous,
+            none_workspace,
         };
 
         let session = Arc::new(PtySession {
@@ -1013,6 +1019,7 @@ impl SessionManager {
             meta.parent_session_id.clone(),
             meta.handover_root_id.clone(),
             meta.dangerous,
+            meta.none_workspace,
         )
     }
 
@@ -1376,7 +1383,15 @@ impl SessionManager {
             );
         }
 
-        let target_info = self.create_agent_session(app, target_agent_id, cwd, source_info.dangerous, rows, cols)?;
+        let target_info = self.create_agent_session(
+            app,
+            target_agent_id,
+            cwd,
+            source_info.dangerous,
+            source_info.none_workspace,
+            rows,
+            cols,
+        )?;
         let target = self.get(&target_info.id)?;
         let handover = self.inject_handover(
             &source,
@@ -1438,6 +1453,7 @@ impl SessionManager {
             parent_session_id: None,
             handover_root_id: None,
             dangerous: source_info.dangerous,
+            none_workspace: source_info.none_workspace,
         };
         let handover = self.write_handover_for(
             source,
@@ -1474,8 +1490,14 @@ impl SessionManager {
             None,
             None,
             Some(source_info.id.clone()),
-            Some(source_info.handover_root_id.clone().unwrap_or(source_info.id.clone())),
+            Some(
+                source_info
+                    .handover_root_id
+                    .clone()
+                    .unwrap_or(source_info.id.clone()),
+            ),
             source_info.dangerous,
+            source_info.none_workspace,
         )?;
         let target = self.get(&target_info.id)?;
         self.record_handover_link(&source_info, &target);
@@ -1532,6 +1554,7 @@ impl SessionManager {
             parent_session_id: None,
             handover_root_id: None,
             dangerous: source_info.dangerous,
+            none_workspace: source_info.none_workspace,
         };
         let handover = self.write_handover_for(
             source,
@@ -1570,6 +1593,7 @@ impl SessionManager {
             None,
             None,
             source_info.dangerous,
+            source_info.none_workspace,
         )?;
         let target = self.get(&target_info.id)?;
         self.record_handover_link(&source_info, &target);
@@ -1626,6 +1650,7 @@ impl SessionManager {
             parent_session_id: None,
             handover_root_id: None,
             dangerous: source_info.dangerous,
+            none_workspace: source_info.none_workspace,
         };
         let handover = self.write_handover_for(
             source,
@@ -1668,6 +1693,7 @@ impl SessionManager {
             None,
             None,
             source_info.dangerous,
+            source_info.none_workspace,
         )?;
         let target = self.get(&target_info.id)?;
         self.record_handover_link(&source_info, &target);
@@ -1725,6 +1751,7 @@ impl SessionManager {
             parent_session_id: None,
             handover_root_id: None,
             dangerous: source_info.dangerous,
+            none_workspace: source_info.none_workspace,
         };
         let handover = self.write_handover_for(
             source,
@@ -1765,6 +1792,7 @@ impl SessionManager {
             None,
             None,
             source_info.dangerous,
+            source_info.none_workspace,
         )?;
         let target = self.get(&target_info.id)?;
         self.record_handover_link(&source_info, &target);
@@ -1882,7 +1910,12 @@ impl SessionManager {
                 let target_cwd = cwd
                     .filter(|value| !value.trim().is_empty())
                     .unwrap_or(&source_info.cwd);
-                planned_handover_target_info(agent_id, target_cwd, source_info.dangerous)?
+                planned_handover_target_info(
+                    agent_id,
+                    target_cwd,
+                    source_info.dangerous,
+                    source_info.none_workspace,
+                )?
             }
             other => return Err(format!("unknown handover target mode: {other}")),
         };
@@ -1944,24 +1977,7 @@ impl SessionManager {
         )
         .chars()
         .count();
-        let git_status_chars = git_command(&source_info.cwd, &["status", "--short"])
-            .unwrap_or_default()
-            .chars()
-            .count();
-        let unstaged_diff_chars = git_command(&source_info.cwd, &["diff"])
-            .unwrap_or_default()
-            .chars()
-            .count();
-        let staged_diff_chars = git_command(&source_info.cwd, &["diff", "--staged"])
-            .unwrap_or_default()
-            .chars()
-            .count();
-        let estimated_chars = terminal_context_chars
-            + user_input_chars
-            + inherited_context_chars
-            + git_status_chars
-            + unstaged_diff_chars
-            + staged_diff_chars;
+        let estimated_chars = terminal_context_chars + user_input_chars + inherited_context_chars;
         let is_large = estimated_chars > HANDOVER_LARGE_THRESHOLD_CHARS;
 
         HandoverPreview {
@@ -1972,9 +1988,6 @@ impl SessionManager {
             terminal_context_chars,
             user_input_chars,
             inherited_context_chars,
-            git_status_chars,
-            unstaged_diff_chars,
-            staged_diff_chars,
         }
     }
 
@@ -2005,18 +2018,7 @@ impl SessionManager {
                 evidence_path.as_deref(),
             ),
             EffectiveHandoverMode::Full => {
-                let diff_preview_limit = if matches!(requested_mode, HandoverContentMode::Full) {
-                    GIT_OUTPUT_LIMIT_CHARS
-                } else {
-                    HANDOVER_DIFF_PREVIEW_CHARS
-                };
-                self.build_handover_prompt_for(
-                    source,
-                    source_info,
-                    target_info,
-                    note,
-                    diff_preview_limit,
-                )
+                self.build_handover_prompt_for(source, source_info, target_info, note)
             }
         };
 
@@ -2055,18 +2057,7 @@ impl SessionManager {
                 evidence_path_display.as_deref(),
             ),
             EffectiveHandoverMode::Full => {
-                let diff_preview_limit = if matches!(requested_mode, HandoverContentMode::Full) {
-                    GIT_OUTPUT_LIMIT_CHARS
-                } else {
-                    HANDOVER_DIFF_PREVIEW_CHARS
-                };
-                self.build_handover_prompt_for(
-                    source,
-                    source_info,
-                    target_info,
-                    note.clone(),
-                    diff_preview_limit,
-                )
+                self.build_handover_prompt_for(source, source_info, target_info, note.clone())
             }
         };
         let prompt = edited_prompt
@@ -2107,7 +2098,6 @@ impl SessionManager {
         source_info: &SessionInfo,
         target_info: &SessionInfo,
         note: Option<String>,
-        diff_preview_limit: usize,
     ) -> String {
         self.resolve_and_cache_agy_conversation_id(source, source_info);
 
@@ -2119,25 +2109,12 @@ impl SessionManager {
             &source.inherited_handover.lock(),
             HANDOVER_INHERITED_CONTEXT_CHARS,
         );
-        let git_context = build_git_handover_context(
-            &source_info.cwd,
-            diff_preview_limit,
-            HANDOVER_DIFF_STAT_CHARS,
-            HANDOVER_DIFF_FILES_CHARS,
-            GIT_OUTPUT_LIMIT_CHARS,
-        );
-        let attachments = format_handover_attachments(
-            &list_session_attachment_infos(&source_info.cwd, &source_info.id, false)
-                .unwrap_or_default(),
-        );
         let artifacts = build_agy_artifacts_context(&source_info.id);
 
         build_handover_prompt(
             &source_info,
             &target_info,
             note.as_deref().unwrap_or_default(),
-            &git_context,
-            &attachments,
             &inherited_handover,
             &recent_context,
             &recent_user_inputs,
@@ -2163,25 +2140,12 @@ impl SessionManager {
             &source.inherited_handover.lock(),
             COMPACT_HANDOVER_INHERITED_CONTEXT_CHARS,
         );
-        let git_context = build_git_handover_context(
-            &source_info.cwd,
-            0,
-            COMPACT_HANDOVER_DIFF_STAT_CHARS,
-            COMPACT_HANDOVER_DIFF_FILES_CHARS,
-            COMPACT_GIT_STATUS_CHARS,
-        );
-        let attachments = format_handover_attachments(
-            &list_session_attachment_infos(&source_info.cwd, &source_info.id, false)
-                .unwrap_or_default(),
-        );
         let artifacts = build_agy_artifacts_context(&source_info.id);
 
         build_compact_handover_prompt(
             source_info,
             target_info,
             note.as_deref().unwrap_or_default(),
-            &git_context,
-            &attachments,
             &inherited_handover,
             &recent_context,
             &recent_user_inputs,
@@ -2207,29 +2171,12 @@ impl SessionManager {
             &source.inherited_handover.lock(),
             HANDOVER_INHERITED_CONTEXT_CHARS,
         );
-        let git_branch = git_command(&source_info.cwd, &["branch", "--show-current"])
-            .unwrap_or_else(|| "unknown".to_string());
-        let git_status = git_command(&source_info.cwd, &["status", "--short"])
-            .unwrap_or_else(|| "git status unavailable".to_string());
-        let git_diff = git_command(&source_info.cwd, &["diff"])
-            .unwrap_or_else(|| "git diff unavailable".to_string());
-        let staged_diff = git_command(&source_info.cwd, &["diff", "--staged"])
-            .unwrap_or_else(|| "git staged diff unavailable".to_string());
-        let attachments = format_handover_attachments(
-            &list_session_attachment_infos(&source_info.cwd, &source_info.id, false)
-                .unwrap_or_default(),
-        );
         let artifacts = build_agy_artifacts_context(&source_info.id);
 
         build_full_handover_evidence(
             source_info,
             target_info,
             note.as_deref().unwrap_or_default(),
-            &git_branch,
-            &git_status,
-            &git_diff,
-            &staged_diff,
-            &attachments,
             &inherited_handover,
             &recent_context,
             &recent_user_inputs,
@@ -2609,6 +2556,7 @@ impl SessionMeta {
             parent_session_id: self.parent_session_id.clone(),
             handover_root_id: self.handover_root_id.clone(),
             dangerous: self.dangerous,
+            none_workspace: self.none_workspace,
         }
     }
 }
@@ -3119,11 +3067,7 @@ fn login_shell_env() -> &'static [(String, String)] {
     static CACHE: OnceLock<Vec<(String, String)>> = OnceLock::new();
     CACHE.get_or_init(|| {
         let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-        let output = Command::new(&shell)
-            .arg("-lc")
-            .arg("env")
-            .output()
-            .ok();
+        let output = Command::new(&shell).arg("-lc").arg("env").output().ok();
         let Some(output) = output else {
             return Vec::new();
         };
@@ -3184,7 +3128,12 @@ fn resolve_handover_mode(
     }
 }
 
-fn planned_handover_target_info(agent_id: &str, cwd: &str, dangerous: bool) -> Result<SessionInfo, String> {
+fn planned_handover_target_info(
+    agent_id: &str,
+    cwd: &str,
+    dangerous: bool,
+    none_workspace: bool,
+) -> Result<SessionInfo, String> {
     let definition = agent_definitions()
         .into_iter()
         .find(|definition| definition.id == agent_id)
@@ -3216,6 +3165,7 @@ fn planned_handover_target_info(agent_id: &str, cwd: &str, dangerous: bool) -> R
         parent_session_id: None,
         handover_root_id: None,
         dangerous,
+        none_workspace,
     })
 }
 
@@ -3236,6 +3186,7 @@ fn planned_file_handover_target_info(source: &SessionInfo) -> SessionInfo {
         parent_session_id: None,
         handover_root_id: None,
         dangerous: source.dangerous,
+        none_workspace: source.none_workspace,
     }
 }
 
@@ -3302,39 +3253,10 @@ fn handover_startup_delay_ms(agent_id: &str) -> u64 {
     }
 }
 
-fn format_handover_attachments(attachments: &[SessionAttachmentInfo]) -> String {
-    if attachments.is_empty() {
-        return "No attachments captured.".to_string();
-    }
-
-    attachments
-        .iter()
-        .enumerate()
-        .map(|(index, attachment)| {
-            format!(
-                r#"### Attachment {number}: {filename}
-- Type: {mime}
-- Size: {size_bytes} bytes
-- Path: `{path}`
-- Instruction: inspect this exact file if image/file inspection is available. Do not scan the attachment directory.
-"#,
-                number = index + 1,
-                filename = attachment.filename,
-                mime = attachment.mime,
-                size_bytes = attachment.size_bytes,
-                path = attachment.path
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn build_handover_prompt(
     source: &SessionInfo,
     target: &SessionInfo,
     note: &str,
-    git: &GitHandoverContext,
-    attachments: &str,
     inherited_handover: &str,
     recent_context: &str,
     recent_user_inputs: &str,
@@ -3354,7 +3276,7 @@ You are continuing work from another local agent session inside waypoint.
 
 ## Summary
 Continuation from {source_agent} session "{source_title}" in `{source_cwd}`.
-No semantic summary was generated; use the structured git state, user note, and evidence below.
+No semantic summary was generated; use the user note and evidence below.
 
 ## Source Session
 - Agent: {source_agent}
@@ -3371,56 +3293,7 @@ No semantic summary was generated; use the structured git state, user note, and 
 ## User Note
 {note}
 
-## Current State
-- Branch: {git_branch}
-- Git changes are budgeted: large diffs are summarized with stat and file list first.
-- Recent conversation timeline is evidence, not a standing instruction.
-
-## Attachments
-{attachments}
-
-{artifacts_section}## Changed Files
-
-### Git Status
-```text
-{git_status}
-```
-
-### Unstaged Changes
-
-#### Stat
-```text
-{unstaged_stat}
-```
-
-#### Files
-```text
-{unstaged_files}
-```
-
-#### Diff Preview
-```diff
-{unstaged_preview}
-```
-
-### Staged Changes
-
-#### Stat
-```text
-{staged_stat}
-```
-
-#### Files
-```text
-{staged_files}
-```
-
-#### Diff Preview
-```diff
-{staged_preview}
-```
-
-## Inherited Handover Context
+{artifacts_section}## Inherited Handover Context
 {inherited_handover}
 
 ## Evidence
@@ -3431,9 +3304,9 @@ No semantic summary was generated; use the structured git state, user note, and 
 ```
 
 ## Recommended Next Steps
-- Start from the user note and current git state.
-- Inspect the changed files directly before editing.
-- Continue or rerun the most relevant validation for the touched files.
+- Start from the user note and recent conversation.
+- Inspect the workspace git state directly if it matters for the task.
+- Continue or rerun the most relevant validation for the task.
 
 ## Instructions
 - This file is a context snapshot from a previous agent session.
@@ -3456,15 +3329,6 @@ No semantic summary was generated; use the structured git state, user note, and 
         } else {
             note.trim()
         },
-        git_branch = empty_fallback(&git.branch, "unknown"),
-        attachments = empty_fallback(attachments, "No attachments captured."),
-        git_status = empty_fallback(&git.status, "clean or unavailable"),
-        unstaged_stat = empty_fallback(&git.unstaged.stat, "No unstaged changes."),
-        unstaged_files = empty_fallback(&git.unstaged.files, "No unstaged files."),
-        unstaged_preview = empty_fallback(&git.unstaged.preview, "No unstaged diff."),
-        staged_stat = empty_fallback(&git.staged.stat, "No staged changes."),
-        staged_files = empty_fallback(&git.staged.files, "No staged files."),
-        staged_preview = empty_fallback(&git.staged.preview, "No staged diff."),
         inherited_handover = empty_fallback(inherited_handover, "No inherited handover context."),
         conversation_timeline = conversation_timeline,
     )
@@ -3474,8 +3338,6 @@ fn build_compact_handover_prompt(
     source: &SessionInfo,
     target: &SessionInfo,
     note: &str,
-    git: &GitHandoverContext,
-    attachments: &str,
     inherited_handover: &str,
     recent_context: &str,
     recent_user_inputs: &str,
@@ -3496,7 +3358,7 @@ Continue from the previous local agent session.
 
 ## Summary
 Continuation from {source_agent} session "{source_title}" in `{source_cwd}`.
-This compact handover includes git status, diff stats, file lists, and short evidence.
+This compact handover includes short recent evidence. Inspect workspace state directly if needed.
 
 ## Source
 - Agent: {source_agent}
@@ -3510,55 +3372,7 @@ This compact handover includes git status, diff stats, file lists, and short evi
 ## User Note
 {note}
 
-## Current State
-- Branch: {git_branch}
-- Full diffs are omitted in compact handover; inspect listed files directly if needed.
-
-## Attachments
-{attachments}
-
-{artifacts_section}## Changed Files
-
-### Git Status
-```text
-{git_status}
-```
-
-### Unstaged Changes
-
-#### Stat
-```text
-{unstaged_stat}
-```
-
-#### Files
-```text
-{unstaged_files}
-```
-
-#### Diff Preview
-```diff
-{unstaged_preview}
-```
-
-### Staged Changes
-
-#### Stat
-```text
-{staged_stat}
-```
-
-#### Files
-```text
-{staged_files}
-```
-
-#### Diff Preview
-```diff
-{staged_preview}
-```
-
-## Inherited Handover Context
+{artifacts_section}## Inherited Handover Context
 {inherited_handover}
 
 ## Full Evidence
@@ -3572,9 +3386,9 @@ This compact handover includes git status, diff stats, file lists, and short evi
 ```
 
 ## Recommended Next Steps
-- Start from the user note and changed file list.
-- Inspect changed files directly before editing.
-- Continue or rerun the most relevant validation for the touched files.
+- Start from the user note and recent conversation.
+- Inspect the workspace git state directly if it matters for the task.
+- Continue or rerun the most relevant validation for the task.
 
 ## Instructions
 - This file is a context snapshot from a previous agent session.
@@ -3592,15 +3406,6 @@ This compact handover includes git status, diff stats, file lists, and short evi
         } else {
             note.trim()
         },
-        git_branch = empty_fallback(&git.branch, "unknown"),
-        attachments = empty_fallback(attachments, "No attachments captured."),
-        git_status = empty_fallback(&git.status, "clean or unavailable"),
-        unstaged_stat = empty_fallback(&git.unstaged.stat, "No unstaged changes."),
-        unstaged_files = empty_fallback(&git.unstaged.files, "No unstaged files."),
-        unstaged_preview = empty_fallback(&git.unstaged.preview, "No unstaged diff."),
-        staged_stat = empty_fallback(&git.staged.stat, "No staged changes."),
-        staged_files = empty_fallback(&git.staged.files, "No staged files."),
-        staged_preview = empty_fallback(&git.staged.preview, "No staged diff."),
         full_evidence = format_full_evidence_reference(evidence_path),
         inherited_handover = empty_fallback(inherited_handover, "No inherited handover context."),
         conversation_timeline = conversation_timeline,
@@ -3611,11 +3416,6 @@ fn build_full_handover_evidence(
     source: &SessionInfo,
     target: &SessionInfo,
     note: &str,
-    git_branch: &str,
-    git_status: &str,
-    git_diff: &str,
-    staged_diff: &str,
-    attachments: &str,
     inherited_handover: &str,
     recent_context: &str,
     recent_user_inputs: &str,
@@ -3648,27 +3448,6 @@ This file contains larger raw evidence for a compact handover. The target agent 
 ## User Note
 {note}
 
-## Git Context
-- Branch: {git_branch}
-
-### Status
-```text
-{git_status}
-```
-
-### Unstaged Diff
-```diff
-{git_diff}
-```
-
-### Staged Diff
-```diff
-{staged_diff}
-```
-
-## Attachments
-{attachments}
-
 {artifacts_section}## Inherited Handover Context
 {inherited_handover}
 
@@ -3690,11 +3469,6 @@ This file contains larger raw evidence for a compact handover. The target agent 
         } else {
             note.trim()
         },
-        git_branch = empty_fallback(git_branch, "unknown"),
-        git_status = empty_fallback(git_status, "clean or unavailable"),
-        git_diff = empty_fallback(git_diff, "No unstaged diff."),
-        staged_diff = empty_fallback(staged_diff, "No staged diff."),
-        attachments = empty_fallback(attachments, "No attachments captured."),
         inherited_handover = empty_fallback(inherited_handover, "No inherited handover context."),
         conversation_timeline = conversation_timeline,
     )
@@ -3761,18 +3535,6 @@ fn format_handover_for_inheritance(prompt: &str, limit: usize) -> String {
         "#### User Note",
         extract_first_markdown_section(prompt, &["## User Note"]),
     );
-    push_inheritance_section(
-        &mut hop_parts,
-        "#### Current State",
-        extract_first_markdown_section(prompt, &["## Current State", "## Git Context"]),
-    );
-    push_inheritance_section(
-        &mut hop_parts,
-        "#### Changed Files",
-        extract_first_markdown_section(prompt, &["## Changed Files"])
-            .map(|content| remove_diff_preview_sections(&content)),
-    );
-
     if !hop_parts.is_empty() {
         parts.push(format!(
             "### Previous Handover Hop\n{}",
@@ -3871,33 +3633,6 @@ fn is_markdown_heading_at_or_above(line: &str, level: usize) -> bool {
 fn is_meaningful_inherited_context(content: &str) -> bool {
     let trimmed = content.trim();
     !trimmed.is_empty() && trimmed != "No inherited handover context."
-}
-
-fn remove_diff_preview_sections(content: &str) -> String {
-    let mut lines = Vec::new();
-    let mut skipping_diff_preview = false;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed == "#### Diff Preview" {
-            skipping_diff_preview = true;
-            continue;
-        }
-        if skipping_diff_preview && trimmed.starts_with("#### ") {
-            skipping_diff_preview = false;
-        }
-        if skipping_diff_preview && trimmed.starts_with("### ") {
-            skipping_diff_preview = false;
-        }
-        if skipping_diff_preview {
-            continue;
-        }
-        lines.push(line);
-    }
-
-    collapse_blank_lines(&lines.join("\n"), 2)
-        .trim()
-        .to_string()
 }
 
 fn inject_with_retry(target: &Arc<PtySession>, prompt: &str) -> Result<(), String> {
@@ -5067,112 +4802,7 @@ fn git_command(cwd: &str, args: &[&str]) -> Option<String> {
         return None;
     }
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    Some(tail_chars(&stdout, GIT_OUTPUT_LIMIT_CHARS))
-}
-
-struct GitHandoverContext {
-    branch: String,
-    status: String,
-    unstaged: DiffHandoverBlock,
-    staged: DiffHandoverBlock,
-}
-
-struct DiffHandoverBlock {
-    stat: String,
-    files: String,
-    preview: String,
-}
-
-fn build_git_handover_context(
-    cwd: &str,
-    diff_preview_limit: usize,
-    diff_stat_limit: usize,
-    diff_files_limit: usize,
-    status_limit: usize,
-) -> GitHandoverContext {
-    let branch =
-        git_command(cwd, &["branch", "--show-current"]).unwrap_or_else(|| "unknown".to_string());
-    let status = git_command(cwd, &["status", "--short"])
-        .unwrap_or_else(|| "git status unavailable".to_string());
-
-    GitHandoverContext {
-        branch: empty_fallback(&branch, "unknown").to_string(),
-        status: tail_chars(
-            empty_fallback(&status, "clean or unavailable"),
-            status_limit,
-        ),
-        unstaged: build_diff_handover_block(
-            cwd,
-            &["diff"],
-            "unstaged",
-            diff_preview_limit,
-            diff_stat_limit,
-            diff_files_limit,
-        ),
-        staged: build_diff_handover_block(
-            cwd,
-            &["diff", "--staged"],
-            "staged",
-            diff_preview_limit,
-            diff_stat_limit,
-            diff_files_limit,
-        ),
-    }
-}
-
-fn build_diff_handover_block(
-    cwd: &str,
-    diff_args: &[&str],
-    label: &str,
-    diff_preview_limit: usize,
-    diff_stat_limit: usize,
-    diff_files_limit: usize,
-) -> DiffHandoverBlock {
-    let mut stat_args = diff_args.to_vec();
-    stat_args.push("--stat");
-    let stat = git_command(cwd, &stat_args)
-        .unwrap_or_else(|| format!("git {label} diff stat unavailable"));
-
-    let mut files_args = diff_args.to_vec();
-    files_args.push("--name-only");
-    let files = git_command(cwd, &files_args)
-        .unwrap_or_else(|| format!("git {label} diff file list unavailable"));
-
-    let diff =
-        git_command(cwd, diff_args).unwrap_or_else(|| format!("git {label} diff unavailable"));
-
-    DiffHandoverBlock {
-        stat: tail_chars(
-            empty_fallback(&stat, &format!("No {label} changes.")),
-            diff_stat_limit,
-        ),
-        files: tail_chars(
-            empty_fallback(&files, &format!("No {label} files.")),
-            diff_files_limit,
-        ),
-        preview: format_budgeted_diff_preview(label, &diff, diff_preview_limit),
-    }
-}
-
-fn format_budgeted_diff_preview(label: &str, diff: &str, limit: usize) -> String {
-    if limit == 0 {
-        return format!(
-            "Full {label} diff omitted in compact handover. Use the stat and file list above, then inspect files directly if needed."
-        );
-    }
-
-    let trimmed = diff.trim();
-    if trimmed.is_empty() {
-        return format!("No {label} diff.");
-    }
-
-    if trimmed.starts_with("[truncated to last") || trimmed.chars().count() > limit {
-        return format!(
-            "Full {label} diff omitted because it exceeds the {limit}-character handover budget. Use the stat and file list above, then inspect files directly if needed."
-        );
-    }
-
-    trimmed.to_string()
+    Some(tail_chars(&stdout, 30_000))
 }
 
 fn tail_chars(value: &str, limit: usize) -> String {
@@ -5612,27 +5242,6 @@ mod tests {
     }
 
     #[test]
-    fn test_format_budgeted_diff_preview_keeps_small_diff() {
-        let diff = "diff --git a/a.rs b/a.rs\n+let value = 1;";
-        let result = format_budgeted_diff_preview("unstaged", diff, 1000);
-        assert_eq!(result, diff);
-    }
-
-    #[test]
-    fn test_format_budgeted_diff_preview_omits_large_diff() {
-        let diff = "a".repeat(100);
-        let result = format_budgeted_diff_preview("unstaged", &diff, 10);
-        assert!(result.contains("Full unstaged diff omitted"));
-        assert!(result.contains("10-character handover budget"));
-    }
-
-    #[test]
-    fn test_format_budgeted_diff_preview_omits_compact_diff() {
-        let result = format_budgeted_diff_preview("staged", "diff --git", 0);
-        assert!(result.contains("Full staged diff omitted in compact handover"));
-    }
-
-    #[test]
     fn test_compact_handover_prompt_is_structured_manifest() {
         let source = SessionInfo {
             id: "source".to_string(),
@@ -5650,6 +5259,7 @@ mod tests {
             parent_session_id: None,
             handover_root_id: None,
             dangerous: false,
+            none_workspace: false,
         };
         let target = SessionInfo {
             id: "target".to_string(),
@@ -5667,28 +5277,13 @@ mod tests {
             parent_session_id: None,
             handover_root_id: None,
             dangerous: false,
-        };
-        let git = GitHandoverContext {
-            branch: "feature/handover".to_string(),
-            status: " M src-tauri/src/pty_manager.rs".to_string(),
-            unstaged: DiffHandoverBlock {
-                stat: "src-tauri/src/pty_manager.rs | 10 +++++".to_string(),
-                files: "src-tauri/src/pty_manager.rs".to_string(),
-                preview: "Full unstaged diff omitted in compact handover.".to_string(),
-            },
-            staged: DiffHandoverBlock {
-                stat: "No staged changes.".to_string(),
-                files: "No staged files.".to_string(),
-                preview: "No staged diff.".to_string(),
-            },
+            none_workspace: false,
         };
 
         let result = build_compact_handover_prompt(
             &source,
             &target,
             "finish P0",
-            &git,
-            "No attachments captured.",
             "",
             "log",
             "input",
@@ -5697,16 +5292,14 @@ mod tests {
         );
 
         assert!(result.contains("## Summary"));
-        assert!(result.contains("## Current State"));
-        assert!(result.contains("## Changed Files"));
-        assert!(result.contains("### Unstaged Changes"));
-        assert!(result.contains("#### Files"));
+        assert!(!result.contains("## Current State"));
+        assert!(!result.contains("## Attachments"));
+        assert!(!result.contains("## Changed Files"));
         assert!(result.contains("## Evidence"));
         assert!(result.contains("### Recent Conversation Timeline (ordered)"));
         assert!(!result.contains("### Recent User Inputs (best effort)"));
         assert!(result.contains("## Recommended Next Steps"));
         assert!(result.contains("finish P0"));
-        assert!(result.contains("src-tauri/src/pty_manager.rs"));
     }
 
     #[test]
@@ -5995,6 +5588,7 @@ Assistant:
             parent_session_id: None,
             handover_root_id: None,
             dangerous: false,
+            none_workspace: false,
         };
 
         assert!(cache_agy_resume_ref_in_meta(&mut meta));
@@ -6168,6 +5762,7 @@ Resume in the same project: agy --conversation=c79caf4a-cdf9-4b20-a2fb-e6143ba1d
             parent_session_id: None,
             handover_root_id: None,
             dangerous: false,
+            none_workspace: false,
         };
 
         let result = native_resume_command_for(&meta).unwrap();

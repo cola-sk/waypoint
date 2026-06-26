@@ -142,7 +142,7 @@ Continue 流程将当前会话的上下文传递给另一个 agent。
 5. 添加可选的 note，描述下一个 agent 应该关注的内容。
 6. 点击 **Create & Continue**。
 
-Waypoint 会按 chat 顺序收集最近的对话时间线、工作区 git status、git diff 与 staged diff，将 handover 文件写到 `~/.waypoint/<workspace-name>/handover-*.md`，启动目标会话，并注入一段简短指令，指引目标 agent 读取该 handover 文件。
+Waypoint 会按 chat 顺序收集最近的对话时间线，将 handover 文件写到 `~/.waypoint/<workspace-name>/handover-*.md`，启动目标会话，并注入一段简短指令，指引目标 agent 读取该 handover 文件。目标 agent 需要 git 状态或 diff 时会直接从 workspace 查询。
 Continue 弹窗右侧的 handover Markdown 支持直接编辑，点击 `Create & Continue` / `Forward` 时会使用编辑后的内容写入 handover 文件。
 
 也可以通过 **Existing Session** 模式将 handover 注入已有会话。
@@ -185,12 +185,9 @@ handover 文件收集的内容：
 
 1. 源会话与目标会话的 agent、命令、workspace。
 2. Continue 面板中用户填写的 note。
-3. git branch 与 `git status --short`。
-4. unstaged 与 staged diff 的 stat、文件列表和受限长度的 diff preview。
-5. 最近对话时间线，尽量按原始 chat 顺序保留 User / Assistant 往返。
-6. 上一跳 inherited handover context。
-7. 附件的精确路径、MIME 类型和大小。
-8. agy 会话生成的 markdown artifacts（来自 `~/.gemini/antigravity-cli/brain/<conversation-id>/*.md`）。
+3. 最近对话时间线，尽量按原始 chat 顺序保留 User / Assistant 往返。
+4. 上一跳 inherited handover context。
+5. agy 会话生成的 markdown artifacts（来自 `~/.gemini/antigravity-cli/brain/<conversation-id>/*.md`）。
 
 不同 agent 的上下文来源优先级对比：
 
@@ -208,11 +205,9 @@ Full 与 Compact 模式差异：
 | 维度 | Full 模式 | Compact 模式 |
 |---|---|---|
 | 主文件对话内容 | 完整结构 + 最近有序对话 | 更短的有序对话 |
-| git 状态 | ✅ | ✅ |
-| diff stat | ✅ | ✅ |
-| 变更文件列表 | ✅ | ✅ |
-| 内联完整 diff preview | ✅ | ❌ |
-| 完整证据文件 | ❌ | ✅（`*-full-evidence.md`，含完整证据、git diff、staged diff） |
+| git 状态 / diff | 不内联，目标 agent 按需查询 workspace | 不内联，目标 agent 按需查询 workspace |
+| 附件清单 | 不内联，沿用会话记录里的附件上下文 | 不内联，沿用会话记录里的附件上下文 |
+| 完整证据文件 | ❌ | ✅（`*-full-evidence.md`，含更长的最近对话证据） |
 | 目标 agent 读取方式 | 直接读主文件 | 主文件引用 evidence 文件路径，目标 agent 按需读取 |
 
 ### Agent Handover 启动/注入策略

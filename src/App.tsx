@@ -209,7 +209,6 @@ function normalizeWorkspacePathHistory(value: unknown): string[] {
   return normalized.slice(0, NEW_CONVERSATION_WORKSPACE_HISTORY_LIMIT);
 }
 
-const NONE_WORKSPACE_STORAGE_KEY = "waypoint_none_workspace_session_ids";
 const HIDDEN_WORKSPACE_STORAGE_KEY = "waypoint_hidden_workspace_paths";
 const PINNED_ITEMS_STORAGE_KEY = "waypoint_pinned_items";
 const NEW_CONVERSATION_WORKSPACE_HISTORY_STORAGE_KEY = "waypoint_new_conversation_workspace_history";
@@ -485,7 +484,6 @@ function App() {
   const [newConversationCustomWorkspace, setNewConversationCustomWorkspace] = useState("");
   const [newConversationWorkspaceHistory, setNewConversationWorkspaceHistory] = useState<string[]>([]);
   const [newConversationDangerous, setNewConversationDangerous] = useState(false);
-  const [noneWorkspaceSessionIds, setNoneWorkspaceSessionIds] = useState<string[]>([]);
   const [hiddenWorkspacePaths, setHiddenWorkspacePaths] = useState<string[]>([]);
   const [collapsedWorkspacePaths, setCollapsedWorkspacePaths] = useState<string[]>([]);
   const [pinnedItems, setPinnedItems] = useState<PinnedItem[]>([]);
@@ -539,8 +537,8 @@ function App() {
     [agents, selectedAgentId],
   );
   const noneWorkspaceSessionIdSet = useMemo(
-    () => new Set(noneWorkspaceSessionIds),
-    [noneWorkspaceSessionIds],
+    () => new Set(sessions.filter((session) => session.noneWorkspace).map((session) => session.id)),
+    [sessions],
   );
   const hiddenWorkspacePathSet = useMemo(
     () => new Set(hiddenWorkspacePaths),
@@ -672,14 +670,6 @@ function App() {
   async function refreshSessions(nextActiveId?: string) {
     const nextSessions = await listSessions();
     setSessions(nextSessions);
-    setNoneWorkspaceSessionIds((current) => {
-      const liveIds = new Set(nextSessions.map((session) => session.id));
-      const filtered = current.filter((id) => liveIds.has(id));
-      if (filtered.length !== current.length) {
-        localStorage.setItem(NONE_WORKSPACE_STORAGE_KEY, JSON.stringify(filtered));
-      }
-      return filtered;
-    });
     if (nextActiveId) {
       setActiveSessionId(nextActiveId);
       return;
@@ -698,28 +688,6 @@ function App() {
     if (!nextAgents.some((agent) => agent.id === continueAgentId)) {
       setContinueAgentId(nextAgents[0]?.id ?? "claude-code");
     }
-  }
-
-  function markSessionAsNoneWorkspace(sessionId: string) {
-    setNoneWorkspaceSessionIds((current) => {
-      if (current.includes(sessionId)) {
-        return current;
-      }
-      const next = [...current, sessionId];
-      localStorage.setItem(NONE_WORKSPACE_STORAGE_KEY, JSON.stringify(next));
-      return next;
-    });
-  }
-
-  function unmarkNoneWorkspaceSession(sessionId: string) {
-    setNoneWorkspaceSessionIds((current) => {
-      if (!current.includes(sessionId)) {
-        return current;
-      }
-      const next = current.filter((id) => id !== sessionId);
-      localStorage.setItem(NONE_WORKSPACE_STORAGE_KEY, JSON.stringify(next));
-      return next;
-    });
   }
 
   function toggleWorkspaceCollapsed(path: string) {
@@ -937,10 +905,13 @@ function App() {
         setError("无法解析可用目录，请先选择一个工作区目录。");
         return;
       }
-      const session = await createAgentSession(selectedAgentId, launchPath, newConversationDangerous);
-      if (useNoneWorkspace) {
-        markSessionAsNoneWorkspace(session.id);
-      } else {
+      const session = await createAgentSession(
+        selectedAgentId,
+        launchPath,
+        newConversationDangerous,
+        useNoneWorkspace,
+      );
+      if (!useNoneWorkspace) {
         rememberNewConversationWorkspace(session.cwd);
         revealWorkspacePath(session.cwd);
       }
@@ -964,7 +935,6 @@ function App() {
     setIsDeletingSession(true);
     try {
       await deleteSession(deleteSessionId);
-      unmarkNoneWorkspaceSession(deleteSessionId);
       unpinSession(deleteSessionId);
       const nextSessions = await listSessions();
       setSessions(nextSessions);
@@ -987,10 +957,13 @@ function App() {
     }
 
     try {
-      const nextSession = await createAgentSession(source.agentId, normalizeWorkspacePath(source.cwd));
-      if (noneWorkspaceSessionIdSet.has(source.id)) {
-        markSessionAsNoneWorkspace(nextSession.id);
-      } else {
+      const nextSession = await createAgentSession(
+        source.agentId,
+        normalizeWorkspacePath(source.cwd),
+        source.dangerous,
+        Boolean(source.noneWorkspace),
+      );
+      if (!source.noneWorkspace) {
         revealWorkspacePath(nextSession.cwd);
       }
       await refreshSessions(nextSession.id);
@@ -1487,22 +1460,6 @@ function App() {
             }
           } catch (e) {
             console.error("[Waypoint] Failed to parse collapsed workspaces:", e);
-          }
-        }
-
-        const savedNoneWorkspace = localStorage.getItem(NONE_WORKSPACE_STORAGE_KEY);
-        if (savedNoneWorkspace) {
-          try {
-            const parsed = JSON.parse(savedNoneWorkspace);
-            if (Array.isArray(parsed)) {
-              const rawIds = parsed.filter((item): item is string => typeof item === "string");
-              const liveIds = new Set((await listSessions()).map((session) => session.id));
-              const filteredIds = rawIds.filter((id) => liveIds.has(id));
-              setNoneWorkspaceSessionIds(filteredIds);
-              localStorage.setItem(NONE_WORKSPACE_STORAGE_KEY, JSON.stringify(filteredIds));
-            }
-          } catch (e) {
-            console.error("[Waypoint] Failed to parse none-workspace session ids:", e);
           }
         }
 
@@ -2111,9 +2068,7 @@ function App() {
                   <div className="handover-size-grid" aria-label="Handover size details">
                     <span>Terminal {formatHandoverChars(handoverPreview.terminalContextChars)}</span>
                     <span>Inputs {formatHandoverChars(handoverPreview.userInputChars)}</span>
-                    <span>
-                      Diffs {formatHandoverChars(handoverPreview.unstagedDiffChars + handoverPreview.stagedDiffChars)}
-                    </span>
+                    <span>Inherited {formatHandoverChars(handoverPreview.inheritedContextChars)}</span>
                   </div>
                 ) : null}
 

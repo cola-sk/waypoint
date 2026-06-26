@@ -35,12 +35,14 @@ export function createAgentSession(
   agentId: string,
   cwd: string,
   dangerous = false,
+  noneWorkspace = false,
 ): Promise<SessionInfo> {
   assertTauriRuntime();
   return invoke("create_agent_session", {
     agentId,
     cwd,
     dangerous,
+    noneWorkspace,
     rows: DEFAULT_TERMINAL_ROWS,
     cols: DEFAULT_TERMINAL_COLS,
   });

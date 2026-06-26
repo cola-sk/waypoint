@@ -173,7 +173,7 @@ npm run tauri:dev
 6. 在 Note 中填写目标 agent 接下来要关注的任务。
 7. 点击 Create & Continue。
 8. waypoint 会创建一个新的目标 session。
-9. waypoint 会收集源 session 按时间顺序排列的最近对话、workspace git status、git diff、staged diff。
+9. waypoint 会收集源 session 按时间顺序排列的最近对话。
 10. waypoint 会生成 handover prompt，并注入新 session。
 11. UI 自动切换到新 session。
 12. 源 session 仍然保持运行，可以随时切回。
@@ -266,14 +266,13 @@ handover 文件会收集以下信息：
 ```text
 1. Source session / target session 的 agent、命令、workspace。
 2. 用户在 Continue 面板填写的 note。
-3. git branch、git status --short。
-4. unstaged diff 与 staged diff 的 stat、文件列表和 diff preview。
-5. 最近的 conversation timeline：尽量按原始 chat 顺序保留 User / Assistant 往返。
-6. 上一跳 inherited handover context。
-7. 截图/图片附件的精确路径、类型和大小。
-8. agy 会话生成的 markdown artifacts：
+3. 最近的 conversation timeline：尽量按原始 chat 顺序保留 User / Assistant 往返。
+4. 上一跳 inherited handover context。
+5. agy 会话生成的 markdown artifacts：
    从 ~/.gemini/antigravity-cli/brain/<conversation-id> 读取顶层 .md 文件。
 ```
+
+handover 不再内联 git status、diff、staged diff 或附件清单；目标 agent 需要时会直接查询 workspace，附件上下文沿用会话记录。
 
 上下文来源优先级：
 
@@ -302,13 +301,11 @@ Full 与 Compact 的差异：
 
 ```text
 Full:
-  主 handover 文件中包含完整结构、最近有序对话、git 状态、
-  diff stat、文件列表和受限长度的 diff preview。
+  主 handover 文件中包含完整结构和最近有序对话。
 
 Compact:
-  主 handover 文件只保留更短的有序对话、git 状态、diff stat 和文件列表；
-  不内联完整 diff preview。
-  同时生成 *-full-evidence.md，保存完整证据、完整 git diff 和 staged diff。
+  主 handover 文件只保留更短的有序对话。
+  同时生成 *-full-evidence.md，保存更长的最近对话证据。
   Compact 主文件会引用 evidence 文件路径，目标 agent 可按需读取该精确文件。
 ```
 
