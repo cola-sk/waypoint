@@ -2591,9 +2591,17 @@ fn canonicalize_workspace_dir(path: &Path) -> Option<String> {
         .and_then(|resolved| resolved.to_str().map(ToOwned::to_owned))
 }
 
-fn waypoint_sessions_dir() -> Result<PathBuf, String> {
+fn waypoint_root_dir() -> Result<PathBuf, String> {
     let home = env::var("HOME").map_err(|err| format!("failed to resolve HOME: {err}"))?;
-    Ok(PathBuf::from(home).join(".waypoint").join("sessions"))
+    // Separate dev (debug) and prod (release) storage so running `tauri dev`
+    // does not share sessions/handovers with an installed DMG. Reinstalling
+    // the DMG (release) won't touch the dev store, and vice versa.
+    let leaf = if cfg!(debug_assertions) { ".waypoint-dev" } else { ".waypoint" };
+    Ok(PathBuf::from(home).join(leaf))
+}
+
+fn waypoint_sessions_dir() -> Result<PathBuf, String> {
+    Ok(waypoint_root_dir()?.join("sessions"))
 }
 
 fn session_dir(session_id: &str) -> Result<PathBuf, String> {
@@ -3228,14 +3236,13 @@ fn write_handover_files(
 }
 
 fn handover_workspace_dir(cwd: &str) -> Result<PathBuf, String> {
-    let home = env::var("HOME").map_err(|err| format!("failed to resolve HOME: {err}"))?;
     let workspace_name = Path::new(cwd)
         .file_name()
         .map(|name| name.to_string_lossy().trim().to_string())
         .filter(|name| !name.is_empty() && name != "." && name != "..")
         .unwrap_or_else(|| "workspace".to_string());
 
-    Ok(PathBuf::from(home).join(".waypoint").join(workspace_name))
+    Ok(waypoint_root_dir()?.join(workspace_name))
 }
 
 fn handover_reference_startup_prompt(path: &Path, session_id: &str) -> String {

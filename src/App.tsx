@@ -246,10 +246,17 @@ function normalizeWorkspacePathHistory(value: unknown): string[] {
   return normalized.slice(0, NEW_CONVERSATION_WORKSPACE_HISTORY_LIMIT);
 }
 
-const HIDDEN_WORKSPACE_STORAGE_KEY = "waypoint_hidden_workspace_paths";
-const PINNED_ITEMS_STORAGE_KEY = "waypoint_pinned_items";
-const NEW_CONVERSATION_WORKSPACE_HISTORY_STORAGE_KEY = "waypoint_new_conversation_workspace_history";
-const COLLAPSED_WORKSPACE_STORAGE_KEY = "waypoint_collapsed_workspace_paths";
+const STORAGE_KEY_PREFIX = import.meta.env.DEV ? "waypoint-dev:" : "waypoint:";
+function storageKey(name: string) {
+  return `${STORAGE_KEY_PREFIX}${name}`;
+}
+const HIDDEN_WORKSPACE_STORAGE_KEY = storageKey("hidden_workspace_paths");
+const PINNED_ITEMS_STORAGE_KEY = storageKey("pinned_items");
+const NEW_CONVERSATION_WORKSPACE_HISTORY_STORAGE_KEY = storageKey("new_conversation_workspace_history");
+const COLLAPSED_WORKSPACE_STORAGE_KEY = storageKey("collapsed_workspace_paths");
+const PINNED_WORKSPACES_STORAGE_KEY = storageKey("pinned_workspaces");
+const SELECTED_EDITOR_STORAGE_KEY = storageKey("selected_editor_id");
+const SIDEBAR_WIDTH_STORAGE_KEY = storageKey("sidebar-width");
 const NONE_WORKSPACE_VALUE = "__none_workspace__";
 const CUSTOM_WORKSPACE_VALUE = "__custom_workspace__";
 const NEW_CONVERSATION_WORKSPACE_HISTORY_LIMIT = 20;
@@ -385,7 +392,7 @@ function OpenInEditorButton({ cwd, editors }: { cwd: string; editors: EditorInfo
   if (editors.length === 0) return null;
 
   const [selectedEditorId, setSelectedEditorId] = useState<string>(() => {
-    const saved = localStorage.getItem("waypoint_selected_editor_id");
+    const saved = localStorage.getItem(SELECTED_EDITOR_STORAGE_KEY);
     if (saved && editors.some((e) => e.id === saved)) {
       return saved;
     }
@@ -468,7 +475,7 @@ function OpenInEditorButton({ cwd, editors }: { cwd: string; editors: EditorInfo
               className={`editor-dropdown-item ${editor.id === selectedEditorId ? "active" : ""}`}
               onClick={() => {
                 setSelectedEditorId(editor.id);
-                localStorage.setItem("waypoint_selected_editor_id", editor.id);
+                localStorage.setItem(SELECTED_EDITOR_STORAGE_KEY, editor.id);
                 setIsOpen(false);
               }}
             >
@@ -541,7 +548,7 @@ function App() {
 
   // Sidebar resizer state & logic
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
-    const saved = localStorage.getItem("sidebar-width");
+    const saved = localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
     return saved ? parseInt(saved, 10) : 320;
   });
   const [isDragging, setIsDragging] = useState(false);
@@ -557,7 +564,7 @@ function App() {
     const handleMouseMove = (e: MouseEvent) => {
       const newWidth = Math.max(200, Math.min(600, e.clientX));
       setSidebarWidth(newWidth);
-      localStorage.setItem("sidebar-width", String(newWidth));
+      localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(newWidth));
     };
 
     const handleMouseUp = () => {
@@ -627,7 +634,7 @@ function App() {
   const activeHandoverFile =
     handoverFileResult?.sourceSession.id === activeSessionId ? handoverFileResult : null;
   const preferredEditor = useMemo(() => {
-    const saved = localStorage.getItem("waypoint_selected_editor_id");
+    const saved = localStorage.getItem(SELECTED_EDITOR_STORAGE_KEY);
     return (
       detectedEditors.find((editor) => editor.id === saved) ??
       detectedEditors.find((editor) => editor.id === "vscode") ??
@@ -801,7 +808,7 @@ function App() {
     const name = normalizedPath.split(/[/\\]/).pop() || normalizedPath;
     const nextFolders = [...pinnedWorkspaces, { path: normalizedPath, name, isPinned: true }];
     setPinnedWorkspaces(nextFolders);
-    localStorage.setItem("waypoint_pinned_workspaces", JSON.stringify(nextFolders));
+    localStorage.setItem(PINNED_WORKSPACES_STORAGE_KEY, JSON.stringify(nextFolders));
     revealWorkspacePath(normalizedPath);
   }
 
@@ -883,7 +890,7 @@ function App() {
   function handleRemoveWorkspace(path: string) {
     const nextFolders = pinnedWorkspaces.filter((w) => w.path !== path);
     setPinnedWorkspaces(nextFolders);
-    localStorage.setItem("waypoint_pinned_workspaces", JSON.stringify(nextFolders));
+    localStorage.setItem(PINNED_WORKSPACES_STORAGE_KEY, JSON.stringify(nextFolders));
     setActiveNewMenuFolder((current) => (current === path ? null : current));
     setActiveWorkspaceMenuFolder((current) => (current === path ? null : current));
     setHiddenWorkspacePaths((current) => {
@@ -1468,7 +1475,7 @@ function App() {
         );
         // Load pinned workspaces
         let loadedPinnedWorkspaces: WorkspaceFolder[] = [];
-        const saved = localStorage.getItem("waypoint_pinned_workspaces");
+        const saved = localStorage.getItem(PINNED_WORKSPACES_STORAGE_KEY);
         if (saved) {
           try {
             const parsed = JSON.parse(saved);
@@ -1483,7 +1490,7 @@ function App() {
                 ),
               );
               setPinnedWorkspaces(loadedPinnedWorkspaces);
-              localStorage.setItem("waypoint_pinned_workspaces", JSON.stringify(loadedPinnedWorkspaces));
+              localStorage.setItem(PINNED_WORKSPACES_STORAGE_KEY, JSON.stringify(loadedPinnedWorkspaces));
             }
           } catch (e) {
             console.error("[Waypoint] Failed to parse pinned workspaces:", e);
@@ -1496,7 +1503,7 @@ function App() {
           };
           loadedPinnedWorkspaces = [defaultFolder];
           setPinnedWorkspaces(loadedPinnedWorkspaces);
-          localStorage.setItem("waypoint_pinned_workspaces", JSON.stringify(loadedPinnedWorkspaces));
+          localStorage.setItem(PINNED_WORKSPACES_STORAGE_KEY, JSON.stringify(loadedPinnedWorkspaces));
         }
 
         const savedPinnedItems = localStorage.getItem(PINNED_ITEMS_STORAGE_KEY);

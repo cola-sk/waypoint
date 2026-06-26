@@ -162,6 +162,8 @@ Continue 弹窗右侧的 handover Markdown 支持直接编辑，点击 `Create &
 
 Waypoint 自己的 session 元数据存储在 `~/.waypoint/sessions/<session-id>/meta.json` 中。对于支持原生恢复的 agent，还会记录 `nativeSessionRef`，包含 provider、native id、可选 project、resume 命令和发现时间。重新激活历史会话时，后端会先刷新该 native 引用，再构造 agent 专属的 resume 命令。
 
+> **Dev / Prod 存储隔离**：`npm run tauri:dev`（debug 构建）使用 `~/.waypoint-dev/`，安装版 DMG（release 构建）使用 `~/.waypoint/`。两套 session、handover、附件互不干扰，重装 DMG 不会影响 dev 会话，反之亦然。前端 localStorage 同样按 `waypoint-dev:` / `waypoint:` 前缀隔离。
+
 不同 agent 的 native id 策略对比：
 
 | Agent | 创建时是否注入 native id | native id 来源 | 恢复命令 |
