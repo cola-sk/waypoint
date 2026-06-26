@@ -2591,7 +2591,11 @@ fn waypoint_root_dir() -> Result<PathBuf, String> {
     // Separate dev (debug) and prod (release) storage so running `tauri dev`
     // does not share sessions/handovers with an installed DMG. Reinstalling
     // the DMG (release) won't touch the dev store, and vice versa.
-    let leaf = if cfg!(debug_assertions) { ".waypoint-dev" } else { ".waypoint" };
+    let leaf = if cfg!(debug_assertions) {
+        ".waypoint-dev"
+    } else {
+        ".waypoint"
+    };
     Ok(PathBuf::from(home).join(leaf))
 }
 
@@ -4080,11 +4084,7 @@ fn apply_dangerous_flag(agent_id: &str, args: &mut Vec<String>) {
         _ => return,
     };
     if !args.iter().any(|arg| arg == flag) {
-        let insert_at = args
-            .iter()
-            .position(|arg| !arg.starts_with('-'))
-            .unwrap_or(args.len());
-        args.insert(insert_at, flag.to_string());
+        args.insert(0, flag.to_string());
     }
 }
 
@@ -5861,6 +5861,29 @@ Resume in the same project: agy --conversation=c79caf4a-cdf9-4b20-a2fb-e6143ba1d
                 "--session-id",
                 "acc81906-1dbd-4c13-b910-4c903c4feea6",
                 "Read the handover file"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_codex_dangerous_flag_does_not_split_add_dir_value() {
+        let mut args = vec![
+            "--no-alt-screen".to_string(),
+            "--add-dir".to_string(),
+            "/Users/example/.waypoint/workspace".to_string(),
+            "Read the handover file".to_string(),
+        ];
+
+        apply_dangerous_flag("codex", &mut args);
+
+        assert_eq!(
+            args,
+            vec![
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--no-alt-screen",
+                "--add-dir",
+                "/Users/example/.waypoint/workspace",
+                "Read the handover file",
             ]
         );
     }
