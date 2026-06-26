@@ -39,6 +39,7 @@ const BRACKETED_PASTE_END = "\x1b[201~";
 const TERMINAL_FILE_PATH_PATTERN =
   /(?:"([^"\r\n]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?)"|'([^'\r\n]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?)'|((?:~|\/|\.{1,2}\/)?[A-Za-z0-9_.@%+=,~/-]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?))/g;
 const TERMINAL_PATH_TRAILING_PUNCTUATION = /[),.;\]}]+$/;
+const COLON_INPUT_KEYS = new Set([":", "："]);
 
 function isDirectInterceptablePrintable(key: string): boolean {
   if (key.length !== 1) {
@@ -277,6 +278,14 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
     let unlistenPtyData: UnlistenFn | null = null;
     let unlistenSessionExited: UnlistenFn | null = null;
     let unlistenSessionError: UnlistenFn | null = null;
+    let isReplaying = true;
+    let isLive = false;
+    let isActivating = false;
+    let wasReplayOnly = false;
+    let shouldClearReplayOnActivation = false;
+    let pendingInput = "";
+    const queuedLiveOutput: Array<string | Uint8Array> = [];
+
     setIsRestoring(false);
     setStatus("connecting");
 
@@ -329,7 +338,7 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
         !event.altKey &&
         !event.metaKey &&
         !event.isComposing &&
-        isDirectInterceptablePrintable(event.key)
+        (isLive ? COLON_INPUT_KEYS.has(event.key) : isDirectInterceptablePrintable(event.key))
       ) {
         event.preventDefault();
         event.stopPropagation();
@@ -585,7 +594,7 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
         event.inputType === "insertText" &&
         data !== null &&
         !event.isComposing &&
-        isDirectInterceptablePrintable(data)
+        (isLive ? COLON_INPUT_KEYS.has(data) : isDirectInterceptablePrintable(data))
       ) {
         event.preventDefault();
         event.stopPropagation();
@@ -607,14 +616,6 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
     const resizeObserver = new ResizeObserver(handleObservedResize);
     resizeObserver.observe(shell);
     resizeObserver.observe(surface);
-
-    let isReplaying = true;
-    let isLive = false;
-    let isActivating = false;
-    let wasReplayOnly = false;
-    let shouldClearReplayOnActivation = false;
-    let pendingInput = "";
-    const queuedLiveOutput: Array<string | Uint8Array> = [];
 
     const transformOutboundInput = (data: string): string => {
       if (isFocusOrMouseSequence(data) || data === BRACKETED_PASTE_START || data === BRACKETED_PASTE_END) {

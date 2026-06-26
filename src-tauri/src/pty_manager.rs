@@ -1067,12 +1067,7 @@ impl SessionManager {
         }
 
         let dir = session_attachment_dir(&info.cwd, session_id)?;
-        fs::create_dir_all(&dir).map_err(|err| {
-            format!(
-                "failed to create attachment directory {}: {err}",
-                dir.display()
-            )
-        })?;
+        ensure_session_attachment_dir(&dir)?;
         let suffix = Uuid::new_v4().to_string();
         let filename = format!(
             "screenshot-{}-{}.{}",
@@ -2617,9 +2612,33 @@ fn session_transcript_path(session_id: &str) -> Result<PathBuf, String> {
 }
 
 fn session_attachment_dir(cwd: &str, session_id: &str) -> Result<PathBuf, String> {
-    Ok(handover_workspace_dir(cwd)?
-        .join("attachments")
-        .join(session_id))
+    // Attachments must live INSIDE the session's cwd so that agent CLIs with
+    // project-scoped file access (e.g. Claude Code's Read tool) can read them.
+    // Saving under ~/.waypoint/ made the path invisible to those tools and
+    // caused "Read returned empty" errors when the user pasted an image and
+    // sent the resolved path to the agent.
+    let cwd_path = PathBuf::from(cwd);
+    if !cwd_path.is_dir() {
+        return Err(format!("workspace directory does not exist: {cwd}"));
+    }
+    let cwd_canonical = fs::canonicalize(&cwd_path).unwrap_or(cwd_path);
+    Ok(cwd_canonical.join(".waypoint-attachments").join(session_id))
+}
+
+/// Ensure the attachment directory exists and is ignored by git so pasted
+/// screenshots don't pollute the user's project status.
+fn ensure_session_attachment_dir(dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|err| {
+        format!(
+            "failed to create attachment directory {}: {err}",
+            dir.display()
+        )
+    })?;
+    let gitignore = dir.join(".gitignore");
+    if !gitignore.exists() {
+        let _ = fs::write(&gitignore, "*\n");
+    }
+    Ok(())
 }
 
 fn normalize_attachment_mime(mime: &str) -> Result<(&'static str, &'static str), String> {

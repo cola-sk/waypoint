@@ -175,7 +175,7 @@ npm run tauri:dev
    - 启动目录由系统当前目录兜底。
    - 标记持久化到 meta.json，重启后仍归入该分组。
 4. 在已挂起的 agent 终端中粘贴（Cmd+V）或拖入图片：
-   - Waypoint 把图片保存为会话附件。
+   - Waypoint 把图片保存为会话附件（位于 `<workspace>/.waypoint-attachments/<session-id>/`，自动写入 `.gitignore`，落在 agent 工作区目录内，便于 Claude Code 等具有项目作用域读取权限的 agent 通过 Read 工具读取）。
    - 输入行插入 [paste image N] 占位符。
    - 按 Enter 提交前，占位符会被反解为附件实际文件路径，再连同回车一起发送给 agent。
    - 半角/全角冒号（: / ：）以及 `+` 等单字符符号也能正常输入到 agent。
