@@ -7,6 +7,7 @@ import type {
   HandoverFileResult,
   HandoverPreview,
   HandoverResult,
+  FilePreview,
   SessionAttachmentInfo,
   SessionInfo,
   SessionSnapshot,
@@ -18,7 +19,7 @@ declare global {
   }
 }
 
-function isTauriRuntime() {
+export function isTauriRuntime() {
   return typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
 }
 
@@ -241,6 +242,18 @@ export function selectDirectory(): Promise<string | null> {
     return Promise.resolve(null);
   }
   return invoke("select_directory");
+}
+
+export function selectFile(): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve(null);
+  }
+  return invoke("select_file");
+}
+
+export function previewFile(path: string, baseDir?: string | null): Promise<FilePreview> {
+  assertTauriRuntime();
+  return invoke("preview_file", { path, baseDir: baseDir ?? null });
 }
 
 export function openInEditor(path: string, editorBin: string): Promise<void> {

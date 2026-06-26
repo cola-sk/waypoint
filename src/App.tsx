@@ -1,16 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   Bot,
   Check,
   ChevronDown,
   ChevronRight,
   Copy,
+  Code2,
+  ExternalLink,
+  Eye,
+  FileText,
   FilePlus,
   Folder,
   FolderPlus,
   MoreHorizontal,
   MessageSquare,
+  PanelRightClose,
+  PanelRightOpen,
   Pin,
   RefreshCw,
   Send,
@@ -33,13 +41,17 @@ import {
   getHandoverDraft,
   getHandoverPreview,
   killSession,
+  isTauriRuntime,
   listAgentPresets,
   listSessions,
   openInEditor,
+  previewFile,
   selectDirectory,
+  selectFile,
 } from "./api/tauri";
 import type {
   AgentPresetInfo,
+  FilePreview,
   HandoverContentMode,
   HandoverDraft,
   HandoverFileResult,
@@ -67,6 +79,31 @@ function formatHandoverChars(value: number) {
     return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k chars`;
   }
   return `${value} chars`;
+}
+
+function formatFileSize(bytes: number) {
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / 1024 / 1024).toFixed(bytes >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
+  }
+  if (bytes >= 1024) {
+    return `${(bytes / 1024).toFixed(bytes >= 10 * 1024 ? 0 : 1)} KB`;
+  }
+  return `${bytes} B`;
+}
+
+function formatPreviewTime(timestamp?: number | null) {
+  if (!timestamp) {
+    return "unknown";
+  }
+  return new Date(timestamp * 1000).toLocaleString();
+}
+
+function isMarkdownPreview(file: FilePreview | null) {
+  return file?.kind === "text" && (file.extension === "md" || file.extension === "markdown");
+}
+
+function isImagePreview(file: FilePreview | null) {
+  return file?.kind === "image" && Boolean(file.dataUrl);
 }
 
 const DANGEROUS_FLAGS: Record<string, string> = {
@@ -494,6 +531,13 @@ function App() {
   const [detectedEditors, setDetectedEditors] = useState<EditorInfo[]>([]);
   const [activeNewMenuFolder, setActiveNewMenuFolder] = useState<string | null>(null);
   const [activeWorkspaceMenuFolder, setActiveWorkspaceMenuFolder] = useState<string | null>(null);
+  const [quickLaunchDangerous, setQuickLaunchDangerous] = useState(false);
+  const [filePreviewOpen, setFilePreviewOpen] = useState(false);
+  const [filePreviewPathInput, setFilePreviewPathInput] = useState("");
+  const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
+  const [filePreviewError, setFilePreviewError] = useState<string | null>(null);
+  const [isFilePreviewLoading, setIsFilePreviewLoading] = useState(false);
+  const [filePreviewMode, setFilePreviewMode] = useState<"formatted" | "raw">("formatted");
 
   // Sidebar resizer state & logic
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
@@ -582,6 +626,21 @@ function App() {
   const shownEvidencePath = handoverResult?.evidencePath ?? handoverDraft?.evidencePath ?? null;
   const activeHandoverFile =
     handoverFileResult?.sourceSession.id === activeSessionId ? handoverFileResult : null;
+  const preferredEditor = useMemo(() => {
+    const saved = localStorage.getItem("waypoint_selected_editor_id");
+    return (
+      detectedEditors.find((editor) => editor.id === saved) ??
+      detectedEditors.find((editor) => editor.id === "vscode") ??
+      detectedEditors[0] ??
+      null
+    );
+  }, [detectedEditors]);
+  const handleTerminalPreviewFile = useCallback(
+    (path: string) => {
+      void loadFilePreview(path, activeSession?.cwd ?? null);
+    },
+    [activeSession?.cwd],
+  );
   const pendingDeleteSession = useMemo(
     () => sessions.find((session) => session.id === deleteSessionId) ?? null,
     [deleteSessionId, sessions],
@@ -758,6 +817,54 @@ function App() {
     }
   }
 
+  async function loadFilePreview(path: string, baseDir = activeSession?.cwd ?? null) {
+    const normalizedPath = path.trim();
+    if (!normalizedPath) {
+      setFilePreviewError("请输入文件路径。");
+      return;
+    }
+    setFilePreviewOpen(true);
+    setFilePreviewPathInput(normalizedPath);
+    setFilePreviewError(null);
+    setIsFilePreviewLoading(true);
+    try {
+      const preview = await previewFile(normalizedPath, baseDir);
+      setFilePreview(preview);
+      setFilePreviewPathInput(preview.path);
+      setFilePreviewMode(isMarkdownPreview(preview) || isImagePreview(preview) ? "formatted" : "raw");
+    } catch (err) {
+      setFilePreview(null);
+      setFilePreviewError(String(err));
+    } finally {
+      setIsFilePreviewLoading(false);
+    }
+  }
+
+  async function handleSelectPreviewFile() {
+    setFilePreviewOpen(true);
+    setFilePreviewError(null);
+    try {
+      const selected = await selectFile();
+      if (selected) {
+        await loadFilePreview(selected, null);
+      }
+    } catch (err) {
+      setFilePreviewError(`选择文件失败：${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  async function handleOpenPreviewInEditor() {
+    if (!filePreview?.path || !preferredEditor) {
+      return;
+    }
+    setError(null);
+    try {
+      await openInEditor(filePreview.path, preferredEditor.bin);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
   async function handleAddWorkspaceFromPicker() {
     if (isSelectingWorkspaceDirectory) {
       return;
@@ -839,7 +946,7 @@ function App() {
   }
 
   // Create session for a specific agent and path
-  async function handleCreateSessionForPath(agentId: string, path: string) {
+  async function handleCreateSessionForPath(agentId: string, path: string, dangerous = false) {
     setError(null);
     setIsLaunching(true);
     setActiveNewMenuFolder(null);
@@ -849,7 +956,7 @@ function App() {
         setError("目录路径无效。");
         return;
       }
-      const session = await createAgentSession(agentId, normalizedPath);
+      const session = await createAgentSession(agentId, normalizedPath, dangerous);
       rememberNewConversationWorkspace(session.cwd);
       revealWorkspacePath(session.cwd);
       await refreshSessions(session.id);
@@ -1463,6 +1570,10 @@ function App() {
           }
         }
 
+        if (!isTauriRuntime()) {
+          return;
+        }
+
         // Listen to session events from Tauri
         unlistenExited = await listen<{ session: SessionInfo }>("session:exited", (event) => {
           setSessions((current) =>
@@ -1664,16 +1775,42 @@ function App() {
                                   type="button"
                                   key={agent.id}
                                   className="agent-option-item"
-                                  onClick={() => handleCreateSessionForPath(agent.id, folder.path)}
+                                  onClick={() =>
+                                    handleCreateSessionForPath(
+                                      agent.id,
+                                      folder.path,
+                                      quickLaunchDangerous && supportsDangerousFlag(agent.id),
+                                    )
+                                  }
                                 >
                                   <Bot size={13} />
                                   <div className="agent-option-text">
-                                    <span className="agent-option-name">{agent.name}</span>
+                                    <span className="agent-option-name">
+                                      {agent.name}
+                                      {quickLaunchDangerous && supportsDangerousFlag(agent.id) ? (
+                                        <span className="agent-option-badge">dangerous</span>
+                                      ) : null}
+                                    </span>
                                     <span className="agent-option-desc">{agent.description}</span>
                                   </div>
                                 </button>
                               ))}
                           </div>
+                          {agents.some((a) => a.available && supportsDangerousFlag(a.id)) ? (
+                            <div className="popover-footer">
+                              <label className="checkbox-label">
+                                <input
+                                  type="checkbox"
+                                  checked={quickLaunchDangerous}
+                                  onChange={(event) => setQuickLaunchDangerous(event.target.checked)}
+                                />
+                                <span>
+                                  跳过权限确认
+                                  <span className="checkbox-hint">仅对支持的 Agent 生效</span>
+                                </span>
+                              </label>
+                            </div>
+                          ) : null}
                         </div>
                       )}
                     </div>
@@ -1785,6 +1922,19 @@ function App() {
           </div>
           <div className="topbar-actions">
             <button
+              className={`icon-only topbar-icon-action ${filePreviewOpen ? "active" : ""}`}
+              type="button"
+              onClick={() => setFilePreviewOpen((current) => !current)}
+              title={filePreviewOpen ? "Hide file preview" : "Show file preview"}
+              aria-label={filePreviewOpen ? "Hide file preview" : "Show file preview"}
+            >
+              {filePreviewOpen ? (
+                <PanelRightClose aria-hidden="true" size={16} />
+              ) : (
+                <PanelRightOpen aria-hidden="true" size={16} />
+              )}
+            </button>
+            <button
               className="icon-only topbar-icon-action"
               type="button"
               onClick={handleCreateHandoverFile}
@@ -1825,12 +1975,14 @@ function App() {
           </div>
         ) : null}
 
-        <div className="output-layout">
+        <div className={`output-layout ${filePreviewOpen ? "with-file-preview" : ""}`}>
           <div className="terminal-frame">
             {activeSessionId ? (
               <TerminalView
                 key={`${activeSessionId}:${activeTerminalReloadKey}`}
                 sessionId={activeSessionId}
+                cwd={activeSession?.cwd ?? workspacePath}
+                onPreviewFile={handleTerminalPreviewFile}
                 onSessionActivated={(session) => {
                   setSessions((current) => {
                     const exists = current.some((item) => item.id === session.id);
@@ -1852,6 +2004,130 @@ function App() {
               </div>
             )}
           </div>
+          {filePreviewOpen ? (
+            <aside className="file-preview-pane" aria-label="File preview">
+              <header className="file-preview-header">
+                <div>
+                  <p className="eyebrow">File Preview</p>
+                  <h3>{filePreview?.name || "Open local file"}</h3>
+                </div>
+                <button
+                  className="icon-only"
+                  type="button"
+                  onClick={() => setFilePreviewOpen(false)}
+                  title="Close file preview"
+                  aria-label="Close file preview"
+                >
+                  <X aria-hidden="true" size={15} />
+                </button>
+              </header>
+
+              <form
+                className="file-preview-path-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void loadFilePreview(filePreviewPathInput);
+                }}
+              >
+                <div className="input-group-with-btn">
+                  <input
+                    value={filePreviewPathInput}
+                    onChange={(event) => setFilePreviewPathInput(event.target.value)}
+                    placeholder="/path/to/file.md"
+                    spellCheck={false}
+                    aria-label="Local file path"
+                  />
+                  <button
+                    type="button"
+                    className="browse-dir-btn"
+                    onClick={handleSelectPreviewFile}
+                    title="选择文件"
+                    aria-label="选择文件"
+                  >
+                    <FolderOpen size={14} />
+                  </button>
+                </div>
+                <button className="primary-action" type="submit" disabled={isFilePreviewLoading}>
+                  <FileText aria-hidden="true" size={15} />
+                  <span>{isFilePreviewLoading ? "Opening" : "Open"}</span>
+                </button>
+              </form>
+
+              {filePreview ? (
+                <div className="file-preview-meta">
+                  <code title={filePreview.path}>{filePreview.path}</code>
+                  <div>
+                    <span>{formatFileSize(filePreview.sizeBytes)}</span>
+                    <span>{formatPreviewTime(filePreview.modifiedAt)}</span>
+                    {filePreview.truncated ? <span>truncated</span> : null}
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="file-preview-toolbar">
+                <div className="file-preview-mode-toggle" role="group" aria-label="Preview mode">
+                  <button
+                    type="button"
+                    className={filePreviewMode === "formatted" ? "active" : ""}
+                    onClick={() => setFilePreviewMode("formatted")}
+                    disabled={!isMarkdownPreview(filePreview) && !isImagePreview(filePreview)}
+                    title={isImagePreview(filePreview) ? "Image preview" : "Formatted Markdown"}
+                  >
+                    <Eye aria-hidden="true" size={14} />
+                    <span>{isImagePreview(filePreview) ? "Preview" : "Formatted"}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={filePreviewMode === "raw" ? "active" : ""}
+                    onClick={() => setFilePreviewMode("raw")}
+                    disabled={isImagePreview(filePreview)}
+                    title="Raw text"
+                  >
+                    <Code2 aria-hidden="true" size={14} />
+                    <span>Raw</span>
+                  </button>
+                </div>
+                <button
+                  className="icon-action"
+                  type="button"
+                  onClick={handleOpenPreviewInEditor}
+                  disabled={!filePreview || !preferredEditor}
+                  title={preferredEditor ? `Open in ${preferredEditor.name}` : "No supported editor detected"}
+                >
+                  <ExternalLink aria-hidden="true" size={14} />
+                  <span>Editor</span>
+                </button>
+              </div>
+
+              {filePreviewError ? (
+                <div className="file-preview-error" role="alert">
+                  {filePreviewError}
+                </div>
+              ) : null}
+
+              <div className="file-preview-content">
+                {isFilePreviewLoading ? (
+                  <div className="file-preview-empty">Loading...</div>
+                ) : filePreview ? (
+                  isImagePreview(filePreview) ? (
+                    <div className="image-preview">
+                      <img src={filePreview.dataUrl ?? ""} alt={filePreview.name} />
+                    </div>
+                  ) : isMarkdownPreview(filePreview) && filePreviewMode === "formatted" ? (
+                    <div className="markdown-preview">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{filePreview.content}</ReactMarkdown>
+                    </div>
+                  ) : (
+                    <pre className="file-preview-raw">{filePreview.content}</pre>
+                  )
+                ) : (
+                  <div className="file-preview-empty">
+                    Paste a local path or Command-click a path in the terminal.
+                  </div>
+                )}
+              </div>
+            </aside>
+          ) : null}
         </div>
       </section>
 

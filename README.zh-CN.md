@@ -178,7 +178,9 @@ npm run tauri:dev
    - Waypoint 把图片保存为会话附件。
    - 输入行插入 [paste image N] 占位符。
    - 按 Enter 提交前，占位符会被反解为附件实际文件路径，再连同回车一起发送给 agent。
-   - 半角/全角冒号（: / ：）也能正常输入到 agent。
+   - 半角/全角冒号（: / ：）以及 `+` 等单字符符号也能正常输入到 agent。
+   - 侧栏工作区目录上的 `+` 按钮弹出快速启动菜单时，底部可勾选「跳过权限确认」；
+     勾选后点击支持的 Agent 会以 dangerous 模式启动，并在 Agent 名称旁显示 dangerous 标记。
 ```
 
 ### Continue / Handover 验收

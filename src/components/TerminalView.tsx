@@ -22,6 +22,8 @@ import type {
 
 type TerminalViewProps = {
   sessionId: string;
+  cwd?: string | null;
+  onPreviewFile?: (path: string) => void;
   onSessionActivated?: (session: SessionInfo) => void;
   onActivationFailed?: (sessionId: string, reason: string) => Promise<void> | void;
 };
@@ -34,7 +36,17 @@ const SCROLLBAR_GUTTER_COLS = 2;
 const IMAGE_PLACEHOLDER_PATTERN = /\[paste image (\d+)\]/gi;
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
-const COLON_INPUT_KEYS = new Set([":", "："]);
+const TERMINAL_FILE_PATH_PATTERN =
+  /(?:"([^"\r\n]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?)"|'([^'\r\n]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?)'|((?:~|\/|\.{1,2}\/)?[A-Za-z0-9_.@%+=,~/-]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?))/g;
+const TERMINAL_PATH_TRAILING_PUNCTUATION = /[),.;\]}]+$/;
+
+function isDirectInterceptablePrintable(key: string): boolean {
+  if (key.length !== 1) {
+    return false;
+  }
+  const code = key.charCodeAt(0);
+  return code >= 0x20 && code !== 0x7f;
+}
 
 function clampDimension(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -98,11 +110,42 @@ function isFocusOrMouseSequence(data: string): boolean {
   );
 }
 
-function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: TerminalViewProps) {
+function trimTerminalPathToken(value: string): string {
+  return value
+    .trim()
+    .replace(TERMINAL_PATH_TRAILING_PUNCTUATION, "")
+    .replace(/:\d+(?::\d+)?$/, "");
+}
+
+function resolveTerminalPath(value: string, cwd?: string | null): string {
+  const token = trimTerminalPathToken(value);
+  if (!token || token.startsWith("/") || token.startsWith("~") || /^[A-Za-z]:[\\/]/.test(token)) {
+    return token;
+  }
+  if (!cwd) {
+    return token;
+  }
+  const parts = `${cwd.replace(/\/+$/, "")}/${token}`.split("/");
+  const normalized: string[] = [];
+  for (const part of parts) {
+    if (!part || part === ".") {
+      continue;
+    }
+    if (part === "..") {
+      normalized.pop();
+      continue;
+    }
+    normalized.push(part);
+  }
+  return `/${normalized.join("/")}`;
+}
+
+function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onActivationFailed }: TerminalViewProps) {
   const shellRef = useRef<HTMLDivElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const commandLinkModeRef = useRef(false);
   const [status, setStatus] = useState("connecting");
   const [isRestoring, setIsRestoring] = useState(false);
   const [attachments, setAttachments] = useState<SessionAttachmentInfo[]>([]);
@@ -282,10 +325,11 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
     terminal.attachCustomKeyEventHandler((event) => {
       if (
         event.type === "keydown" &&
-        COLON_INPUT_KEYS.has(event.key) &&
         !event.ctrlKey &&
         !event.altKey &&
-        !event.metaKey
+        !event.metaKey &&
+        !event.isComposing &&
+        isDirectInterceptablePrintable(event.key)
       ) {
         event.preventDefault();
         event.stopPropagation();
@@ -309,6 +353,69 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
         console.warn("Failed to refresh terminal:", err);
       }
     };
+
+    const setCommandLinkMode = (enabled: boolean) => {
+      if (commandLinkModeRef.current === enabled) {
+        return;
+      }
+      commandLinkModeRef.current = enabled;
+      shell.classList.toggle("terminal-link-mode", enabled);
+      refreshTerminal();
+    };
+
+    const pathLinkDisposable = terminal.registerLinkProvider({
+      provideLinks(bufferLineNumber, callback) {
+        if (!commandLinkModeRef.current || !onPreviewFile) {
+          callback(undefined);
+          return;
+        }
+        const line = terminal.buffer.active.getLine(bufferLineNumber - 1);
+        if (!line) {
+          callback(undefined);
+          return;
+        }
+
+        const lineText = line.translateToString(true);
+        const links = [];
+        TERMINAL_FILE_PATH_PATTERN.lastIndex = 0;
+        let match: RegExpExecArray | null;
+        while ((match = TERMINAL_FILE_PATH_PATTERN.exec(lineText)) !== null) {
+          const quotedWithDouble = Boolean(match[1]);
+          const quotedWithSingle = Boolean(match[2]);
+          const rawPath = match[1] ?? match[2] ?? match[3] ?? "";
+          const targetPath = resolveTerminalPath(rawPath, cwd);
+          if (!targetPath) {
+            continue;
+          }
+          const shownPath = trimTerminalPathToken(rawPath);
+          const startOffset = match.index + (quotedWithDouble || quotedWithSingle ? 1 : 0);
+          const endOffset = startOffset + shownPath.length;
+          if (endOffset <= startOffset) {
+            continue;
+          }
+          links.push({
+            range: {
+              start: { x: startOffset + 1, y: bufferLineNumber },
+              end: { x: endOffset, y: bufferLineNumber },
+            },
+            text: shownPath,
+            decorations: {
+              pointerCursor: true,
+              underline: true,
+            },
+            activate(event: MouseEvent) {
+              if (!event.metaKey) {
+                return;
+              }
+              event.preventDefault();
+              event.stopPropagation();
+              onPreviewFile(targetPath);
+            },
+          });
+        }
+        callback(links.length > 0 ? links : undefined);
+      },
+    });
 
     const fitAndResize = (force = false) => {
       if (disposed) return;
@@ -364,6 +471,17 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
     };
     const handleWindowResize = () => debouncedFitAndResize();
     const handleObservedResize: ResizeObserverCallback = () => debouncedFitAndResize();
+    const handleDocumentKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Meta" || event.metaKey) {
+        setCommandLinkMode(true);
+      }
+    };
+    const handleDocumentKeyUp = (event: KeyboardEvent) => {
+      if (event.key === "Meta" || !event.metaKey) {
+        setCommandLinkMode(false);
+      }
+    };
+    const handleWindowBlur = () => setCommandLinkMode(false);
     const flushQueuedInputs = () => {
       const queue = [...queuedInputsRef.current];
       queuedInputsRef.current = [];
@@ -466,7 +584,8 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
       if (
         event.inputType === "insertText" &&
         data !== null &&
-        COLON_INPUT_KEYS.has(data)
+        !event.isComposing &&
+        isDirectInterceptablePrintable(data)
       ) {
         event.preventDefault();
         event.stopPropagation();
@@ -476,8 +595,11 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
 
     window.addEventListener("resize", handleWindowResize);
     window.addEventListener("focus", refreshAfterWindowRestore);
+    window.addEventListener("blur", handleWindowBlur);
     window.addEventListener("pageshow", refreshAfterWindowRestore);
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    document.addEventListener("keydown", handleDocumentKeyDown);
+    document.addEventListener("keyup", handleDocumentKeyUp);
     terminal.textarea?.addEventListener("beforeinput", handleTerminalBeforeInput);
     shell.addEventListener("paste", handlePaste, true);
     shell.addEventListener("dragover", handleDragOver);
@@ -796,10 +918,14 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
       window.clearTimeout(resizeTimeout);
       detachSession(sessionId).catch(() => undefined);
       dataDisposable.dispose();
+      pathLinkDisposable.dispose();
       window.removeEventListener("resize", handleWindowResize);
       window.removeEventListener("focus", refreshAfterWindowRestore);
+      window.removeEventListener("blur", handleWindowBlur);
       window.removeEventListener("pageshow", refreshAfterWindowRestore);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      document.removeEventListener("keydown", handleDocumentKeyDown);
+      document.removeEventListener("keyup", handleDocumentKeyUp);
       terminal.textarea?.removeEventListener("beforeinput", handleTerminalBeforeInput);
       shell.removeEventListener("paste", handlePaste, true);
       shell.removeEventListener("dragover", handleDragOver);
@@ -814,7 +940,7 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
       pendingInputLineRef.current = "";
       pendingInputReliableRef.current = true;
     };
-  }, [placeholderTokenForAttachment, resolveImagePlaceholders, sessionId, saveImageFiles]);
+  }, [cwd, onPreviewFile, placeholderTokenForAttachment, resolveImagePlaceholders, sessionId, saveImageFiles]);
 
   const handleContainerClick = () => {
     terminalRef.current?.focus();

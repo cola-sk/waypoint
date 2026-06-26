@@ -137,7 +137,8 @@ npm run tauri -- build --debug --no-bundle --ci
 - **跳过权限确认（dangerous）**：在「新对话」弹窗中，选择 Claude Code 或 Codex 时会显示该复选框。Claude Code 注入 `--dangerously-skip-permissions`，Codex 注入 `--dangerously-bypass-approvals-and-sandbox`。该标志写入 session meta，后续 handover、continue、native resume 都会自动重新应用。
 - **无工作区会话（None）**：工作区下拉框选择「None（不绑定工作区）」时，会话归入左侧「无工作区会话」分组，启动目录由系统当前目录兜底。该标记持久化在 `meta.json` 中，重启后仍然保留。
 - **图片粘贴/拖入**：在已挂起的 agent 终端里粘贴（Cmd+V）或拖入图片时，Waypoint 会把图片保存为会话附件，并在输入行插入 `[paste image N]` 占位符。按 Enter 提交前，占位符会被反解为附件的实际文件路径，再连同回车一起发送给 agent。
-- **冒号输入**：xterm 在某些 agent 输入框中会吞掉半角/全角冒号；Waypoint 通过 keydown + beforeinput 拦截 `:` 与 `：`，直接走 PTY 输入通道，确保冒号能正常进入 agent。
+- **冒号与符号输入**：xterm 在某些 agent 输入框中会吞掉半角/全角冒号、`+` 等单字符符号；Waypoint 通过 keydown + beforeinput 拦截所有无修饰键的单字符可打印输入（含 `:`、`：`、`+` 等），绕过 textarea 直接走 PTY 输入通道，并跳过 IME 组合态以避免影响中文输入。
+- **侧栏快速启动 + dangerous**：左侧工作区目录上的 `+` 按钮弹出快速启动菜单时，菜单底部提供「跳过权限确认」复选框；勾选后点击 Claude Code / Codex 等支持的 Agent 会以 dangerous 模式启动，并在 Agent 名称旁显示 `dangerous` 标记。该复选框状态在快速启动菜单间保持，便于连续启动多个 dangerous 会话。
 
 ## Continue / Handover
 

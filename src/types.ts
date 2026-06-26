@@ -97,6 +97,19 @@ export type SessionAttachmentInfo = {
   previewDataUrl?: string | null;
 };
 
+export type FilePreview = {
+  path: string;
+  name: string;
+  extension: string;
+  kind: "text" | "image";
+  mime: string;
+  sizeBytes: number;
+  modifiedAt?: number | null;
+  content: string;
+  dataUrl?: string | null;
+  truncated: boolean;
+};
+
 export type AgentPresetInfo = {
   id: string;
   name: string;
