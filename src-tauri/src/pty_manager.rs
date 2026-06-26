@@ -717,7 +717,7 @@ impl SessionManager {
                 id: Some(id.clone()),
                 name: None,
                 project: None,
-                resume_command: Some(format!("{} --resume {}", display_command, shell_quote(&id))),
+                resume_command: Some(format!("{} --resume={}", display_command, shell_quote(&id))),
                 discovered_at: now,
             });
         }
@@ -2931,14 +2931,18 @@ fn native_resume_command_for(meta: &SessionMeta) -> Result<Option<NativeResumeCo
                 return Ok(None);
             }
             let mut args = resolved.args;
-            args.push("--resume".to_string());
-            args.push(native_id.clone());
+            // Claude Code's --resume takes an OPTIONAL value (`-r, --resume [value]`
+            // in `claude --help`). With clap, optional-value flags must use the
+            // `--resume=<id>` form; the space form `--resume <id>` is parsed as
+            // `--resume` (open picker) plus `<id>` as a positional prompt, which
+            // is why resuming a specific session used to pop the picker.
+            args.push(format!("--resume={native_id}"));
             if meta.dangerous {
                 apply_dangerous_flag("claude-code", &mut args);
             }
             (
                 args,
-                format!("{} --resume {}", resolved.display, shell_quote(&native_id)),
+                format!("{} --resume={}", resolved.display, shell_quote(&native_id)),
             )
         }
         "codex" => {
@@ -4068,6 +4072,7 @@ fn apply_dangerous_flag(agent_id: &str, args: &mut Vec<String>) {
 fn claude_args_have_session_identity(args: &[String]) -> bool {
     args.iter().any(|arg| {
         arg == "--resume"
+            || arg.starts_with("--resume=")
             || arg == "-r"
             || arg.starts_with("-r=")
             || arg == "--session-id"
