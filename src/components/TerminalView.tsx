@@ -34,6 +34,7 @@ const SCROLLBAR_GUTTER_COLS = 2;
 const IMAGE_PLACEHOLDER_PATTERN = /\[paste image (\d+)\]/gi;
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
+const COLON_INPUT_KEYS = new Set([":", "："]);
 
 function clampDimension(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -278,6 +279,21 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
     terminal.loadAddon(fitAddon);
     terminal.open(surface);
     terminal.focus();
+    terminal.attachCustomKeyEventHandler((event) => {
+      if (
+        event.type === "keydown" &&
+        COLON_INPUT_KEYS.has(event.key) &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.metaKey
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        pushInputRef.current?.(event.key);
+        return false;
+      }
+      return true;
+    });
 
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
@@ -445,11 +461,24 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
         }
       })();
     };
+    const handleTerminalBeforeInput = (event: InputEvent) => {
+      const data = event.data;
+      if (
+        event.inputType === "insertText" &&
+        data !== null &&
+        COLON_INPUT_KEYS.has(data)
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        pushInputRef.current?.(data);
+      }
+    };
 
     window.addEventListener("resize", handleWindowResize);
     window.addEventListener("focus", refreshAfterWindowRestore);
     window.addEventListener("pageshow", refreshAfterWindowRestore);
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    terminal.textarea?.addEventListener("beforeinput", handleTerminalBeforeInput);
     shell.addEventListener("paste", handlePaste, true);
     shell.addEventListener("dragover", handleDragOver);
     shell.addEventListener("drop", handleDrop);
@@ -530,7 +559,7 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
             const resolved = resolveImagePlaceholders(pendingInputLineRef.current);
             if (resolved !== pendingInputLineRef.current) {
               const backspaces = "\x7f".repeat(pendingInputLineRef.current.length);
-              output += `${backspaces}${resolved}`;
+              output += `${backspaces}${resolved}${char}`;
             } else {
               output += char;
             }
@@ -771,6 +800,7 @@ function TerminalView({ sessionId, onSessionActivated, onActivationFailed }: Ter
       window.removeEventListener("focus", refreshAfterWindowRestore);
       window.removeEventListener("pageshow", refreshAfterWindowRestore);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      terminal.textarea?.removeEventListener("beforeinput", handleTerminalBeforeInput);
       shell.removeEventListener("paste", handlePaste, true);
       shell.removeEventListener("dragover", handleDragOver);
       shell.removeEventListener("drop", handleDrop);

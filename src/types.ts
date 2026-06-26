@@ -15,6 +15,7 @@ export type SessionInfo = {
   nativeSessionRef?: NativeSessionRef | null;
   parentSessionId?: string | null;
   handoverRootId?: string | null;
+  dangerous: boolean;
 };
 
 export type NativeSessionRef = {

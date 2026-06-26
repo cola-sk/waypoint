@@ -96,6 +96,8 @@ struct SessionMeta {
     parent_session_id: Option<String>,
     #[serde(default)]
     handover_root_id: Option<String>,
+    #[serde(default)]
+    dangerous: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -127,6 +129,7 @@ pub struct SessionInfo {
     native_session_ref: Option<NativeSessionRef>,
     parent_session_id: Option<String>,
     handover_root_id: Option<String>,
+    dangerous: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -598,6 +601,7 @@ impl SessionManager {
             rows,
             cols,
             Vec::new(),
+            dangerous,
         )
     }
 
@@ -615,6 +619,7 @@ impl SessionManager {
         rows: Option<u16>,
         cols: Option<u16>,
         extra_env: Vec<(String, String)>,
+        dangerous: bool,
     ) -> Result<SessionInfo, String> {
         self.spawn_session_with_identity(
             app,
@@ -635,6 +640,7 @@ impl SessionManager {
             None,
             None,
             None,
+            dangerous,
         )
     }
 
@@ -659,6 +665,7 @@ impl SessionManager {
         first_user_message: Option<String>,
         parent_session_id: Option<String>,
         handover_root_id: Option<String>,
+        dangerous: bool,
     ) -> Result<SessionInfo, String> {
         let cwd_path = PathBuf::from(&cwd);
         if !cwd_path.is_dir() {
@@ -780,6 +787,7 @@ impl SessionManager {
             native_session_ref,
             parent_session_id,
             handover_root_id,
+            dangerous,
         };
 
         let session = Arc::new(PtySession {
@@ -1004,6 +1012,7 @@ impl SessionManager {
             meta.first_user_message.clone(),
             meta.parent_session_id.clone(),
             meta.handover_root_id.clone(),
+            meta.dangerous,
         )
     }
 
@@ -1367,7 +1376,7 @@ impl SessionManager {
             );
         }
 
-        let target_info = self.create_agent_session(app, target_agent_id, cwd, false, rows, cols)?;
+        let target_info = self.create_agent_session(app, target_agent_id, cwd, source_info.dangerous, rows, cols)?;
         let target = self.get(&target_info.id)?;
         let handover = self.inject_handover(
             &source,
@@ -1428,6 +1437,7 @@ impl SessionManager {
             native_session_ref: None,
             parent_session_id: None,
             handover_root_id: None,
+            dangerous: source_info.dangerous,
         };
         let handover = self.write_handover_for(
             source,
@@ -1442,6 +1452,9 @@ impl SessionManager {
 
         let mut args = resolved.args;
         args.push(startup_prompt);
+        if source_info.dangerous {
+            apply_dangerous_flag(definition.id, &mut args);
+        }
 
         let target_info = self.spawn_session_with_identity(
             app,
@@ -1460,8 +1473,9 @@ impl SessionManager {
             None,
             None,
             None,
-            None,
-            None,
+            Some(source_info.id.clone()),
+            Some(source_info.handover_root_id.clone().unwrap_or(source_info.id.clone())),
+            source_info.dangerous,
         )?;
         let target = self.get(&target_info.id)?;
         self.record_handover_link(&source_info, &target);
@@ -1517,6 +1531,7 @@ impl SessionManager {
             native_session_ref: None,
             parent_session_id: None,
             handover_root_id: None,
+            dangerous: source_info.dangerous,
         };
         let handover = self.write_handover_for(
             source,
@@ -1554,6 +1569,7 @@ impl SessionManager {
             None,
             None,
             None,
+            source_info.dangerous,
         )?;
         let target = self.get(&target_info.id)?;
         self.record_handover_link(&source_info, &target);
@@ -1609,6 +1625,7 @@ impl SessionManager {
             native_session_ref: None,
             parent_session_id: None,
             handover_root_id: None,
+            dangerous: source_info.dangerous,
         };
         let handover = self.write_handover_for(
             source,
@@ -1627,6 +1644,9 @@ impl SessionManager {
             args.push(parent.to_string_lossy().into_owned());
         }
         args.push(startup_prompt);
+        if source_info.dangerous {
+            apply_dangerous_flag(definition.id, &mut args);
+        }
 
         let target_info = self.spawn_session_with_identity(
             app,
@@ -1647,6 +1667,7 @@ impl SessionManager {
             None,
             None,
             None,
+            source_info.dangerous,
         )?;
         let target = self.get(&target_info.id)?;
         self.record_handover_link(&source_info, &target);
@@ -1703,6 +1724,7 @@ impl SessionManager {
             native_session_ref: None,
             parent_session_id: None,
             handover_root_id: None,
+            dangerous: source_info.dangerous,
         };
         let handover = self.write_handover_for(
             source,
@@ -1742,6 +1764,7 @@ impl SessionManager {
             None,
             None,
             None,
+            source_info.dangerous,
         )?;
         let target = self.get(&target_info.id)?;
         self.record_handover_link(&source_info, &target);
@@ -1859,7 +1882,7 @@ impl SessionManager {
                 let target_cwd = cwd
                     .filter(|value| !value.trim().is_empty())
                     .unwrap_or(&source_info.cwd);
-                planned_handover_target_info(agent_id, target_cwd)?
+                planned_handover_target_info(agent_id, target_cwd, source_info.dangerous)?
             }
             other => return Err(format!("unknown handover target mode: {other}")),
         };
@@ -2585,6 +2608,7 @@ impl SessionMeta {
             native_session_ref: self.native_session_ref.clone(),
             parent_session_id: self.parent_session_id.clone(),
             handover_root_id: self.handover_root_id.clone(),
+            dangerous: self.dangerous,
         }
     }
 }
@@ -2953,6 +2977,9 @@ fn native_resume_command_for(meta: &SessionMeta) -> Result<Option<NativeResumeCo
             let mut args = resolved.args;
             args.push("--resume".to_string());
             args.push(native_id.clone());
+            if meta.dangerous {
+                apply_dangerous_flag("claude-code", &mut args);
+            }
             (
                 args,
                 format!("{} --resume {}", resolved.display, shell_quote(&native_id)),
@@ -2961,16 +2988,20 @@ fn native_resume_command_for(meta: &SessionMeta) -> Result<Option<NativeResumeCo
         "codex" => {
             let mut args = resolved.args;
             args.push("resume".to_string());
-            if let Some(native_id) = native_id {
+            if let Some(ref native_id) = native_id {
                 args.push(native_id.clone());
-                (
-                    args,
-                    format!("{} resume {}", resolved.display, shell_quote(&native_id)),
-                )
             } else {
                 args.push("--last".to_string());
-                (args, format!("{} resume --last", resolved.display))
             }
+            if meta.dangerous {
+                apply_dangerous_flag("codex", &mut args);
+            }
+            let display = if let Some(ref id) = native_id {
+                format!("{} resume {}", resolved.display, shell_quote(id))
+            } else {
+                format!("{} resume --last", resolved.display)
+            };
+            (args, display)
         }
         "agy" => {
             let mut agy_ref = match native_id {
@@ -3153,7 +3184,7 @@ fn resolve_handover_mode(
     }
 }
 
-fn planned_handover_target_info(agent_id: &str, cwd: &str) -> Result<SessionInfo, String> {
+fn planned_handover_target_info(agent_id: &str, cwd: &str, dangerous: bool) -> Result<SessionInfo, String> {
     let definition = agent_definitions()
         .into_iter()
         .find(|definition| definition.id == agent_id)
@@ -3184,6 +3215,7 @@ fn planned_handover_target_info(agent_id: &str, cwd: &str) -> Result<SessionInfo
         native_session_ref: None,
         parent_session_id: None,
         handover_root_id: None,
+        dangerous,
     })
 }
 
@@ -3203,6 +3235,7 @@ fn planned_file_handover_target_info(source: &SessionInfo) -> SessionInfo {
         native_session_ref: None,
         parent_session_id: None,
         handover_root_id: None,
+        dangerous: source.dangerous,
     }
 }
 
@@ -5616,6 +5649,7 @@ mod tests {
             native_session_ref: None,
             parent_session_id: None,
             handover_root_id: None,
+            dangerous: false,
         };
         let target = SessionInfo {
             id: "target".to_string(),
@@ -5632,6 +5666,7 @@ mod tests {
             native_session_ref: None,
             parent_session_id: None,
             handover_root_id: None,
+            dangerous: false,
         };
         let git = GitHandoverContext {
             branch: "feature/handover".to_string(),
@@ -5959,6 +5994,7 @@ Assistant:
             native_session_ref: None,
             parent_session_id: None,
             handover_root_id: None,
+            dangerous: false,
         };
 
         assert!(cache_agy_resume_ref_in_meta(&mut meta));
@@ -6131,6 +6167,7 @@ Resume in the same project: agy --conversation=c79caf4a-cdf9-4b20-a2fb-e6143ba1d
             native_session_ref: None,
             parent_session_id: None,
             handover_root_id: None,
+            dangerous: false,
         };
 
         let result = native_resume_command_for(&meta).unwrap();
