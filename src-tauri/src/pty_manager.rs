@@ -1276,8 +1276,8 @@ impl SessionManager {
             &target_info.cwd,
         )?;
 
-        self.record_handover_link(&source_info, target);
-        self.remember_handover(target, &handover.prompt);
+        self.record_handover_link(&source_info, &target);
+        self.remember_handover(&target, &handover.prompt);
 
         Ok(HandoverResult {
             prompt: handover.prompt,
