@@ -2598,6 +2598,7 @@ function App() {
                       </div>
                     ) : null}
                     {handoverDraftError ? <div className="handover-preview-error">{handoverDraftError}</div> : null}
+                    {!handoverFileResult ? (<>
                     <div className="handover-editor-row">
                       <span>Editable Markdown</span>
                       {handoverPromptEdited ? (
@@ -2623,6 +2624,7 @@ function App() {
                       placeholder="Select a valid target to render the raw handover Markdown."
                       spellCheck={false}
                     />
+                    </>) : null}
                     {shownEvidencePath ? (
                       <small className="handover-evidence-path">Full evidence: {shownEvidencePath}</small>
                     ) : null}
