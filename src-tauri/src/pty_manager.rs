@@ -1880,12 +1880,13 @@ impl SessionManager {
         let source_info = source.info();
         let target_info = match target_mode {
             "existing" => {
-                let target_id = target_session_id
-                    .filter(|id| !id.trim().is_empty())
-                    .ok_or_else(|| {
-                        "target session is required for existing-session handover".to_string()
-                    })?;
-                self.get(target_id)?.info()
+                if let Some(target_id) =
+                    target_session_id.filter(|id| !id.trim().is_empty())
+                {
+                    self.get(target_id)?.info()
+                } else {
+                    planned_file_handover_target_info(&source_info)
+                }
             }
             "new" => {
                 let agent_id = target_agent_id

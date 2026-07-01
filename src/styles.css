@@ -2916,6 +2916,13 @@ textarea:focus-visible {
   font-weight: 600;
 }
 
+.handover-copy-hint {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 4px 0;
+}
+
 .handover-preview-error {
   border: 1px solid #efc9bb;
   border-radius: 8px;
