@@ -1207,8 +1207,9 @@ function App() {
           activeSessionId,
           handoverNote,
           handoverContentMode,
+          editedPrompt,
         );
-        const promptToCopy = editedPrompt || `A handover context file is referenced at ${fileResult.handoverPath}. Read only this exact file, acknowledge context loaded, then wait for my next instruction.`;
+        const promptToCopy = `A handover context file is referenced at ${fileResult.handoverPath}. Read only this exact file, acknowledge context loaded, then wait for my next instruction.`;
         await copyTextToClipboard(promptToCopy);
         setCopiedHandoverPrompt(true);
         window.setTimeout(() => setCopiedHandoverPrompt(false), 1600);

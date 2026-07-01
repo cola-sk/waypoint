@@ -534,10 +534,14 @@ pub fn create_handover_file(
     source_session_id: String,
     note: Option<String>,
     handover_mode: Option<HandoverContentMode>,
+    edited_prompt: Option<String>,
 ) -> Result<HandoverFileResult, String> {
-    state
-        .manager
-        .create_handover_file(&source_session_id, note, handover_mode.unwrap_or_default())
+    state.manager.create_handover_file(
+        &source_session_id,
+        note,
+        handover_mode.unwrap_or_default(),
+        edited_prompt,
+    )
 }
 
 #[tauri::command]
@@ -1923,6 +1927,7 @@ impl SessionManager {
         source_session_id: &str,
         note: Option<String>,
         requested_mode: HandoverContentMode,
+        edited_prompt: Option<String>,
     ) -> Result<HandoverFileResult, String> {
         let source = self.get(source_session_id)?;
         let source_info = source.info();
@@ -1933,7 +1938,7 @@ impl SessionManager {
             &target_info,
             note,
             requested_mode,
-            None,
+            edited_prompt.as_deref(),
             &source_info.cwd,
         )?;
 

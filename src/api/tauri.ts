@@ -223,12 +223,14 @@ export function createHandoverFile(
   sourceSessionId: string,
   note: string,
   handoverMode: HandoverContentMode,
+  editedPrompt?: string,
 ): Promise<HandoverFileResult> {
   assertTauriRuntime();
   return invoke("create_handover_file", {
     sourceSessionId,
     note,
     handoverMode,
+    editedPrompt: editedPrompt ?? null,
   });
 }
 
