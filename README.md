@@ -12,7 +12,8 @@
   <a href="README.zh-CN.md">中文文档（详细版）</a>
 </p>
 
-![Waypoint 桌面界面](docs/assets/waypoint-screenshot.png)
+<img width="2041" height="1148" alt="image" src="https://github.com/user-attachments/assets/d0e8a22b-6131-4ea8-a091-2c5e0f42558b" />
+
 
 Waypoint 是一个 Tauri 桌面应用，用于在一个窗口中管理多个本地 AI agent CLI 会话。它通过 PTY 保持会话长期存活，支持在工作区和 agent 之间切换，并提供 handover 流程，将上下文从一个 agent 会话传递给另一个 agent 会话。
 
