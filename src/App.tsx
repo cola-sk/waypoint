@@ -1103,6 +1103,7 @@ function App() {
   function openHandover() {
     setError(null);
     setHandoverResult(null);
+    setHandoverFileResult(null);
     setHandoverDraft(null);
     setHandoverDraftError(null);
     setHandoverPromptEdit("");
@@ -1218,6 +1219,7 @@ function App() {
         setHandoverPromptEdit("");
         setHandoverPromptEdited(false);
         setIsHandoverDraftLoading(false);
+        setHandoverOpen(false);
       } else {
         const result = await continueSession(
           activeSessionId,
@@ -1236,6 +1238,7 @@ function App() {
         setHandoverPromptEdited(false);
         setIsHandoverDraftLoading(false);
         await refreshSessions(result.targetSession.id);
+        setHandoverOpen(false);
       }
     } catch (err) {
       setError(String(err));
