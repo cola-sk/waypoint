@@ -21,3 +21,4 @@ serde_json = "1"
 tauri = { version = "2", features = [] }
 uuid = { version = "1", features = ["v4", "serde"] }
 rfd = "0.14"
+tauri-plugin-clipboard-manager = "2.3.2"

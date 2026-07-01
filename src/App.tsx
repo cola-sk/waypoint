@@ -1137,6 +1137,12 @@ function App() {
   }
 
   async function copyTextToClipboard(value: string) {
+    if (isTauriRuntime()) {
+      const { writeText } = await import("@tauri-apps/plugin-clipboard-manager");
+      await writeText(value);
+      return;
+    }
+
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(value);
       return;
