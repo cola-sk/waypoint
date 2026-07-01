@@ -2546,6 +2546,7 @@ function App() {
                 </p>
               )}
 
+              {handoverMode === "new" ? (
               <div className="field">
                 <label htmlFor="handover-note">Note</label>
                 <textarea
@@ -2553,12 +2554,14 @@ function App() {
                   value={handoverNote}
                   onChange={(event) => {
                     setHandoverResult(null);
+                    setHandoverFileResult(null);
                     setHandoverNote(event.target.value);
                   }}
                   placeholder="Optional: tell the target agent what to focus on next."
                   rows={6}
                 />
               </div>
+              ) : null}
 
                 </div>
 
