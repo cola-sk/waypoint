@@ -254,6 +254,7 @@ const HIDDEN_WORKSPACE_STORAGE_KEY = storageKey("hidden_workspace_paths");
 const PINNED_ITEMS_STORAGE_KEY = storageKey("pinned_items");
 const NEW_CONVERSATION_WORKSPACE_HISTORY_STORAGE_KEY = storageKey("new_conversation_workspace_history");
 const COLLAPSED_WORKSPACE_STORAGE_KEY = storageKey("collapsed_workspace_paths");
+const COLLAPSED_SESSIONS_STORAGE_KEY = storageKey("collapsed_session_ids");
 const PINNED_WORKSPACES_STORAGE_KEY = storageKey("pinned_workspaces");
 const SELECTED_EDITOR_STORAGE_KEY = storageKey("selected_editor_id");
 const SIDEBAR_WIDTH_STORAGE_KEY = storageKey("sidebar-width");
@@ -530,6 +531,7 @@ function App() {
   const [newConversationDangerous, setNewConversationDangerous] = useState(false);
   const [hiddenWorkspacePaths, setHiddenWorkspacePaths] = useState<string[]>([]);
   const [collapsedWorkspacePaths, setCollapsedWorkspacePaths] = useState<string[]>([]);
+  const [collapsedSessionIds, setCollapsedSessionIds] = useState<string[]>([]);
   const [pinnedItems, setPinnedItems] = useState<PinnedItem[]>([]);
   const [isSelectingWorkspaceDirectory, setIsSelectingWorkspaceDirectory] = useState(false);
 
@@ -598,6 +600,10 @@ function App() {
   const collapsedWorkspacePathSet = useMemo(
     () => new Set(collapsedWorkspacePaths),
     [collapsedWorkspacePaths],
+  );
+  const collapsedSessionIdSet = useMemo(
+    () => new Set(collapsedSessionIds),
+    [collapsedSessionIds],
   );
   const noneWorkspaceSessions = useMemo(
     () =>
@@ -762,6 +768,16 @@ function App() {
         ? current.filter((item) => item !== path)
         : [...current, path];
       localStorage.setItem(COLLAPSED_WORKSPACE_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  }
+
+  function toggleSessionCollapsed(sessionId: string) {
+    setCollapsedSessionIds((current) => {
+      const next = current.includes(sessionId)
+        ? current.filter((item) => item !== sessionId)
+        : [...current, sessionId];
+      localStorage.setItem(COLLAPSED_SESSIONS_STORAGE_KEY, JSON.stringify(next));
       return next;
     });
   }
@@ -1311,16 +1327,23 @@ function App() {
 
   function renderSessionItem(
     session: SessionInfo,
-    options: { childCount?: number; parentSession?: SessionInfo | null } = {},
+    options: {
+      childCount?: number;
+      isCollapsed?: boolean;
+      onToggleCollapsed?: () => void;
+      parentSession?: SessionInfo | null;
+    } = {},
   ) {
     const pinned = isSessionPinned(session.id);
     const parentLabel = options.parentSession
       ? `from ${sessionDisplayTitle(options.parentSession)}`
       : null;
+    const hasChildren = Boolean(options.childCount);
+    const collapsedLabel = options.isCollapsed ? "展开层级会话" : "折叠层级会话";
     return (
       <div
         className={`workspace-session-item chat-history-item ${options.parentSession ? "linked-child" : ""} ${
-          options.childCount ? "linked-parent" : ""
+          hasChildren ? "linked-parent" : ""
         } ${session.id === activeSessionId ? "active" : ""} ${
           pinned ? "pinned" : ""
         }`}
@@ -1329,6 +1352,23 @@ function App() {
         title={session.firstUserMessage ?? session.title}
       >
         <div className="session-info-left">
+          {hasChildren ? (
+            <button
+              type="button"
+              className="session-collapse-toggle"
+              onClick={(event) => {
+                event.stopPropagation();
+                options.onToggleCollapsed?.();
+              }}
+              aria-label={`${collapsedLabel}：${sessionDisplayTitle(session)}`}
+              aria-expanded={!options.isCollapsed}
+              title={collapsedLabel}
+            >
+              {options.isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+            </button>
+          ) : (
+            <span className="session-collapse-spacer" aria-hidden="true" />
+          )}
           <span className={`status-dot ${session.status}`} />
           <span className="session-copy">
             <span className="session-label">{sessionDisplayTitle(session)}</span>
@@ -1399,14 +1439,17 @@ function App() {
     const parentSession = node.session.parentSessionId
       ? sessionById.get(node.session.parentSessionId) ?? null
       : null;
+    const isCollapsed = collapsedSessionIdSet.has(node.session.id);
 
     return (
       <div className="session-tree-node" data-depth={depth} key={node.session.id}>
         {renderSessionItem(node.session, {
           childCount: node.children.length,
+          isCollapsed,
+          onToggleCollapsed: () => toggleSessionCollapsed(node.session.id),
           parentSession,
         })}
-        {node.children.length > 0 ? (
+        {node.children.length > 0 && !isCollapsed ? (
           <div className="session-tree-children">
             {node.children.map((child) => renderSessionNode(child, depth + 1, nextLineage))}
           </div>
@@ -1574,6 +1617,27 @@ function App() {
             }
           } catch (e) {
             console.error("[Waypoint] Failed to parse collapsed workspaces:", e);
+          }
+        }
+
+        const savedCollapsedSessions = localStorage.getItem(COLLAPSED_SESSIONS_STORAGE_KEY);
+        if (savedCollapsedSessions) {
+          try {
+            const parsed = JSON.parse(savedCollapsedSessions);
+            if (Array.isArray(parsed)) {
+              const normalized = Array.from(
+                new Set(
+                  parsed
+                    .filter((item): item is string => typeof item === "string")
+                    .map((item) => item.trim())
+                    .filter(Boolean),
+                ),
+              );
+              setCollapsedSessionIds(normalized);
+              localStorage.setItem(COLLAPSED_SESSIONS_STORAGE_KEY, JSON.stringify(normalized));
+            }
+          } catch (e) {
+            console.error("[Waypoint] Failed to parse collapsed sessions:", e);
           }
         }
 

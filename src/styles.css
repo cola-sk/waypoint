@@ -1127,9 +1127,43 @@ textarea:focus-visible {
 
 .chat-history-item .session-info-left {
   display: grid;
-  grid-template-columns: 7px minmax(0, 1fr);
+  grid-template-columns: 16px 7px minmax(0, 1fr);
   align-items: start;
-  gap: 7px;
+  gap: 6px;
+}
+
+.session-collapse-toggle,
+.session-collapse-spacer {
+  width: 16px;
+  height: 16px;
+  margin-top: -1px;
+}
+
+.session-collapse-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    color 120ms ease;
+}
+
+.session-collapse-toggle:hover {
+  background: rgba(31, 35, 40, 0.06);
+  color: var(--text-primary);
+}
+
+.session-collapse-toggle:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: 1px;
+}
+
+.session-collapse-spacer {
+  display: inline-block;
 }
 
 .workspace-session-item.linked-parent {
