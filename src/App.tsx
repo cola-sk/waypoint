@@ -2376,6 +2376,7 @@ function App() {
                   type="button"
                   onClick={() => {
                     setHandoverResult(null);
+                    setHandoverFileResult(null);
                     setHandoverMode("new");
                   }}
                 >
@@ -2430,6 +2431,7 @@ function App() {
                       checked={handoverContentMode === "recommended"}
                       onChange={() => {
                         setHandoverResult(null);
+                        setHandoverFileResult(null);
                         setHandoverContentMode("recommended");
                       }}
                     />
@@ -2450,6 +2452,7 @@ function App() {
                       checked={handoverContentMode === "compact"}
                       onChange={() => {
                         setHandoverResult(null);
+                        setHandoverFileResult(null);
                         setHandoverContentMode("compact");
                       }}
                     />
@@ -2466,6 +2469,7 @@ function App() {
                       checked={handoverContentMode === "full"}
                       onChange={() => {
                         setHandoverResult(null);
+                        setHandoverFileResult(null);
                         setHandoverContentMode("full");
                       }}
                     />
