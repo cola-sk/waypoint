@@ -1127,15 +1127,15 @@ textarea:focus-visible {
 
 .chat-history-item .session-info-left {
   display: grid;
-  grid-template-columns: 16px 7px minmax(0, 1fr);
+  grid-template-columns: 18px 7px minmax(0, 1fr);
   align-items: start;
-  gap: 6px;
+  gap: 5px;
 }
 
 .session-collapse-toggle,
 .session-collapse-spacer {
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   margin-top: -1px;
 }
 
@@ -1144,8 +1144,8 @@ textarea:focus-visible {
   align-items: center;
   justify-content: center;
   border-radius: 5px;
-  background: transparent;
-  color: var(--text-muted);
+  background: rgba(31, 35, 40, 0.05);
+  color: var(--text-secondary);
   cursor: pointer;
   transition:
     background 120ms ease,
@@ -1153,7 +1153,7 @@ textarea:focus-visible {
 }
 
 .session-collapse-toggle:hover {
-  background: rgba(31, 35, 40, 0.06);
+  background: rgba(31, 35, 40, 0.10);
   color: var(--text-primary);
 }
 
@@ -2888,9 +2888,16 @@ textarea:focus-visible {
   padding: 3px 8px;
 }
 
-.handover-path {
-  display: block;
+.handover-path-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.handover-path-row .handover-path {
+  flex: 1;
   min-width: 0;
+}
   overflow: hidden;
   border: 1px solid var(--border-color-muted);
   border-radius: 8px;
@@ -2902,6 +2909,11 @@ textarea:focus-visible {
   padding: 8px 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.handover-copied-badge {
+  color: var(--accent-cyan);
+  font-weight: 600;
 }
 
 .handover-preview-error {

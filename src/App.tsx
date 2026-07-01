@@ -518,6 +518,7 @@ function App() {
   const [handoverDraftError, setHandoverDraftError] = useState<string | null>(null);
   const [isCreatingHandoverFile, setIsCreatingHandoverFile] = useState(false);
   const [copiedHandoverPath, setCopiedHandoverPath] = useState(false);
+  const [copiedHandoverPrompt, setCopiedHandoverPrompt] = useState(false);
   const [isForwarding, setIsForwarding] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleteSessionId, setDeleteSessionId] = useState<string | null>(null);
@@ -622,7 +623,7 @@ function App() {
     return newConversationWorkspaceValue;
   }, [newConversationCustomWorkspace, newConversationWorkspaceValue]);
   const handoverTargets = useMemo(
-    () => sessions.filter((session) => session.id !== activeSessionId && session.status === "running"),
+    () => sessions.filter((session) => session.id !== activeSessionId),
     [activeSessionId, sessions],
   );
   const continueAgent = useMemo(
@@ -1219,9 +1220,14 @@ function App() {
               handoverContentMode,
               editedPrompt,
             );
+      if (handoverMode === "existing") {
+        await copyTextToClipboard(result.prompt);
+        setCopiedHandoverPrompt(true);
+        window.setTimeout(() => setCopiedHandoverPrompt(false), 1600);
+      }
       revealWorkspacePath(result.targetSession.cwd);
+      setHandoverResult(result);
       setHandoverNote("");
-      setHandoverOpen(false);
       setHandoverDraft(null);
       setHandoverDraftError(null);
       setHandoverPromptEdit("");
@@ -1364,7 +1370,7 @@ function App() {
               aria-expanded={!options.isCollapsed}
               title={collapsedLabel}
             >
-              {options.isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+              {options.isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
             </button>
           ) : (
             <span className="session-collapse-spacer" aria-hidden="true" />
@@ -2586,9 +2592,32 @@ function App() {
                               : "No preview"}
                         </strong>
                       </div>
-                      <small>{shownHandoverMode}</small>
+                      {handoverResult && handoverMode === "existing" ? (
+                        <small className="handover-copied-badge">
+                          {copiedHandoverPrompt ? "Copied!" : "Prompt copied to clipboard"}
+                        </small>
+                      ) : (
+                        <small>{shownHandoverMode}</small>
+                      )}
                     </div>
-                    {shownHandoverPath ? <code className="handover-path">{shownHandoverPath}</code> : null}
+                    {shownHandoverPath ? (
+                      <div className="handover-path-row">
+                        <code className="handover-path">
+                          {handoverResult && handoverMode === "existing" ? "Handover file: " : ""}
+                          {shownHandoverPath}
+                        </code>
+                        {handoverResult && handoverMode === "existing" ? (
+                          <button
+                            className="icon-action"
+                            type="button"
+                            onClick={handleCopyHandoverPath}
+                            title="Copy file path"
+                          >
+                            {copiedHandoverPath ? "Copied!" : "Copy path"}
+                          </button>
+                        ) : null}
+                      </div>
+                    ) : null}
                     {handoverDraftError ? <div className="handover-preview-error">{handoverDraftError}</div> : null}
                     <div className="handover-editor-row">
                       <span>Editable Markdown</span>
@@ -2630,8 +2659,9 @@ function App() {
               <button
                 className="primary-action"
                 type="button"
-                onClick={handleContinue}
+                onClick={handoverResult && handoverMode === "existing" ? closeHandover : handleContinue}
                 disabled={
+                  (handoverResult && handoverMode === "existing") ? false :
                   isForwarding ||
                   (handoverMode === "existing" && !handoverTargetId) ||
                   (handoverMode === "new" && (!continueAgent?.available || !continueWorkspacePath.trim()))
@@ -2640,10 +2670,12 @@ function App() {
                 <Send aria-hidden="true" size={15} />
                 <span>
                   {isForwarding
-                    ? "Continuing"
-                    : handoverMode === "new"
-                      ? "Create & Continue"
-                      : "Forward"}
+                    ? handoverMode === "new" ? "Creating" : "Copying"
+                    : handoverResult
+                      ? "Done"
+                      : handoverMode === "new"
+                        ? "Create & Continue"
+                        : "Copy & Close"}
                 </span>
               </button>
             </footer>

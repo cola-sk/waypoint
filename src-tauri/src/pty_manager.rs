@@ -1265,28 +1265,19 @@ impl SessionManager {
         let target = self.get(target_session_id)?;
         let source_info = source.info();
         let target_info = target.info();
-        if !matches!(source_info.status, SessionStatus::Running) {
-            return Err(format!(
-                "source session is not running: {}",
-                source_info.title
-            ));
-        }
-        if !matches!(target_info.status, SessionStatus::Running) {
-            return Err(format!(
-                "target session is not running: {}",
-                target_info.title
-            ));
-        }
 
-        let handover = self.inject_handover(
+        let handover = self.write_handover_for(
             &source,
-            &target,
+            &source_info,
+            &target_info,
             note,
             handover_mode,
             edited_prompt.as_deref(),
-            false,
+            &target_info.cwd,
         )?;
-        let target_info = target.info();
+
+        self.record_handover_link(&source_info, target);
+        self.remember_handover(target, &handover.prompt);
 
         Ok(HandoverResult {
             prompt: handover.prompt,
