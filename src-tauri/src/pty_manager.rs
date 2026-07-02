@@ -1161,7 +1161,7 @@ impl SessionManager {
             meta.first_user_message.is_none()
         };
         let info = session.info();
-        let payload = if is_first_message && info.agent_id == "agy" {
+        let payload = if is_first_message && (info.agent_id == "agy" || info.agent_id == "codex") {
             format!(
                 "{}\n<!-- waypoint_session_id: {} -->",
                 clean_msg, session_id
@@ -2476,7 +2476,7 @@ fn should_append_agy_session_marker(session: &Arc<PtySession>, data: &str) -> bo
     }
     {
         let meta = session.meta.lock();
-        if meta.agent_id != "agy" || meta.first_user_message.is_some() {
+        if (meta.agent_id != "agy" && meta.agent_id != "codex") || meta.first_user_message.is_some() {
             return false;
         }
     }
@@ -3875,7 +3875,8 @@ fn native_transcript_path(
             if !native_id.is_empty() {
                 find_codex_native_transcript_path(native_id)
             } else {
-                find_latest_codex_native_transcript_path(&source_info.cwd, source_info.created_at)
+                find_codex_session_by_marker(&source_info.id)
+                    .or_else(|| find_latest_codex_native_transcript_path(&source_info.cwd, source_info.created_at))
             }
         }
         NativeTranscriptKind::Agy => {
@@ -4128,6 +4129,19 @@ fn claude_args_have_session_identity(args: &[String]) -> bool {
     })
 }
 
+fn find_codex_session_by_marker(session_id: &str) -> Option<PathBuf> {
+    let home = home_dir()?;
+    let mut candidates = Vec::new();
+    collect_jsonl_paths(&home.join(".codex").join("sessions"), 6, &mut candidates);
+
+    let pattern = format!("waypoint_session_id: {session_id}");
+    candidates.into_iter().find(|path| {
+        fs::read_to_string(path)
+            .map(|content| content.contains(&pattern))
+            .unwrap_or(false)
+    })
+}
+
 fn find_codex_native_transcript_path(native_id: &str) -> Option<PathBuf> {
     let home = home_dir()?;
     let mut candidates = Vec::new();
@@ -4158,15 +4172,37 @@ fn find_latest_codex_native_transcript_path(cwd: &str, created_at: u64) -> Optio
     collect_jsonl_paths(&home.join(".codex").join("sessions"), 6, &mut candidates);
 
     let normalized_cwd = normalize_existing_path(cwd);
+
+    // Use file birth time (stable, reflects session start) rather than modification
+    // time (which grows whenever the session sends a new message).  This prevents a
+    // newer concurrent session in the same workspace from stealing the transcript of
+    // an older session during handover.
     candidates
         .into_iter()
         .filter(|path| codex_transcript_matches_workspace(path, cwd, normalized_cwd.as_deref()))
-        .filter(|path| {
-            path_modified_secs(path)
-                .map(|modified| modified.saturating_add(5) >= created_at)
-                .unwrap_or(true)
+        .filter_map(|path| {
+            // Birth time is stable; fall back to modified time if unavailable.
+            let born_at = path_created_secs(&path)
+                .or_else(|| path_modified_secs(&path))?;
+            // Exclude transcripts that were already old (> 30 s) before this session started.
+            if born_at.saturating_add(30) < created_at {
+                return None;
+            }
+            Some((path, born_at))
         })
-        .max_by_key(|path| path_modified_secs(path).unwrap_or_default())
+        .min_by_key(|(_, born_at)| {
+            // Select the transcript whose birth time is closest to session creation.
+            // Prefer transcripts born just *after* created_at (normal case: codex
+            // writes the first event a second or two after the Waypoint session is
+            // recorded).  Slightly penalise transcripts born *before* created_at to
+            // avoid picking up a pre-existing session that happens to share the cwd.
+            if *born_at >= created_at {
+                *born_at - created_at
+            } else {
+                (created_at - *born_at).saturating_mul(2)
+            }
+        })
+        .map(|(path, _)| path)
 }
 
 fn codex_transcript_has_session_id(path: &Path, native_id: &str) -> bool {
@@ -4232,6 +4268,19 @@ fn path_modified_secs(path: &Path) -> Option<u64> {
     fs::metadata(path)
         .ok()?
         .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
+}
+
+/// Returns the file birth (creation) time in seconds since the Unix epoch.
+/// On macOS this is the true birth time; falls back to modification time on
+/// platforms that don't expose it.
+fn path_created_secs(path: &Path) -> Option<u64> {
+    fs::metadata(path)
+        .ok()?
+        .created()
         .ok()?
         .duration_since(UNIX_EPOCH)
         .ok()
