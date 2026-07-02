@@ -68,9 +68,7 @@ function isLiveDirectInterceptableInput(value: string): boolean {
   return chars.every(
     (char) =>
       isDirectInterceptablePrintable(char) &&
-      (COLON_INPUT_KEYS.has(char) ||
-        ASCII_SYMBOL_INPUT_KEYS.has(char) ||
-        isCjkOrFullwidthPunctuation(char)),
+      COLON_INPUT_KEYS.has(char),
   );
 }
 
@@ -300,6 +298,7 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
     if (!shell || !surface) return;
 
     let disposed = false;
+    let isConnecting = true;
     let unlistenPtyData: UnlistenFn | null = null;
     let unlistenSessionExited: UnlistenFn | null = null;
     let unlistenSessionError: UnlistenFn | null = null;
@@ -356,9 +355,13 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
     terminal.loadAddon(fitAddon);
     terminal.open(surface);
     terminal.focus();
-    let suppressedBeforeInput: string | null = null;
-    let suppressedBeforeInputTimer = 0;
+    let lastInterceptedKeydown: string | null = null;
     terminal.attachCustomKeyEventHandler((event) => {
+      if (isConnecting) {
+        event.preventDefault();
+        event.stopPropagation();
+        return false;
+      }
       if (
         event.type === "keydown" &&
         !event.ctrlKey &&
@@ -369,11 +372,7 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
       ) {
         event.preventDefault();
         event.stopPropagation();
-        suppressedBeforeInput = event.key;
-        window.clearTimeout(suppressedBeforeInputTimer);
-        suppressedBeforeInputTimer = window.setTimeout(() => {
-          suppressedBeforeInput = null;
-        }, 0);
+        lastInterceptedKeydown = event.key;
         pushInputRef.current?.(event.key);
         return false;
       }
@@ -629,14 +628,14 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
       })();
     };
     const handleTerminalBeforeInput = (event: InputEvent) => {
-      const data = event.data;
-      if (data !== null && suppressedBeforeInput === data) {
+      if (isConnecting) {
         event.preventDefault();
         event.stopPropagation();
-        suppressedBeforeInput = null;
-        window.clearTimeout(suppressedBeforeInputTimer);
         return;
       }
+      const data = event.data;
+      const wasJustIntercepted = data !== null && lastInterceptedKeydown === data;
+      lastInterceptedKeydown = null;
       if (
         event.inputType === "insertText" &&
         data !== null &&
@@ -645,7 +644,9 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
       ) {
         event.preventDefault();
         event.stopPropagation();
-        pushInputRef.current?.(data);
+        if (!wasJustIntercepted) {
+          pushInputRef.current?.(data);
+        }
       }
     };
 
@@ -912,25 +913,62 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
       unlistenSessionError = unlisten;
     });
 
+    const waitForShellLayout = (): Promise<{ width: number; height: number }> => {
+      return new Promise((resolve) => {
+        if (!shell) {
+          resolve({ width: 0, height: 0 });
+          return;
+        }
+        if (shell.clientWidth >= 100 && shell.clientHeight >= 50) {
+          resolve({ width: shell.clientWidth, height: shell.clientHeight });
+          return;
+        }
+        const startTime = Date.now();
+        const check = () => {
+          if (disposed) {
+            resolve({ width: 0, height: 0 });
+            return;
+          }
+          const w = shell.clientWidth;
+          const h = shell.clientHeight;
+          if (w >= 100 && h >= 50) {
+            resolve({ width: w, height: h });
+          } else if (Date.now() - startTime > 1000) {
+            resolve({ width: w, height: h });
+          } else {
+            requestAnimationFrame(check);
+          }
+        };
+        requestAnimationFrame(check);
+      });
+    };
+
     async function connect() {
       try {
         const snapshot = await attachSession(sessionId);
         if (disposed) return;
+
+        await waitForShellLayout();
+        if (disposed) return;
+
         isLive = snapshot.mode === "live" && snapshot.session.status === "running";
         wasReplayOnly = !isLive;
         shouldClearReplayOnActivation = snapshot.session.agentId === "claude-code";
-        fitAndResize();
+        fitAndResize(true);
         const onWriteComplete = () => {
           isReplaying = false;
+          isConnecting = false;
           if (!disposed) {
             setIsRestoring(false);
           }
         };
         const replayBytes = snapshot.replayBase64 ? decodeBase64Bytes(snapshot.replayBase64) : null;
-        if (replayBytes) {
+        if (replayBytes && replayBytes.length > 0) {
           terminal.write(replayBytes, onWriteComplete);
-        } else {
+        } else if (snapshot.replay && snapshot.replay.length > 0) {
           terminal.write(snapshot.replay, onWriteComplete);
+        } else {
+          onWriteComplete();
         }
         unlistenPtyData = await listen<PtyDataEvent>("pty:data", (event) => {
           if (event.payload.sessionId === sessionId) {
@@ -945,9 +983,6 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
           }
         });
         setStatus(isLive ? "attached" : "readonly");
-        if (!snapshot.replay && !snapshot.replayBase64) {
-          setIsRestoring(false);
-        }
         setTimeout(() => {
           if (!disposed) {
             terminal.focus();
@@ -956,6 +991,7 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
       } catch (err) {
         setStatus("error");
         setIsRestoring(false);
+        isConnecting = false;
         terminal.writeln(`[waypoint attach error] ${String(err)}`);
       }
     }
@@ -968,7 +1004,6 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
       activateAndQueueRef.current = null;
       pushInputRef.current = null;
       window.clearTimeout(resizeTimeout);
-      window.clearTimeout(suppressedBeforeInputTimer);
       detachSession(sessionId).catch(() => undefined);
       dataDisposable.dispose();
       pathLinkDisposable.dispose();

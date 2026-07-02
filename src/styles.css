@@ -1928,6 +1928,8 @@ textarea:focus-visible {
 
 .output-layout.with-file-preview {
   grid-template-columns: minmax(0, 1fr) 6px minmax(320px, 460px);
+  padding: 16px 16px 16px 0;
+  gap: 0;
 }
 
 .output-layout .terminal-frame {
@@ -2202,7 +2204,7 @@ textarea:focus-visible {
   color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.45;
-  padding: 24px;
+  padding: 16px;
   text-align: center;
 }
 
@@ -2252,7 +2254,7 @@ textarea:focus-visible {
   color: var(--text-primary);
   font-size: 13px;
   line-height: 1.65;
-  padding: 18px 20px 28px;
+  padding: 18px 16px 28px;
 }
 
 .markdown-preview h1,

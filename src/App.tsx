@@ -183,6 +183,33 @@ function buildSessionForest(folderSessions: SessionInfo[]): SessionTreeNode[] {
   return roots;
 }
 
+function collectSessionDescendantIds(allSessions: SessionInfo[], rootSessionId: string): string[] {
+  const childIdsByParent = new Map<string, string[]>();
+  allSessions.forEach((session) => {
+    const parentId = session.parentSessionId?.trim();
+    if (!parentId || parentId === session.id) {
+      return;
+    }
+    const childIds = childIdsByParent.get(parentId) ?? [];
+    childIds.push(session.id);
+    childIdsByParent.set(parentId, childIds);
+  });
+
+  const descendantIds: string[] = [];
+  const visited = new Set<string>([rootSessionId]);
+  const stack = [...(childIdsByParent.get(rootSessionId) ?? [])];
+  while (stack.length > 0) {
+    const sessionId = stack.pop();
+    if (!sessionId || visited.has(sessionId)) {
+      continue;
+    }
+    visited.add(sessionId);
+    descendantIds.push(sessionId);
+    stack.push(...(childIdsByParent.get(sessionId) ?? []));
+  }
+  return descendantIds;
+}
+
 function normalizeWorkspacePath(value: string) {
   const trimmed = value.trim();
   if (!trimmed) {
@@ -698,6 +725,10 @@ function App() {
     () => sessions.find((session) => session.id === deleteSessionId) ?? null,
     [deleteSessionId, sessions],
   );
+  const pendingDeleteDescendantIds = useMemo(
+    () => (deleteSessionId ? collectSessionDescendantIds(sessions, deleteSessionId) : []),
+    [deleteSessionId, sessions],
+  );
   const pinnedItemKeySet = useMemo(
     () => new Set(pinnedItems.map((item) => pinnedItemKey(item.targetType, item.targetId))),
     [pinnedItems],
@@ -1141,11 +1172,14 @@ function App() {
     setError(null);
     setIsDeletingSession(true);
     try {
-      await deleteSession(deleteSessionId);
-      unpinSession(deleteSessionId);
+      const deletedIds = [deleteSessionId, ...pendingDeleteDescendantIds];
+      for (const sessionId of deletedIds) {
+        await deleteSession(sessionId);
+        unpinSession(sessionId);
+      }
       const nextSessions = await listSessions();
       setSessions(nextSessions);
-      if (activeSessionId === deleteSessionId) {
+      if (activeSessionId && deletedIds.includes(activeSessionId)) {
         setActiveSessionId(nextSessions[0]?.id ?? null);
       }
       setDeleteSessionId(null);
@@ -2903,7 +2937,11 @@ function App() {
 	            </header>
 	            <div className="modal-body">
 	              <p className="confirm-copy">
-	                确认删除「{sessionDisplayTitle(pendingDeleteSession)}」的本地历史记录吗？此操作不可恢复。
+	                确认删除「{sessionDisplayTitle(pendingDeleteSession)}」的本地历史记录吗？
+	                {pendingDeleteDescendantIds.length > 0
+	                  ? ` 这也会删除 ${pendingDeleteDescendantIds.length} 个后续会话。`
+	                  : ""}
+	                此操作不可恢复。
 	              </p>
 	              <p className="confirm-meta">
 	                {pendingDeleteSession.agentName} · {formatSessionTime(pendingDeleteSession.createdAt)}
