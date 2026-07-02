@@ -1395,9 +1395,10 @@ textarea:focus-visible {
 }
 
 .agent-status-panel .panel-title {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
   margin-bottom: 8px;
   padding: 0 8px;
   color: #767a80;
@@ -2134,9 +2135,12 @@ textarea:focus-visible {
 
 .file-preview-toolbar {
   flex: 0 0 auto;
-  justify-content: space-between;
   border-bottom: 1px solid var(--border-color-muted);
   padding: 10px 12px;
+}
+
+.file-preview-toolbar > .icon-action:first-of-type {
+  margin-left: auto;
 }
 
 .file-preview-mode-toggle {
