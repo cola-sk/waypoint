@@ -1487,7 +1487,7 @@ function App() {
               aria-expanded={!options.isCollapsed}
               title={collapsedLabel}
             >
-              {options.isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+              {options.isCollapsed ? <ChevronRight size={18} /> : <ChevronDown size={18} />}
             </button>
           ) : (
             <span className="session-collapse-spacer" aria-hidden="true" />
@@ -1881,7 +1881,7 @@ function App() {
                     aria-expanded={!noneCollapsed}
                   >
                     <div className="workspace-folder-info" title="none">
-                      {noneCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                      {noneCollapsed ? <ChevronRight size={18} /> : <ChevronDown size={18} />}
                       <Folder size={14} className="folder-icon" />
                       <span className="folder-name">无工作区会话</span>
                     </div>
@@ -1936,7 +1936,7 @@ function App() {
                     aria-expanded={!collapsed}
                   >
                     <div className="workspace-folder-info" title={folder.path}>
-                      {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                      {collapsed ? <ChevronRight size={18} /> : <ChevronDown size={18} />}
                       <Folder size={14} className="folder-icon" />
                       <span className="folder-name">{folder.name}</span>
                     </div>
@@ -2328,7 +2328,6 @@ function App() {
 
               {filePreview ? (
                 <div className="file-preview-meta">
-                  <code title={filePreview.path}>{filePreview.path}</code>
                   <div>
                     <span>{formatFileSize(filePreview.sizeBytes)}</span>
                     <span>{formatPreviewTime(filePreview.modifiedAt)}</span>
@@ -2360,6 +2359,16 @@ function App() {
                     <span>Raw</span>
                   </button>
                 </div>
+                <button
+                  className="icon-action"
+                  type="button"
+                  onClick={() => void loadFilePreview(filePreviewPathInput)}
+                  disabled={!filePreview || isFilePreviewLoading}
+                  title="刷新文件内容"
+                >
+                  <RefreshCw aria-hidden="true" size={14} />
+                  <span>刷新</span>
+                </button>
                 <button
                   className="icon-action"
                   type="button"

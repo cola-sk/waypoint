@@ -39,10 +39,7 @@ const BRACKETED_PASTE_END = "\x1b[201~";
 const TERMINAL_FILE_PATH_PATTERN =
   /(?:"([^"\r\n]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?)"|'([^'\r\n]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?)'|((?:~|\/|\.{1,2}\/)?[A-Za-z0-9_.@%+=,~/-]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?))/g;
 const TERMINAL_PATH_TRAILING_PUNCTUATION = /[),.;\]}]+$/;
-const COLON_INPUT_KEYS = new Set([":", "："]);
-const ASCII_SYMBOL_INPUT_KEYS = new Set(
-  Array.from("~`!@#$%^&*()-_=+[{]}\\|;:'\",<.>/?"),
-);
+
 
 function isDirectInterceptablePrintable(key: string): boolean {
   if (key.length !== 1) {
@@ -61,15 +58,15 @@ function isCjkOrFullwidthPunctuation(key: string): boolean {
 }
 
 function isLiveDirectInterceptableInput(value: string): boolean {
-  const chars = Array.from(value);
-  if (chars.length === 0) {
+  if (value.length !== 1) {
     return false;
   }
-  return chars.every(
-    (char) =>
-      isDirectInterceptablePrintable(char) &&
-      COLON_INPUT_KEYS.has(char),
-  );
+  const code = value.charCodeAt(0);
+  // Only intercept basic ASCII printable characters in live mode.
+  // CJK and fullwidth characters arrive via IME which inserts text through
+  // OS-level mechanisms that bypass keydown prevention, so intercepting them
+  // here would cause double writes (once from pushInput, once from onData).
+  return code >= 0x20 && code <= 0x7e;
 }
 
 function clampDimension(value: number, min: number, max: number): number {
