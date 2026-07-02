@@ -455,6 +455,15 @@ pub fn delete_session(state: State<'_, AppState>, session_id: String) -> Result<
 }
 
 #[tauri::command]
+pub fn update_session_title(
+    state: State<'_, AppState>,
+    session_id: String,
+    title: String,
+) -> Result<SessionInfo, String> {
+    state.manager.update_session_title(&session_id, &title)
+}
+
+#[tauri::command]
 pub fn forward_session(
     state: State<'_, AppState>,
     source_session_id: String,
@@ -1105,6 +1114,29 @@ impl SessionManager {
         }
         fs::remove_file(&target)
             .map_err(|err| format!("failed to delete attachment {}: {err}", target.display()))
+    }
+
+    fn update_session_title(&self, session_id: &str, title: &str) -> Result<SessionInfo, String> {
+        let normalized = normalize_session_title(title);
+        if normalized.is_empty() {
+            return Err("session title cannot be empty".to_string());
+        }
+
+        if let Some(session) = self.sessions.lock().get(session_id).cloned() {
+            {
+                let mut meta = session.meta.lock();
+                meta.title = normalized;
+                meta.last_active_at = unix_timestamp();
+            }
+            session.persist_meta();
+            return Ok(session.info());
+        }
+
+        let mut meta = load_session_meta(session_id)?;
+        meta.title = normalized;
+        meta.last_active_at = unix_timestamp();
+        persist_session_meta(&meta)?;
+        Ok(meta.to_info())
     }
 
     fn session_info_for_storage(&self, session_id: &str) -> Result<SessionInfo, String> {

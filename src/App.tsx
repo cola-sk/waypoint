@@ -19,6 +19,7 @@ import {
   MessageSquare,
   PanelRightClose,
   PanelRightOpen,
+  Pencil,
   Pin,
   RefreshCw,
   Send,
@@ -47,6 +48,7 @@ import {
   previewFile,
   selectDirectory,
   selectFile,
+  updateSessionTitle,
 } from "./api/tauri";
 import type {
   AgentPresetInfo,
@@ -139,7 +141,7 @@ function sessionStateHint(status: SessionInfo["status"]) {
 }
 
 function sessionDisplayTitle(session: SessionInfo) {
-  const title = session.firstUserMessage?.trim() || session.title.trim();
+  const title = session.title.trim();
   if (title.length <= 42) {
     return title;
   }
@@ -257,6 +259,7 @@ const COLLAPSED_SESSIONS_STORAGE_KEY = storageKey("collapsed_session_ids");
 const PINNED_WORKSPACES_STORAGE_KEY = storageKey("pinned_workspaces");
 const SELECTED_EDITOR_STORAGE_KEY = storageKey("selected_editor_id");
 const SIDEBAR_WIDTH_STORAGE_KEY = storageKey("sidebar-width");
+const FILE_PREVIEW_WIDTH_STORAGE_KEY = storageKey("file-preview-width");
 const NONE_WORKSPACE_VALUE = "__none_workspace__";
 const CUSTOM_WORKSPACE_VALUE = "__custom_workspace__";
 const NEW_CONVERSATION_WORKSPACE_HISTORY_LIMIT = 20;
@@ -539,13 +542,23 @@ function App() {
   const [detectedEditors, setDetectedEditors] = useState<EditorInfo[]>([]);
   const [activeNewMenuFolder, setActiveNewMenuFolder] = useState<string | null>(null);
   const [activeWorkspaceMenuFolder, setActiveWorkspaceMenuFolder] = useState<string | null>(null);
-  const [quickLaunchDangerous, setQuickLaunchDangerous] = useState(false);
+  const [quickLaunchDangerous, setQuickLaunchDangerous] = useState(true);
+  const [editingSessionTitleId, setEditingSessionTitleId] = useState<string | null>(null);
+  const [sessionTitleDraft, setSessionTitleDraft] = useState("");
+  const [isSavingSessionTitle, setIsSavingSessionTitle] = useState(false);
   const [filePreviewOpen, setFilePreviewOpen] = useState(false);
   const [filePreviewPathInput, setFilePreviewPathInput] = useState("");
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
   const [filePreviewError, setFilePreviewError] = useState<string | null>(null);
   const [isFilePreviewLoading, setIsFilePreviewLoading] = useState(false);
   const [filePreviewMode, setFilePreviewMode] = useState<"formatted" | "raw">("formatted");
+  const [filePreviewWidth, setFilePreviewWidth] = useState<number>(() => {
+    const saved = localStorage.getItem(FILE_PREVIEW_WIDTH_STORAGE_KEY);
+    const parsed = saved ? Number.parseInt(saved, 10) : 460;
+    return Number.isFinite(parsed) ? Math.max(320, Math.min(900, parsed)) : 460;
+  });
+  const [isResizingFilePreview, setIsResizingFilePreview] = useState(false);
+  const outputLayoutRef = useRef<HTMLDivElement | null>(null);
 
   // Sidebar resizer state & logic
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
@@ -580,6 +593,38 @@ function App() {
       document.removeEventListener("mouseup", handleMouseUp);
     };
   }, [isDragging]);
+
+  const startFilePreviewResize = useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+    setIsResizingFilePreview(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isResizingFilePreview) return;
+
+    const handleMouseMove = (event: MouseEvent) => {
+      const rect = outputLayoutRef.current?.getBoundingClientRect();
+      const contentRight = rect ? rect.right - 30 : window.innerWidth - 30;
+      const availableWidth = rect ? rect.width - 80 : window.innerWidth;
+      const maxWidth = Math.max(320, Math.min(900, availableWidth - 360));
+      const nextWidth = Math.max(320, Math.min(maxWidth, contentRight - event.clientX));
+      setFilePreviewWidth(nextWidth);
+      localStorage.setItem(FILE_PREVIEW_WIDTH_STORAGE_KEY, String(Math.round(nextWidth)));
+    };
+
+    const handleMouseUp = () => {
+      setIsResizingFilePreview(false);
+    };
+
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+
+    return () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [isResizingFilePreview]);
+
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === activeSessionId) ?? null,
     [activeSessionId, sessions],
@@ -933,6 +978,43 @@ function App() {
       return;
     }
     pinSession(session.id);
+  }
+
+  function beginEditSessionTitle(session: SessionInfo) {
+    setError(null);
+    setEditingSessionTitleId(session.id);
+    setSessionTitleDraft(session.title);
+  }
+
+  function cancelEditSessionTitle() {
+    setEditingSessionTitleId(null);
+    setSessionTitleDraft("");
+  }
+
+  async function saveSessionTitle(session: SessionInfo) {
+    const nextTitle = sessionTitleDraft.trim();
+    if (!nextTitle) {
+      setError("会话标题不能为空。");
+      return;
+    }
+    if (nextTitle === session.title.trim()) {
+      cancelEditSessionTitle();
+      return;
+    }
+
+    setError(null);
+    setIsSavingSessionTitle(true);
+    try {
+      const updated = await updateSessionTitle(session.id, nextTitle);
+      setSessions((current) =>
+        current.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      cancelEditSessionTitle();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setIsSavingSessionTitle(false);
+    }
   }
 
   function revealWorkspacePath(path: string) {
@@ -1328,6 +1410,7 @@ function App() {
       return;
     }
     setError(null);
+    cancelEditSessionTitle();
     setActiveSessionId(session.id);
   }
 
@@ -1355,7 +1438,7 @@ function App() {
         }`}
         key={`session-${session.id}`}
         onClick={() => handleSelectSession(session)}
-        title={session.firstUserMessage ?? session.title}
+        title={session.firstUserMessage ? `${session.title}\n${session.firstUserMessage}` : session.title}
       >
         <div className="session-info-left">
           {hasChildren ? (
@@ -1470,7 +1553,7 @@ function App() {
       <div
         className={`pinned-item session-pinned-item ${entry.session.id === activeSessionId ? "active" : ""}`}
         key={pinnedItemKey(entry.item.targetType, entry.item.targetId)}
-        title={entry.session.firstUserMessage ?? entry.session.title}
+        title={entry.session.firstUserMessage ? `${entry.session.title}\n${entry.session.firstUserMessage}` : entry.session.title}
       >
         <button
           type="button"
@@ -1844,6 +1927,21 @@ function App() {
                       {activeNewMenuFolder === folder.path && (
                         <div className="agent-popover" onClick={(e) => e.stopPropagation()}>
                           <div className="popover-header">启动 Agent 会话</div>
+                          {agents.some((a) => a.available && supportsDangerousFlag(a.id)) ? (
+                            <div className="popover-options">
+                              <label className="checkbox-label">
+                                <input
+                                  type="checkbox"
+                                  checked={quickLaunchDangerous}
+                                  onChange={(event) => setQuickLaunchDangerous(event.target.checked)}
+                                />
+                                <span>
+                                  跳过权限确认
+                                  <span className="checkbox-hint">仅对支持的 Agent 生效</span>
+                                </span>
+                              </label>
+                            </div>
+                          ) : null}
                           <div className="agent-options">
                             {agents
                               .filter((a) => a.available)
@@ -1873,21 +1971,6 @@ function App() {
                                 </button>
                               ))}
                           </div>
-                          {agents.some((a) => a.available && supportsDangerousFlag(a.id)) ? (
-                            <div className="popover-footer">
-                              <label className="checkbox-label">
-                                <input
-                                  type="checkbox"
-                                  checked={quickLaunchDangerous}
-                                  onChange={(event) => setQuickLaunchDangerous(event.target.checked)}
-                                />
-                                <span>
-                                  跳过权限确认
-                                  <span className="checkbox-hint">仅对支持的 Agent 生效</span>
-                                </span>
-                              </label>
-                            </div>
-                          ) : null}
                         </div>
                       )}
                     </div>
@@ -1975,7 +2058,65 @@ function App() {
         <header className="topbar">
           <div className="topbar-session">
             <p className="eyebrow">Active Session</p>
-            <h2>{activeSession?.title ?? "No session"}</h2>
+            {activeSession && editingSessionTitleId === activeSession.id ? (
+              <form
+                className="topbar-title-edit-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void saveSessionTitle(activeSession);
+                }}
+              >
+                <input
+                  className="topbar-title-input"
+                  value={sessionTitleDraft}
+                  onChange={(event) => setSessionTitleDraft(event.target.value)}
+                  onFocus={(event) => event.currentTarget.select()}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      event.preventDefault();
+                      cancelEditSessionTitle();
+                    }
+                  }}
+                  disabled={isSavingSessionTitle}
+                  aria-label="会话标题"
+                  autoFocus
+                />
+                <button
+                  type="submit"
+                  className="topbar-title-save-btn"
+                  disabled={isSavingSessionTitle || !sessionTitleDraft.trim()}
+                  title="保存标题"
+                  aria-label="保存标题"
+                >
+                  <Check size={15} />
+                </button>
+                <button
+                  type="button"
+                  className="topbar-title-cancel-btn"
+                  onClick={cancelEditSessionTitle}
+                  disabled={isSavingSessionTitle}
+                  title="取消编辑"
+                  aria-label="取消编辑"
+                >
+                  <X size={15} />
+                </button>
+              </form>
+            ) : (
+              <div className="topbar-title-row">
+                <h2>{activeSession?.title ?? "No session"}</h2>
+                {activeSession ? (
+                  <button
+                    type="button"
+                    className="topbar-title-edit-btn"
+                    onClick={() => beginEditSessionTitle(activeSession)}
+                    title="修改会话标题"
+                    aria-label="修改会话标题"
+                  >
+                    <Pencil size={14} />
+                  </button>
+                ) : null}
+              </div>
+            )}
             {activeSession ? (
               <p className="session-path">{activeSession.command} · {activeSession.cwd}</p>
             ) : null}
@@ -2052,7 +2193,19 @@ function App() {
           </div>
         ) : null}
 
-        <div className={`output-layout ${filePreviewOpen ? "with-file-preview" : ""}`}>
+        <div
+          ref={outputLayoutRef}
+          className={`output-layout ${filePreviewOpen ? "with-file-preview" : ""} ${
+            isResizingFilePreview ? "is-resizing-file-preview" : ""
+          }`}
+          style={
+            filePreviewOpen
+              ? {
+                  gridTemplateColumns: `minmax(0, 1fr) 6px minmax(320px, ${Math.round(filePreviewWidth)}px)`,
+                }
+              : undefined
+          }
+        >
           <div className="terminal-frame">
             {activeSessionId ? (
               <TerminalView
@@ -2081,6 +2234,15 @@ function App() {
               </div>
             )}
           </div>
+          {filePreviewOpen ? (
+            <div
+              className="file-preview-resizer"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="调整文件预览宽度"
+              onMouseDown={startFilePreviewResize}
+            />
+          ) : null}
           {filePreviewOpen ? (
             <aside className="file-preview-pane" aria-label="File preview">
               <header className="file-preview-header">

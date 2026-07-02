@@ -40,6 +40,9 @@ const TERMINAL_FILE_PATH_PATTERN =
   /(?:"([^"\r\n]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?)"|'([^'\r\n]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?)'|((?:~|\/|\.{1,2}\/)?[A-Za-z0-9_.@%+=,~/-]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?))/g;
 const TERMINAL_PATH_TRAILING_PUNCTUATION = /[),.;\]}]+$/;
 const COLON_INPUT_KEYS = new Set([":", "："]);
+const ASCII_SYMBOL_INPUT_KEYS = new Set(
+  Array.from("~`!@#$%^&*()-_=+[{]}\\|;:'\",<.>/?"),
+);
 
 function isDirectInterceptablePrintable(key: string): boolean {
   if (key.length !== 1) {
@@ -47,6 +50,28 @@ function isDirectInterceptablePrintable(key: string): boolean {
   }
   const code = key.charCodeAt(0);
   return code >= 0x20 && code !== 0x7f;
+}
+
+function isCjkOrFullwidthPunctuation(key: string): boolean {
+  const code = key.codePointAt(0);
+  if (code === undefined) {
+    return false;
+  }
+  return (code >= 0x3000 && code <= 0x303f) || (code >= 0xff00 && code <= 0xffef);
+}
+
+function isLiveDirectInterceptableInput(value: string): boolean {
+  const chars = Array.from(value);
+  if (chars.length === 0) {
+    return false;
+  }
+  return chars.every(
+    (char) =>
+      isDirectInterceptablePrintable(char) &&
+      (COLON_INPUT_KEYS.has(char) ||
+        ASCII_SYMBOL_INPUT_KEYS.has(char) ||
+        isCjkOrFullwidthPunctuation(char)),
+  );
 }
 
 function clampDimension(value: number, min: number, max: number): number {
@@ -331,6 +356,8 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
     terminal.loadAddon(fitAddon);
     terminal.open(surface);
     terminal.focus();
+    let suppressedBeforeInput: string | null = null;
+    let suppressedBeforeInputTimer = 0;
     terminal.attachCustomKeyEventHandler((event) => {
       if (
         event.type === "keydown" &&
@@ -338,10 +365,15 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
         !event.altKey &&
         !event.metaKey &&
         !event.isComposing &&
-        (isLive ? COLON_INPUT_KEYS.has(event.key) : isDirectInterceptablePrintable(event.key))
+        (isLive ? isLiveDirectInterceptableInput(event.key) : isDirectInterceptablePrintable(event.key))
       ) {
         event.preventDefault();
         event.stopPropagation();
+        suppressedBeforeInput = event.key;
+        window.clearTimeout(suppressedBeforeInputTimer);
+        suppressedBeforeInputTimer = window.setTimeout(() => {
+          suppressedBeforeInput = null;
+        }, 0);
         pushInputRef.current?.(event.key);
         return false;
       }
@@ -374,7 +406,7 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
 
     const pathLinkDisposable = terminal.registerLinkProvider({
       provideLinks(bufferLineNumber, callback) {
-        if (!commandLinkModeRef.current || !onPreviewFile) {
+        if (!onPreviewFile) {
           callback(undefined);
           return;
         }
@@ -491,6 +523,14 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
       }
     };
     const handleWindowBlur = () => setCommandLinkMode(false);
+    const handleShellMouseMove = (event: MouseEvent) => {
+      if (event.metaKey) {
+        setCommandLinkMode(true);
+      }
+    };
+    const handleShellMouseLeave = () => {
+      setCommandLinkMode(false);
+    };
     const flushQueuedInputs = () => {
       const queue = [...queuedInputsRef.current];
       queuedInputsRef.current = [];
@@ -590,11 +630,18 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
     };
     const handleTerminalBeforeInput = (event: InputEvent) => {
       const data = event.data;
+      if (data !== null && suppressedBeforeInput === data) {
+        event.preventDefault();
+        event.stopPropagation();
+        suppressedBeforeInput = null;
+        window.clearTimeout(suppressedBeforeInputTimer);
+        return;
+      }
       if (
         event.inputType === "insertText" &&
         data !== null &&
         !event.isComposing &&
-        (isLive ? COLON_INPUT_KEYS.has(data) : isDirectInterceptablePrintable(data))
+        (isLive ? isLiveDirectInterceptableInput(data) : isDirectInterceptablePrintable(data))
       ) {
         event.preventDefault();
         event.stopPropagation();
@@ -607,9 +654,13 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
     window.addEventListener("blur", handleWindowBlur);
     window.addEventListener("pageshow", refreshAfterWindowRestore);
     document.addEventListener("visibilitychange", handleVisibilityChange);
-    document.addEventListener("keydown", handleDocumentKeyDown);
-    document.addEventListener("keyup", handleDocumentKeyUp);
+    window.addEventListener("keydown", handleDocumentKeyDown, true);
+    window.addEventListener("keyup", handleDocumentKeyUp, true);
+    document.addEventListener("keydown", handleDocumentKeyDown, true);
+    document.addEventListener("keyup", handleDocumentKeyUp, true);
     terminal.textarea?.addEventListener("beforeinput", handleTerminalBeforeInput);
+    shell.addEventListener("mousemove", handleShellMouseMove, true);
+    shell.addEventListener("mouseleave", handleShellMouseLeave);
     shell.addEventListener("paste", handlePaste, true);
     shell.addEventListener("dragover", handleDragOver);
     shell.addEventListener("drop", handleDrop);
@@ -917,6 +968,7 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
       activateAndQueueRef.current = null;
       pushInputRef.current = null;
       window.clearTimeout(resizeTimeout);
+      window.clearTimeout(suppressedBeforeInputTimer);
       detachSession(sessionId).catch(() => undefined);
       dataDisposable.dispose();
       pathLinkDisposable.dispose();
@@ -925,9 +977,13 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
       window.removeEventListener("blur", handleWindowBlur);
       window.removeEventListener("pageshow", refreshAfterWindowRestore);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
-      document.removeEventListener("keydown", handleDocumentKeyDown);
-      document.removeEventListener("keyup", handleDocumentKeyUp);
+      window.removeEventListener("keydown", handleDocumentKeyDown, true);
+      window.removeEventListener("keyup", handleDocumentKeyUp, true);
+      document.removeEventListener("keydown", handleDocumentKeyDown, true);
+      document.removeEventListener("keyup", handleDocumentKeyUp, true);
       terminal.textarea?.removeEventListener("beforeinput", handleTerminalBeforeInput);
+      shell.removeEventListener("mousemove", handleShellMouseMove, true);
+      shell.removeEventListener("mouseleave", handleShellMouseLeave);
       shell.removeEventListener("paste", handlePaste, true);
       shell.removeEventListener("dragover", handleDragOver);
       shell.removeEventListener("drop", handleDrop);

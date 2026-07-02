@@ -163,6 +163,11 @@ export function deleteSession(sessionId: string): Promise<void> {
   return invoke("delete_session", { sessionId });
 }
 
+export function updateSessionTitle(sessionId: string, title: string): Promise<SessionInfo> {
+  assertTauriRuntime();
+  return invoke("update_session_title", { sessionId, title });
+}
+
 export function forwardSession(
   sourceSessionId: string,
   targetSessionId: string,
