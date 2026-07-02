@@ -1455,6 +1455,7 @@ function App() {
       isCollapsed?: boolean;
       onToggleCollapsed?: () => void;
       parentSession?: SessionInfo | null;
+      depth?: number;
     } = {},
   ) {
     const pinned = isSessionPinned(session.id);
@@ -1463,6 +1464,8 @@ function App() {
       : null;
     const hasChildren = Boolean(options.childCount);
     const collapsedLabel = options.isCollapsed ? "展开层级会话" : "折叠层级会话";
+    const showToggle = hasChildren;
+
     return (
       <div
         className={`workspace-session-item chat-history-item ${options.parentSession ? "linked-child" : ""} ${
@@ -1474,7 +1477,7 @@ function App() {
         onClick={() => handleSelectSession(session)}
         title={session.firstUserMessage ? `${session.title}\n${session.firstUserMessage}` : session.title}
       >
-        <div className="session-info-left">
+        <div className={`session-info-left ${showToggle ? "has-hierarchy-gutter" : "flat-item"}`}>
           {hasChildren ? (
             <button
               type="button"
@@ -1489,9 +1492,7 @@ function App() {
             >
               {options.isCollapsed ? <ChevronRight size={18} /> : <ChevronDown size={18} />}
             </button>
-          ) : (
-            <span className="session-collapse-spacer" aria-hidden="true" />
-          )}
+          ) : null}
           <span className={`status-dot ${session.status}`} />
           <span className="session-copy">
             <span className="session-label">{sessionDisplayTitle(session)}</span>
@@ -1571,6 +1572,7 @@ function App() {
           isCollapsed,
           onToggleCollapsed: () => toggleSessionCollapsed(node.session.id),
           parentSession,
+          depth,
         })}
         {node.children.length > 0 && !isCollapsed ? (
           <div className="session-tree-children">
