@@ -62,11 +62,11 @@ function isLiveDirectInterceptableInput(value: string): boolean {
     return false;
   }
   const code = value.charCodeAt(0);
-  // Only intercept basic ASCII printable characters in live mode.
-  // CJK and fullwidth characters arrive via IME which inserts text through
-  // OS-level mechanisms that bypass keydown prevention, so intercepting them
-  // here would cause double writes (once from pushInput, once from onData).
-  return code >= 0x20 && code <= 0x7e;
+  // Intercept basic ASCII printable characters in live mode, except Space (0x20).
+  // Space is excluded because it is often used to select/confirm IME candidates,
+  // and intercepting it as a literal space keydown would insert unwanted spaces
+  // after IME character commitments.
+  return code > 0x20 && code <= 0x7e;
 }
 
 function clampDimension(value: number, min: number, max: number): number {
