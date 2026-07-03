@@ -36,17 +36,26 @@ const SCROLLBAR_GUTTER_COLS = 2;
 const IMAGE_PLACEHOLDER_PATTERN = /\[paste image (\d+)\]/gi;
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
+const INTERCEPTED_INPUT_SUPPRESSION_MS = 250;
+const MAX_INTERCEPTED_INPUT_SUPPRESSIONS = 20;
 const TERMINAL_FILE_PATH_PATTERN =
   /(?:"([^"\r\n]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?)"|'([^'\r\n]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?)'|((?:~|\/|\.{1,2}\/)?[A-Za-z0-9_.@%+=,~/-]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?))/g;
 const TERMINAL_PATH_TRAILING_PUNCTUATION = /[),.;\]}]+$/;
 
 
-function isDirectInterceptablePrintable(key: string): boolean {
-  if (key.length !== 1) {
+function isAsciiAlphaNumeric(value: string): boolean {
+  return /^[A-Za-z0-9]$/.test(value);
+}
+
+function isDirectInterceptablePrintable(value: string): boolean {
+  if (value.length !== 1) {
     return false;
   }
-  const code = key.charCodeAt(0);
-  return code >= 0x20 && code !== 0x7f;
+  const code = value.charCodeAt(0);
+  if (code <= 0x20 || code === 0x7f || isAsciiAlphaNumeric(value)) {
+    return false;
+  }
+  return (code <= 0x7e) || isCjkOrFullwidthPunctuation(value);
 }
 
 function isCjkOrFullwidthPunctuation(key: string): boolean {
@@ -58,15 +67,10 @@ function isCjkOrFullwidthPunctuation(key: string): boolean {
 }
 
 function isLiveDirectInterceptableInput(value: string): boolean {
-  if (value.length !== 1) {
-    return false;
-  }
-  const code = value.charCodeAt(0);
-  // Intercept basic ASCII printable characters in live mode, except Space (0x20).
-  // Space is excluded because it is often used to select/confirm IME candidates,
-  // and intercepting it as a literal space keydown would insert unwanted spaces
-  // after IME character commitments.
-  return code > 0x20 && code <= 0x7e;
+  // Only bypass xterm for punctuation/symbol characters known to be swallowed in
+  // some agent input boxes. Alphanumerics and spaces should stay on xterm's
+  // normal input path to avoid duplicate writes.
+  return isDirectInterceptablePrintable(value);
 }
 
 function clampDimension(value: number, min: number, max: number): number {
@@ -352,7 +356,36 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
     terminal.loadAddon(fitAddon);
     terminal.open(surface);
     terminal.focus();
-    let lastInterceptedKeydown: string | null = null;
+    const interceptedInputQueue: Array<{ data: string; expiresAt: number; remaining: number }> = [];
+    const queueInterceptedInput = (data: string) => {
+      interceptedInputQueue.push({
+        data,
+        expiresAt: window.performance.now() + INTERCEPTED_INPUT_SUPPRESSION_MS,
+        remaining: 2,
+      });
+      if (interceptedInputQueue.length > MAX_INTERCEPTED_INPUT_SUPPRESSIONS) {
+        interceptedInputQueue.splice(0, interceptedInputQueue.length - MAX_INTERCEPTED_INPUT_SUPPRESSIONS);
+      }
+    };
+    const consumeInterceptedInput = (data: string): boolean => {
+      const now = window.performance.now();
+      for (let i = interceptedInputQueue.length - 1; i >= 0; i -= 1) {
+        const item = interceptedInputQueue[i];
+        if (item.expiresAt <= now || item.remaining <= 0) {
+          interceptedInputQueue.splice(i, 1);
+        }
+      }
+      const index = interceptedInputQueue.findIndex((item) => item.data === data);
+      if (index === -1) {
+        return false;
+      }
+      const item = interceptedInputQueue[index];
+      item.remaining -= 1;
+      if (item.remaining <= 0) {
+        interceptedInputQueue.splice(index, 1);
+      }
+      return true;
+    };
     terminal.attachCustomKeyEventHandler((event) => {
       if (isConnecting) {
         event.preventDefault();
@@ -369,7 +402,7 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
       ) {
         event.preventDefault();
         event.stopPropagation();
-        lastInterceptedKeydown = event.key;
+        queueInterceptedInput(event.key);
         pushInputRef.current?.(event.key);
         return false;
       }
@@ -631,8 +664,6 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
         return;
       }
       const data = event.data;
-      const wasJustIntercepted = data !== null && lastInterceptedKeydown === data;
-      lastInterceptedKeydown = null;
       if (
         event.inputType === "insertText" &&
         data !== null &&
@@ -641,7 +672,7 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
       ) {
         event.preventDefault();
         event.stopPropagation();
-        if (!wasJustIntercepted) {
+        if (!consumeInterceptedInput(data)) {
           pushInputRef.current?.(data);
         }
       }
@@ -881,6 +912,9 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
 
     const dataDisposable = terminal.onData((data) => {
       if (isReplaying) {
+        return;
+      }
+      if (consumeInterceptedInput(data)) {
         return;
       }
       pushInputRef.current?.(data);
