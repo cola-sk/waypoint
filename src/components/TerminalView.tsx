@@ -356,35 +356,41 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
     terminal.loadAddon(fitAddon);
     terminal.open(surface);
     terminal.focus();
-    const interceptedInputQueue: Array<{ data: string; expiresAt: number; remaining: number }> = [];
-    const queueInterceptedInput = (data: string, remaining = 2) => {
+    const interceptedInputQueue: Array<{
+      data: string;
+      source: "keydown" | "beforeinput";
+      expiresAt: number;
+    }> = [];
+    const queueInterceptedInput = (data: string, source: "keydown" | "beforeinput") => {
       interceptedInputQueue.push({
         data,
+        source,
         expiresAt: window.performance.now() + INTERCEPTED_INPUT_SUPPRESSION_MS,
-        remaining,
       });
       if (interceptedInputQueue.length > MAX_INTERCEPTED_INPUT_SUPPRESSIONS) {
         interceptedInputQueue.splice(0, interceptedInputQueue.length - MAX_INTERCEPTED_INPUT_SUPPRESSIONS);
       }
     };
-    const consumeInterceptedInput = (data: string): boolean => {
+    const consumeInterceptedInput = (
+      data: string,
+      requiredSource?: "keydown" | "beforeinput"
+    ): boolean => {
       const now = window.performance.now();
       for (let i = interceptedInputQueue.length - 1; i >= 0; i -= 1) {
         const item = interceptedInputQueue[i];
-        if (item.expiresAt <= now || item.remaining <= 0) {
+        if (item.expiresAt <= now) {
           interceptedInputQueue.splice(i, 1);
         }
       }
-      const index = interceptedInputQueue.findIndex((item) => item.data === data);
-      if (index === -1) {
-        return false;
-      }
-      const item = interceptedInputQueue[index];
-      item.remaining -= 1;
-      if (item.remaining <= 0) {
-        interceptedInputQueue.splice(index, 1);
-      }
-      return true;
+      return interceptedInputQueue.some((item) => {
+        if (item.data !== data) {
+          return false;
+        }
+        if (requiredSource && item.source !== requiredSource) {
+          return false;
+        }
+        return true;
+      });
     };
     terminal.attachCustomKeyEventHandler((event) => {
       if (isConnecting) {
@@ -402,7 +408,7 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
       ) {
         event.preventDefault();
         event.stopPropagation();
-        queueInterceptedInput(event.key);
+        queueInterceptedInput(event.key, "keydown");
         pushInputRef.current?.(event.key);
         return false;
       }
@@ -672,13 +678,12 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
       ) {
         event.preventDefault();
         event.stopPropagation();
-        if (!consumeInterceptedInput(data)) {
-          queueInterceptedInput(data, 1);
+        if (!consumeInterceptedInput(data, "keydown")) {
+          queueInterceptedInput(data, "beforeinput");
           pushInputRef.current?.(data);
         }
       }
     };
-
     window.addEventListener("resize", handleWindowResize);
     window.addEventListener("focus", refreshAfterWindowRestore);
     window.addEventListener("blur", handleWindowBlur);
