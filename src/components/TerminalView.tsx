@@ -357,11 +357,11 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
     terminal.open(surface);
     terminal.focus();
     const interceptedInputQueue: Array<{ data: string; expiresAt: number; remaining: number }> = [];
-    const queueInterceptedInput = (data: string) => {
+    const queueInterceptedInput = (data: string, remaining = 2) => {
       interceptedInputQueue.push({
         data,
         expiresAt: window.performance.now() + INTERCEPTED_INPUT_SUPPRESSION_MS,
-        remaining: 2,
+        remaining,
       });
       if (interceptedInputQueue.length > MAX_INTERCEPTED_INPUT_SUPPRESSIONS) {
         interceptedInputQueue.splice(0, interceptedInputQueue.length - MAX_INTERCEPTED_INPUT_SUPPRESSIONS);
@@ -673,6 +673,7 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
         event.preventDefault();
         event.stopPropagation();
         if (!consumeInterceptedInput(data)) {
+          queueInterceptedInput(data, 1);
           pushInputRef.current?.(data);
         }
       }
