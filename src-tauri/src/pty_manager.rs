@@ -1041,7 +1041,7 @@ impl SessionManager {
         if !matches!(session.info().status, SessionStatus::Running) {
             return Err("session is not running".to_string());
         }
-        let data_to_write = if should_append_agy_session_marker(&session, &data) {
+        let data_to_write = if should_append_terminal_session_marker(&session, &data) {
             format!("{data}<!-- waypoint_session_id: {session_id} -->\r")
         } else {
             data.clone()
@@ -1161,7 +1161,7 @@ impl SessionManager {
             meta.first_user_message.is_none()
         };
         let info = session.info();
-        let payload = if is_first_message && (info.agent_id == "agy" || info.agent_id == "codex") {
+        let payload = if is_first_message && info.agent_id == "agy" {
             format!(
                 "{}\n<!-- waypoint_session_id: {} -->",
                 clean_msg, session_id
@@ -2470,13 +2470,13 @@ fn cache_agy_resume_ref_on_session(session: &Arc<PtySession>) -> bool {
     changed
 }
 
-fn should_append_agy_session_marker(session: &Arc<PtySession>, data: &str) -> bool {
+fn should_append_terminal_session_marker(session: &Arc<PtySession>, data: &str) -> bool {
     if !data.contains('\r') && !data.contains('\n') {
         return false;
     }
     {
         let meta = session.meta.lock();
-        if (meta.agent_id != "agy" && meta.agent_id != "codex") || meta.first_user_message.is_some() {
+        if meta.agent_id != "agy" || meta.first_user_message.is_some() {
             return false;
         }
     }
