@@ -382,7 +382,7 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
           interceptedInputQueue.splice(i, 1);
         }
       }
-      return interceptedInputQueue.some((item) => {
+      const hasMatch = interceptedInputQueue.some((item) => {
         if (item.data !== data) {
           return false;
         }
@@ -391,6 +391,7 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
         }
         return true;
       });
+      return hasMatch;
     };
     terminal.attachCustomKeyEventHandler((event) => {
       if (isConnecting) {
@@ -398,18 +399,21 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
         event.stopPropagation();
         return false;
       }
+      const isInterceptable = (isLive ? isLiveDirectInterceptableInput(event.key) : isDirectInterceptablePrintable(event.key));
       if (
         event.type === "keydown" &&
         !event.ctrlKey &&
         !event.altKey &&
         !event.metaKey &&
         !event.isComposing &&
-        (isLive ? isLiveDirectInterceptableInput(event.key) : isDirectInterceptablePrintable(event.key))
+        isInterceptable
       ) {
         event.preventDefault();
         event.stopPropagation();
-        queueInterceptedInput(event.key, "keydown");
-        pushInputRef.current?.(event.key);
+        if (!consumeInterceptedInput(event.key, "beforeinput")) {
+          queueInterceptedInput(event.key, "keydown");
+          pushInputRef.current?.(event.key);
+        }
         return false;
       }
       return true;
@@ -670,11 +674,12 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
         return;
       }
       const data = event.data;
+      const isInterceptable = data !== null && (isLive ? isLiveDirectInterceptableInput(data) : isDirectInterceptablePrintable(data));
       if (
         event.inputType === "insertText" &&
         data !== null &&
         !event.isComposing &&
-        (isLive ? isLiveDirectInterceptableInput(data) : isDirectInterceptablePrintable(data))
+        isInterceptable
       ) {
         event.preventDefault();
         event.stopPropagation();
