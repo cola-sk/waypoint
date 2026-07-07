@@ -156,7 +156,7 @@ npm run tauri:dev
 2. 左侧 Agent 下拉框会显示 Claude Code / Codex / Antigravity CLI / GitHub Copilot。
 3. 可用 agent 会显示 resolved command，不可用 agent 会显示 missing。
 4. 在 Workspace 输入本地项目目录，例如：
-   /Users/liuzhe.x/coding/waypoint
+   ~/coding/my-project
 5. 选择一个 available agent。
 6. 点击 Start。
 7. 确认右侧 terminal 启动到该目录下的对应 agent CLI。
