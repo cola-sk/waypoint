@@ -142,6 +142,69 @@ function trimTerminalPathToken(value: string): string {
     .replace(/:\d+(?::\d+)?$/, "");
 }
 
+// Max number of wrapped buffer rows to walk when reconstructing a logical line
+// for link detection. Bounds the work done per hover; a path of a few hundred
+// characters wraps to only a handful of rows at typical terminal widths.
+const TERMINAL_LINK_WRAP_SCAN_MAX = 24;
+
+interface LogicalLineCell {
+  x: number;
+  y: number;
+}
+
+// Reconstruct the logical (wrapped) line that contains `bufferLineNumber` and
+// return the joined text plus per-row start offsets so regex matches can be
+// mapped back to buffer cell positions across wrapped rows.
+function readLogicalLine(
+  buffer: { getLine: (index: number) => ({ translateToString(trimRight: boolean): string; isWrapped: boolean } | null | undefined) },
+  bufferLineNumber: number,
+): { text: string; rowLineNumbers: number[]; rowStartOffsets: number[] } | null {
+  let startLineNumber = bufferLineNumber;
+  let probe = startLineNumber;
+  let walked = 0;
+  while (probe > 1 && walked < TERMINAL_LINK_WRAP_SCAN_MAX) {
+    const prev = buffer.getLine(probe - 2);
+    if (!prev || !prev.isWrapped) {
+      break;
+    }
+    startLineNumber = probe - 1;
+    probe = startLineNumber;
+    walked++;
+  }
+
+  let text = "";
+  const rowLineNumbers: number[] = [];
+  const rowStartOffsets: number[] = [];
+  let cursor = startLineNumber;
+  while (rowLineNumbers.length < TERMINAL_LINK_WRAP_SCAN_MAX) {
+    const line = buffer.getLine(cursor - 1);
+    if (!line) {
+      break;
+    }
+    rowStartOffsets.push(text.length);
+    rowLineNumbers.push(cursor);
+    text += line.translateToString(true);
+    cursor++;
+    const next = buffer.getLine(cursor - 1);
+    if (!next || !next.isWrapped) {
+      break;
+    }
+  }
+  return { text, rowLineNumbers, rowStartOffsets };
+}
+
+function logicalOffsetToCell(
+  offset: number,
+  rowStartOffsets: number[],
+  rowLineNumbers: number[],
+): LogicalLineCell {
+  let i = 0;
+  while (i + 1 < rowStartOffsets.length && rowStartOffsets[i + 1] <= offset) {
+    i++;
+  }
+  return { x: offset - rowStartOffsets[i], y: rowLineNumbers[i] };
+}
+
 function resolveTerminalPath(value: string, cwd?: string | null): string {
   const token = trimTerminalPathToken(value);
   if (!token || token.startsWith("/") || token.startsWith("~") || /^[A-Za-z]:[\\/]/.test(token)) {
@@ -449,17 +512,16 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
           callback(undefined);
           return;
         }
-        const line = terminal.buffer.active.getLine(bufferLineNumber - 1);
-        if (!line) {
+        const logical = readLogicalLine(terminal.buffer.active, bufferLineNumber);
+        if (!logical || !logical.text) {
           callback(undefined);
           return;
         }
 
-        const lineText = line.translateToString(true);
         const links = [];
         TERMINAL_FILE_PATH_PATTERN.lastIndex = 0;
         let match: RegExpExecArray | null;
-        while ((match = TERMINAL_FILE_PATH_PATTERN.exec(lineText)) !== null) {
+        while ((match = TERMINAL_FILE_PATH_PATTERN.exec(logical.text)) !== null) {
           const quotedWithDouble = Boolean(match[1]);
           const quotedWithSingle = Boolean(match[2]);
           const rawPath = match[1] ?? match[2] ?? match[3] ?? "";
@@ -473,10 +535,17 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
           if (endOffset <= startOffset) {
             continue;
           }
+          const startCell = logicalOffsetToCell(startOffset, logical.rowStartOffsets, logical.rowLineNumbers);
+          const endCell = logicalOffsetToCell(endOffset - 1, logical.rowStartOffsets, logical.rowLineNumbers);
+          // Only emit when the link starts on the requested row so xterm
+          // registers it once and renders the underline across the full span.
+          if (startCell.y !== bufferLineNumber) {
+            continue;
+          }
           links.push({
             range: {
-              start: { x: startOffset + 1, y: bufferLineNumber },
-              end: { x: endOffset, y: bufferLineNumber },
+              start: { x: startCell.x + 1, y: startCell.y },
+              end: { x: endCell.x + 1, y: endCell.y },
             },
             text: shownPath,
             decorations: {
