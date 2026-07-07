@@ -83,14 +83,6 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 ```
 
-验证环境：
-
-```bash
-node --version
-npm --version
-rustc --version
-cargo --version
-```
 
 ## 开发
 
