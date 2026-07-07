@@ -5897,8 +5897,8 @@ Resume in the same project: agy --conversation=c79caf4a-cdf9-4b20-a2fb-e6143ba1d
     #[test]
     fn test_claude_project_dir_name_matches_native_storage() {
         assert_eq!(
-            claude_project_dir_name("/Users/liuzhe.x/coding/mcp-deck"),
-            "-Users-liuzhe-x-coding-mcp-deck"
+            claude_project_dir_name("/Users/example/coding/mcp-deck"),
+            "-Users-example-coding-mcp-deck"
         );
     }
 
