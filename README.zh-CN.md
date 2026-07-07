@@ -12,7 +12,8 @@
   <a href="README.md">English README</a>
 </p>
 
-![Waypoint 桌面界面](docs/assets/waypoint-screenshot.png)
+<img width="3454" height="2148" alt="image" src="https://github.com/user-attachments/assets/cd1f24ec-dd44-457b-bedb-e44c88c159cd" />
+
 
 waypoint 是一个桌面端本地 Agent CLI 会话路由器。它的目标是通过 Tauri + Rust 管理多个本机 PTY 会话，让 Claude Code、Codex、Antigravity CLI、GitHub Copilot、Shell 等 agent 会话可以长期存活、随时切换，并支持跨 agent 上下文交接（Handover）。
 
