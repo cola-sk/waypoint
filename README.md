@@ -155,9 +155,11 @@ Continue 流程将当前会话的上下文传递给另一个 agent。
 6. 点击 **Create & Continue**。
 
 Waypoint 会按 chat 顺序收集最近的对话时间线，将 handover 文件写到 `~/.waypoint/<workspace-name>/handover-*.md`，启动目标会话，并注入一段简短指令，指引目标 agent 读取该 handover 文件。目标 agent 需要 git 状态或 diff 时会直接从 workspace 查询。
-Continue 弹窗右侧的 handover Markdown 支持直接编辑，点击 `Create & Continue` / `Forward` 时会使用编辑后的内容写入 handover 文件。
+Continue 弹窗右侧的 handover Markdown 支持直接编辑，点击 `Create & Continue` 时会使用编辑后的内容写入 handover 文件。
 
-也可以通过 **Existing Session** 模式将 handover 注入已有会话。
+也可以使用 **Copy Handover** 模式：生成 handover 文件并将一段短指令（含文件路径）复制到剪贴板，用户手动粘贴到任何目标会话中即可。不再需要选择目标会话或通过 PTY 自动注入。
+
+会话标题可在顶栏直接编辑（点击铅笔图标）；删除父会话时会级联删除所有子会话。
 
 ### Native Session ID 与恢复
 
@@ -235,11 +237,11 @@ Full 与 Compact 模式差异：
 | Antigravity CLI (agy) | `agy --prompt-interactive "<startup prompt>"` | 通过 `--add-dir` 授权 handover 目录 | 只含 handover 文件路径和新的 `waypoint_session_id` 标记，避免长 diff/context 直接进入 agy TUI | — |
 | GitHub Copilot | `copilot -i "<startup prompt>"` | 通过 `--add-dir` 传入 handover 目录；`gh copilot` 形态通过 `--` 分隔参数 | startup prompt | — |
 
-Existing Session / Forward 模式：
+Copy Handover 模式：
 
 - 先生成 handover 文件。
-- 通过 PTY bracketed paste 注入一段短提示：只读取该 handover 文件，确认 context loaded，然后等待下一步指令。
-- 注入前会检查目标进程是否已退出；失败时错误信息会包含 target session 的最近输出。
+- 将一段短指令复制到剪贴板：`A handover context file is referenced at <路径>. Read only this exact file, acknowledge context loaded, then wait for my next instruction.`
+- 用户手动粘贴到任何目标会话中，不再通过 PTY 自动注入。
 
 Create Handover File：
 

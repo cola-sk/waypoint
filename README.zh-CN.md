@@ -202,18 +202,21 @@ npm run tauri:dev
 12. 源 session 仍然保持运行，可以随时切回。
 ```
 
-Continue 弹窗右侧的 handover Markdown 支持直接编辑；点击 Create & Continue / Forward 时会把编辑后的内容写入 handover 文件并用于注入。
+Continue 弹窗右侧的 handover Markdown 支持直接编辑；点击 Create & Continue 时会把编辑后的内容写入 handover 文件并用于注入。
 
-如果已经有一个目标 session，也可以使用高级模式：
+也可以使用 **Copy Handover** 模式，将 handover 文件路径复制到剪贴板：
 
 ```text
 1. 点击 Continue。
-2. 切换到 Existing Session。
-3. 选择目标 session。
-4. 在 Note 中填写目标 agent 接下来要关注的任务。
-5. 点击 Forward。
-6. waypoint 会把 handover prompt 注入已有目标 session。
+2. 切换到 Copy Handover。
+3. 选择上下文包模式（Recommended / Compact / Full）。
+4. 点击 Copy & Close。
+5. waypoint 会生成 handover 文件并把一段短指令复制到剪贴板：
+   「A handover context file is referenced at <路径>. Read only this exact file, acknowledge context loaded, then wait for my next instruction.」
+6. 手动粘贴到任何目标 session 中即可。
 ```
+
+此外，会话标题可在顶栏直接编辑（点击铅笔图标），删除父会话时会级联删除所有子会话。
 
 ### Native session id 与恢复逻辑
 
@@ -360,10 +363,10 @@ GitHub Copilot:
   handover 文件目录通过 --add-dir 传入；gh copilot 形态会通过 -- 分隔参数。
 
 Existing Session / Forward:
-  先生成 handover 文件。
-  通过 PTY bracketed paste 注入一段短提示：
-    只读取这个 handover 文件，确认 context loaded，然后等待下一步指令。
-  注入前会检查目标进程是否已经退出；失败时错误中会带最近 target 输出。
+  已改为 Copy Handover 模式。
+  先生成 handover 文件，然后把一段短指令复制到剪贴板：
+    「A handover context file is referenced at <路径>. Read only this exact file, acknowledge context loaded, then wait for my next instruction.」
+  用户手动粘贴到任何目标 session 中，不再通过 PTY bracketed paste 自动注入。
 
 Create Handover File:
   右上角的 handover file 按钮只生成文件，不启动/注入任何 agent。
