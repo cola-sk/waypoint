@@ -135,6 +135,14 @@ function isFocusOrMouseSequence(data: string): boolean {
   );
 }
 
+function isFocusReportingSequence(data: string): boolean {
+  return data === "\x1b[I" || data === "\x1b[O";
+}
+
+function stripFocusReportingSequences(data: string): string {
+  return data.replace(/\x1b\[(?:I|O)/g, "");
+}
+
 function trimTerminalPathToken(value: string): string {
   return value
     .trim()
@@ -497,6 +505,19 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
       }
     };
 
+    const restoreViewport = (viewportY: number, shouldStickToBottom: boolean) => {
+      if (disposed) return;
+      try {
+        if (shouldStickToBottom) {
+          terminal.scrollToBottom();
+        } else {
+          terminal.scrollToLine(Math.min(viewportY, terminal.buffer.active.baseY));
+        }
+      } catch (err) {
+        console.warn("Failed to restore terminal scroll position:", err);
+      }
+    };
+
     const setCommandLinkMode = (enabled: boolean) => {
       if (commandLinkModeRef.current === enabled) {
         return;
@@ -574,6 +595,9 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
 
       const width = shell.clientWidth;
       const height = shell.clientHeight;
+      if (width <= 0 || height <= 0) {
+        return;
+      }
       if (!force && width === lastWidth && height === lastHeight) {
         return;
       }
@@ -600,17 +624,27 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
       window.clearTimeout(resizeTimeout);
       resizeTimeout = window.setTimeout(() => fitAndResize(force), 100);
     };
+    let lastRestoreTime = 0;
     const refreshAfterWindowRestore = () => {
       if (document.visibilityState === "hidden") {
         return;
       }
+      const now = Date.now();
+      if (now - lastRestoreTime < 300) {
+        return;
+      }
+      lastRestoreTime = now;
+      const viewportY = terminal.buffer.active.viewportY;
+      const shouldStickToBottom = viewportY >= terminal.buffer.active.baseY;
       window.requestAnimationFrame(() => {
         fitAndResize(true);
         refreshTerminal();
+        restoreViewport(viewportY, shouldStickToBottom);
       });
       window.setTimeout(() => {
         fitAndResize(true);
         refreshTerminal();
+        restoreViewport(viewportY, shouldStickToBottom);
       }, 120);
     };
     const handleVisibilityChange = () => {
@@ -778,6 +812,16 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
     resizeObserver.observe(surface);
 
     const transformOutboundInput = (data: string): string => {
+      if (isFocusReportingSequence(data)) {
+        // Filter focus-in/out (DEC 1004). Codex with --no-alt-screen redraws
+        // its TUI on focus events, which causes the primary-screen scrollback
+        // to visibly scroll from top to bottom on every window refocus.
+        return "";
+      }
+      data = stripFocusReportingSequences(data);
+      if (!data) {
+        return "";
+      }
       if (isFocusOrMouseSequence(data) || data === BRACKETED_PASTE_START || data === BRACKETED_PASTE_END) {
         return data;
       }
@@ -1069,6 +1113,11 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
         const onWriteComplete = () => {
           isReplaying = false;
           isConnecting = false;
+          try {
+            terminal.scrollToBottom();
+          } catch (err) {
+            console.warn("Failed to scroll terminal replay to bottom:", err);
+          }
           if (!disposed) {
             setIsRestoring(false);
           }
