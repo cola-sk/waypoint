@@ -589,13 +589,13 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
 
     const fitAndResize = (force = false) => {
       if (disposed) return;
-      if (shell.clientWidth < 100 || shell.clientHeight < 50) {
-        return;
-      }
+      const shell = shellRef.current;
+      const surface = surfaceRef.current;
+      if (!shell || !surface) return;
 
       const width = shell.clientWidth;
       const height = shell.clientHeight;
-      if (width <= 0 || height <= 0) {
+      if (width < 100 || height < 50) {
         return;
       }
       if (!force && width === lastWidth && height === lastHeight) {
@@ -604,17 +604,17 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
 
       try {
         const dims = fitAddon.proposeDimensions();
-        if (dims) {
+        if (dims && dims.rows >= MIN_ROWS && dims.cols - SCROLLBAR_GUTTER_COLS >= MIN_COLS) {
           const rows = clampDimension(dims.rows, MIN_ROWS, MAX_ROWS);
           const cols = clampDimension(dims.cols - SCROLLBAR_GUTTER_COLS, MIN_COLS, MAX_COLS);
           if (rows !== terminal.rows || cols !== terminal.cols) {
             terminal.resize(cols, rows);
             resizeSession(sessionId, rows, cols).catch(() => undefined);
           }
+          lastWidth = width;
+          lastHeight = height;
+          refreshTerminal();
         }
-        lastWidth = width;
-        lastHeight = height;
-        refreshTerminal();
       } catch (err) {
         console.warn("Failed to fit terminal:", err);
       }
