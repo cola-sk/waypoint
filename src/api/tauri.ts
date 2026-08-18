@@ -185,6 +185,14 @@ export function forwardSession(
   });
 }
 
+export function routeSessionMention(
+  sourceSessionId: string,
+  input: string,
+): Promise<HandoverResult> {
+  assertTauriRuntime();
+  return invoke("route_session_mention", { sourceSessionId, input });
+}
+
 export function continueSession(
   sourceSessionId: string,
   targetAgentId: string,

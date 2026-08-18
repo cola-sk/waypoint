@@ -50,6 +50,16 @@ export type SessionErrorEvent = {
   message: string;
 };
 
+export type SessionMentionRoutedEvent = {
+  sourceSessionId: string;
+  targetSession: SessionInfo;
+};
+
+export type SessionMentionErrorEvent = {
+  sourceSessionId: string;
+  message: string;
+};
+
 export type HandoverResult = {
   prompt: string;
   sourceSession: SessionInfo;

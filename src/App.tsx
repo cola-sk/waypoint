@@ -38,6 +38,7 @@ import {
   defaultWorkspace,
   deleteSession,
   detectEditors,
+  forwardSession,
   getHandoverDraft,
   getHandoverPreview,
   killSession,
@@ -208,6 +209,30 @@ function collectSessionDescendantIds(allSessions: SessionInfo[], rootSessionId: 
     stack.push(...(childIdsByParent.get(sessionId) ?? []));
   }
   return descendantIds;
+}
+
+function sessionTreeRootId(allSessions: SessionInfo[], session: SessionInfo): string {
+  const byId = new Map(allSessions.map((item) => [item.id, item]));
+  const declaredRoot = session.handoverRootId?.trim();
+  if (declaredRoot) {
+    return declaredRoot;
+  }
+
+  let current = session;
+  const visited = new Set<string>([current.id]);
+  while (current.parentSessionId) {
+    const parentId = current.parentSessionId.trim();
+    if (!parentId || visited.has(parentId)) {
+      break;
+    }
+    const parent = byId.get(parentId);
+    if (!parent) {
+      break;
+    }
+    visited.add(parentId);
+    current = parent;
+  }
+  return current.id;
 }
 
 function normalizeWorkspacePath(value: string) {
@@ -530,9 +555,10 @@ function App() {
   const [workspacePath, setWorkspacePath] = useState("");
   const [isLaunching, setIsLaunching] = useState(false);
   const [handoverOpen, setHandoverOpen] = useState(false);
-  const [handoverMode, setHandoverMode] = useState<"new" | "existing">("new");
+  const [handoverMode, setHandoverMode] = useState<"new" | "existing" | "copy">("new");
   const [continueAgentId, setContinueAgentId] = useState("codex");
   const [continueWorkspacePath, setContinueWorkspacePath] = useState("");
+  const [existingTargetSessionId, setExistingTargetSessionId] = useState("");
   const [handoverNote, setHandoverNote] = useState("");
   const [handoverContentMode, setHandoverContentMode] = useState<HandoverContentMode>("recommended");
   const [handoverPreview, setHandoverPreview] = useState<HandoverPreview | null>(null);
@@ -696,6 +722,28 @@ function App() {
     () => agents.find((agent) => agent.id === continueAgentId) ?? null,
     [agents, continueAgentId],
   );
+  const relatedRunningSessions = useMemo(() => {
+    if (!activeSession) {
+      return [];
+    }
+    const rootId = sessionTreeRootId(sessions, activeSession);
+    return sessions
+      .filter(
+        (session) =>
+          session.id !== activeSession.id &&
+          session.status === "running" &&
+          (sessionTreeRootId(sessions, session) === rootId || session.cwd === activeSession.cwd),
+      )
+      .sort((a, b) => {
+        if (a.id === activeSession.parentSessionId) return -1;
+        if (b.id === activeSession.parentSessionId) return 1;
+        return b.lastActiveAt - a.lastActiveAt;
+      });
+  }, [activeSession, sessions]);
+  const existingTargetSession = useMemo(
+    () => relatedRunningSessions.find((session) => session.id === existingTargetSessionId) ?? null,
+    [existingTargetSessionId, relatedRunningSessions],
+  );
   const effectiveHandoverMode =
     handoverContentMode === "recommended"
       ? (handoverPreview?.recommendedMode ?? "full")
@@ -721,6 +769,15 @@ function App() {
     },
     [activeSession?.cwd],
   );
+  const handleRouteError = useCallback((message: string) => {
+    setError(message);
+  }, []);
+  const handleMentionRouted = useCallback(async (targetSession: SessionInfo) => {
+    await refreshSessions(targetSession.id);
+    if (!targetSession.noneWorkspace && targetSession.cwd) {
+      revealWorkspacePath(targetSession.cwd);
+    }
+  }, []);
   const pendingDeleteSession = useMemo(
     () => sessions.find((session) => session.id === deleteSessionId) ?? null,
     [deleteSessionId, sessions],
@@ -1238,6 +1295,10 @@ function App() {
       "claude-code";
     setContinueAgentId(firstAvailableAgent);
     setContinueWorkspacePath(activeSession?.cwd ?? workspacePath);
+    const preferredRelatedSession =
+      relatedRunningSessions.find((session) => session.id === activeSession?.parentSessionId) ??
+      relatedRunningSessions[0];
+    setExistingTargetSessionId(preferredRelatedSession?.id ?? "");
     setHandoverMode("new");
     setHandoverContentMode("recommended");
     setHandoverOpen(true);
@@ -1309,6 +1370,7 @@ function App() {
   async function handleContinue() {
     if (!activeSessionId) return;
     if (handoverMode === "new" && (!continueAgentId || !continueWorkspacePath.trim())) return;
+    if (handoverMode === "existing" && !existingTargetSessionId) return;
     if (handoverPromptEdited && !handoverPromptEdit.trim()) {
       setError("Handover Markdown 不能为空。");
       return;
@@ -1318,7 +1380,7 @@ function App() {
     setIsForwarding(true);
     try {
       const editedPrompt = handoverPromptEdited ? handoverPromptEdit : "";
-      if (handoverMode === "existing") {
+      if (handoverMode === "copy") {
         const fileResult = await createHandoverFile(
           activeSessionId,
           handoverNote,
@@ -1336,6 +1398,23 @@ function App() {
         setHandoverPromptEdit("");
         setHandoverPromptEdited(false);
         setIsHandoverDraftLoading(false);
+        setHandoverOpen(false);
+      } else if (handoverMode === "existing") {
+        const result = await forwardSession(
+          activeSessionId,
+          existingTargetSessionId,
+          handoverNote,
+          handoverContentMode,
+          editedPrompt,
+        );
+        setHandoverResult(result);
+        setHandoverNote("");
+        setHandoverDraft(null);
+        setHandoverDraftError(null);
+        setHandoverPromptEdit("");
+        setHandoverPromptEdited(false);
+        setIsHandoverDraftLoading(false);
+        await refreshSessions(result.targetSession.id);
         setHandoverOpen(false);
       } else {
         const result = await continueSession(
@@ -1374,7 +1453,10 @@ function App() {
     if (handoverResult) {
       return;
     }
-    if (handoverMode === "new" && (!continueAgentId || !continueWorkspacePath.trim())) {
+    if (
+      (handoverMode === "new" && (!continueAgentId || !continueWorkspacePath.trim())) ||
+      (handoverMode === "existing" && !existingTargetSessionId)
+    ) {
       setHandoverDraft(null);
       setHandoverDraftError(null);
       setIsHandoverDraftLoading(false);
@@ -1387,8 +1469,8 @@ function App() {
     const timeout = window.setTimeout(() => {
       void getHandoverDraft({
         sourceSessionId: activeSessionId,
-        targetMode: handoverMode,
-        targetSessionId: null,
+        targetMode: handoverMode === "new" ? "new" : "existing",
+        targetSessionId: handoverMode === "existing" ? existingTargetSessionId : null,
         targetAgentId: handoverMode === "new" ? continueAgentId : null,
         cwd: handoverMode === "new" ? continueWorkspacePath.trim() : null,
         note: handoverNote,
@@ -1420,6 +1502,7 @@ function App() {
     activeSessionId,
     continueAgentId,
     continueWorkspacePath,
+    existingTargetSessionId,
     handoverContentMode,
     handoverMode,
     handoverNote,
@@ -2259,6 +2342,8 @@ function App() {
                   });
                 }}
                 onActivationFailed={handleActivationFailed}
+                onRouteError={handleRouteError}
+                onMentionRouted={handleMentionRouted}
               />
             ) : (
               <div className="empty-state">
@@ -2602,6 +2687,17 @@ function App() {
                     setHandoverMode("existing");
                   }}
                 >
+                  Existing Session
+                </button>
+                <button
+                  className={handoverMode === "copy" ? "active" : ""}
+                  type="button"
+                  onClick={() => {
+                    setHandoverResult(null);
+                    setHandoverFileResult(null);
+                    setHandoverMode("copy");
+                  }}
+                >
                   Copy Handover
                 </button>
               </div>
@@ -2751,27 +2847,68 @@ function App() {
                     </div>
                   </div>
                 </>
+              ) : handoverMode === "existing" ? (
+                <>
+                  <div className="field">
+                    <label htmlFor="existing-target-session">
+                      <MessageSquare aria-hidden="true" size={14} />
+                      <span>Related session</span>
+                    </label>
+                    <select
+                      id="existing-target-session"
+                      value={existingTargetSessionId}
+                      onChange={(event) => {
+                        setHandoverResult(null);
+                        setExistingTargetSessionId(event.target.value);
+                      }}
+                    >
+                      {relatedRunningSessions.length === 0 ? (
+                        <option value="">No running related sessions</option>
+                      ) : null}
+                      {relatedRunningSessions.map((session) => (
+                        <option key={session.id} value={session.id}>
+                          {session.id === activeSession?.parentSessionId ? "Parent · " : ""}
+                          {session.title} · {session.agentName}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {existingTargetSession ? (
+                    <div className="agent-status">
+                      <span className="status-dot running" />
+                      <span>{existingTargetSession.cwd}</span>
+                    </div>
+                  ) : (
+                    <p className="handover-copy-hint">
+                      Create a child session first. Phase 1 delivery is limited to the same session tree.
+                    </p>
+                  )}
+                </>
               ) : (
                 <p className="handover-copy-hint">
                   Write handover file and copy prompt to clipboard. Paste into any session when ready.
                 </p>
               )}
 
-              {handoverMode === "new" ? (
-              <div className="field">
-                <label htmlFor="handover-note">Note</label>
-                <textarea
-                  id="handover-note"
-                  value={handoverNote}
-                  onChange={(event) => {
-                    setHandoverResult(null);
-                    setHandoverFileResult(null);
-                    setHandoverNote(event.target.value);
-                  }}
-                  placeholder="Optional: tell the target agent what to focus on next."
-                  rows={6}
-                />
-              </div>
+              {handoverMode !== "copy" ? (
+                <div className="field">
+                  <label htmlFor="handover-note">Note</label>
+                  <textarea
+                    id="handover-note"
+                    value={handoverNote}
+                    onChange={(event) => {
+                      setHandoverResult(null);
+                      setHandoverFileResult(null);
+                      setHandoverNote(event.target.value);
+                    }}
+                    placeholder={
+                      handoverMode === "existing"
+                        ? "Example: The plan changed. Review the security implications and report your findings."
+                        : "Optional: tell the target agent what to focus on next."
+                    }
+                    rows={6}
+                  />
+                </div>
               ) : null}
 
                 </div>
@@ -2860,20 +2997,29 @@ function App() {
                 type="button"
                 onClick={(handoverResult || handoverFileResult) ? closeHandover : handleContinue}
                 disabled={
-                  (handoverResult || handoverFileResult) ? false :
-                  isForwarding ||
-                  (handoverMode === "new" && (!continueAgent?.available || !continueWorkspacePath.trim()))
+                  handoverResult || handoverFileResult
+                    ? false
+                    : isForwarding ||
+                      (handoverMode === "new" &&
+                        (!continueAgent?.available || !continueWorkspacePath.trim())) ||
+                      (handoverMode === "existing" && !existingTargetSessionId)
                 }
               >
                 <Send aria-hidden="true" size={15} />
                 <span>
                   {isForwarding
-                    ? handoverMode === "new" ? "Creating" : "Copying"
+                    ? handoverMode === "new"
+                      ? "Creating"
+                      : handoverMode === "existing"
+                        ? "Sending"
+                        : "Copying"
                     : (handoverResult || handoverFileResult)
                       ? "Done"
                       : handoverMode === "new"
                         ? "Create & Continue"
-                        : "Copy & Close"}
+                        : handoverMode === "existing"
+                          ? "Send Update"
+                          : "Copy & Close"}
                 </span>
               </button>
             </footer>

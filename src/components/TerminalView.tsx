@@ -9,6 +9,7 @@ import {
   listSessionAttachments,
   reactivateSession,
   resizeSession,
+  routeSessionMention,
   saveSessionAttachment,
   writeSession,
 } from "../api/tauri";
@@ -18,6 +19,8 @@ import type {
   SessionErrorEvent,
   SessionEvent,
   SessionInfo,
+  SessionMentionErrorEvent,
+  SessionMentionRoutedEvent,
 } from "../types";
 
 type TerminalViewProps = {
@@ -26,6 +29,13 @@ type TerminalViewProps = {
   onPreviewFile?: (path: string) => void;
   onSessionActivated?: (session: SessionInfo) => void;
   onActivationFailed?: (sessionId: string, reason: string) => Promise<void> | void;
+  onRouteError?: (message: string) => void;
+  onMentionRouted?: (targetSession: SessionInfo) => void;
+};
+
+type MentionNotice = {
+  kind: "sending" | "success" | "error";
+  text: string;
 };
 
 const MIN_ROWS = 5;
@@ -41,6 +51,10 @@ const MAX_INTERCEPTED_INPUT_SUPPRESSIONS = 20;
 const TERMINAL_FILE_PATH_PATTERN =
   /(?:"([^"\r\n]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?)"|'([^'\r\n]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?)'|((?:~|\/|\.{1,2}\/)?[A-Za-z0-9_.@%+=,~/-]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?))/g;
 const TERMINAL_PATH_TRAILING_PUNCTUATION = /[),.;\]}]+$/;
+
+function isSessionRouteCommand(value: string): boolean {
+  return value.includes("@@");
+}
 
 
 function isAsciiAlphaNumeric(value: string): boolean {
@@ -236,7 +250,15 @@ function resolveTerminalPath(value: string, cwd?: string | null): string {
   return `/${normalized.join("/")}`;
 }
 
-function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onActivationFailed }: TerminalViewProps) {
+function TerminalView({
+  sessionId,
+  cwd,
+  onPreviewFile,
+  onSessionActivated,
+  onActivationFailed,
+  onRouteError,
+  onMentionRouted,
+}: TerminalViewProps) {
   const shellRef = useRef<HTMLDivElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -247,6 +269,7 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
   const [attachments, setAttachments] = useState<SessionAttachmentInfo[]>([]);
   const [isSavingAttachment, setIsSavingAttachment] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [mentionNotice, setMentionNotice] = useState<MentionNotice | null>(null);
   const activateAndQueueRef = useRef<((data: string) => void) | null>(null);
   const pushInputRef = useRef<((data: string) => void) | null>(null);
   const placeholderSlotByAttachmentIdRef = useRef<Map<string, number>>(new Map());
@@ -374,12 +397,16 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
     let unlistenPtyData: UnlistenFn | null = null;
     let unlistenSessionExited: UnlistenFn | null = null;
     let unlistenSessionError: UnlistenFn | null = null;
+    let unlistenMentionRouted: UnlistenFn | null = null;
+    let unlistenMentionError: UnlistenFn | null = null;
     let isReplaying = true;
     let isLive = false;
     let isActivating = false;
     let wasReplayOnly = false;
     let shouldClearReplayOnActivation = false;
     let pendingInput = "";
+    let mentionNoticeTimeout: number | null = null;
+    let isMentionRouting = false;
     const queuedLiveOutput: Array<string | Uint8Array> = [];
 
     setIsRestoring(false);
@@ -464,11 +491,94 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
       });
       return hasMatch;
     };
+    const finishMentionSuccess = (targetTitle: string) => {
+      if (disposed) return;
+      setMentionNotice({
+        kind: "success",
+        text: `已发送给 @@${targetTitle}`,
+      });
+      if (mentionNoticeTimeout !== null) {
+        window.clearTimeout(mentionNoticeTimeout);
+      }
+      mentionNoticeTimeout = window.setTimeout(() => {
+        if (!disposed) setMentionNotice(null);
+      }, 2800);
+    };
+    const showMentionError = (err: unknown) => {
+      if (disposed) return;
+      const message = String(err);
+      setMentionNotice({ kind: "error", text: message });
+      onRouteError?.(message);
+    };
+    const routeMentionCommand = (
+      input: string,
+      clearPayload: string,
+      onCleared?: () => void,
+    ) => {
+      if (isMentionRouting) {
+        return;
+      }
+      isMentionRouting = true;
+      setMentionNotice({ kind: "sending", text: "正在投递会话消息…" });
+      void routeSessionMention(sessionId, input)
+        .then((result) =>
+          writeSession(sessionId, clearPayload).then(() => {
+            onCleared?.();
+            finishMentionSuccess(result.targetSession.title);
+            onMentionRouted?.(result.targetSession);
+          }),
+        )
+        .catch(showMentionError)
+        .finally(() => {
+          isMentionRouting = false;
+        });
+    };
+    const visibleMentionCommand = (): string | null => {
+      const buffer = terminal.buffer.active;
+      const cursorLineNumber = buffer.baseY + buffer.cursorY + 1;
+      const logical = readLogicalLine(buffer, cursorLineNumber);
+      if (!logical) {
+        return null;
+      }
+      const mentionIndex = logical.text.lastIndexOf("@@");
+      if (mentionIndex < 0) {
+        return null;
+      }
+      const command = logical.text.slice(mentionIndex).trim();
+      return command.startsWith("@@") ? command : null;
+    };
     terminal.attachCustomKeyEventHandler((event) => {
       if (isConnecting) {
         event.preventDefault();
         event.stopPropagation();
         return false;
+      }
+      if (
+        event.type === "keydown" &&
+        event.key === "Enter" &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.metaKey &&
+        !event.shiftKey &&
+        !event.isComposing &&
+        isLive
+      ) {
+        const trackedInput = pendingInputLineRef.current;
+        const routeInput =
+          pendingInputReliableRef.current && isSessionRouteCommand(trackedInput)
+            ? trackedInput
+            : visibleMentionCommand();
+        if (routeInput) {
+          event.preventDefault();
+          event.stopPropagation();
+          const eraseLength = Array.from(routeInput).length;
+          const clearPayload = "\x7f".repeat(Math.max(eraseLength, 1));
+          routeMentionCommand(routeInput, clearPayload, () => {
+            pendingInputLineRef.current = "";
+            pendingInputReliableRef.current = true;
+          });
+          return false;
+        }
       }
       const isInterceptable = (isLive ? isLiveDirectInterceptableInput(event.key) : isDirectInterceptablePrintable(event.key));
       if (
@@ -879,6 +989,22 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
         }
 
         if (char === "\r" || char === "\n") {
+          const submittedLine = pendingInputLineRef.current;
+          if (
+            isLive &&
+            pendingInputReliableRef.current &&
+            isSessionRouteCommand(submittedLine)
+          ) {
+            const eraseInput = "\x7f".repeat(Array.from(submittedLine).length);
+            const clearPayload = `${output}${eraseInput}`;
+            output = "";
+            routeMentionCommand(submittedLine, clearPayload, () => {
+              pendingInputLineRef.current = "";
+              pendingInputReliableRef.current = true;
+            });
+            i++;
+            continue;
+          }
           if (
             pendingInputReliableRef.current &&
             pendingInputLineRef.current.includes("[paste image")
@@ -1068,6 +1194,42 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
       unlistenSessionError = unlisten;
     });
 
+    listen<SessionMentionRoutedEvent>("session:mention-routed", (event) => {
+      if (event.payload.sourceSessionId !== sessionId) {
+        return;
+      }
+      setMentionNotice({
+        kind: "success",
+        text: `已发送给 @@${event.payload.targetSession.title}`,
+      });
+      if (mentionNoticeTimeout !== null) {
+        window.clearTimeout(mentionNoticeTimeout);
+      }
+      mentionNoticeTimeout = window.setTimeout(() => {
+        if (!disposed) setMentionNotice(null);
+      }, 2800);
+      onMentionRouted?.(event.payload.targetSession);
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+        return;
+      }
+      unlistenMentionRouted = unlisten;
+    });
+
+    listen<SessionMentionErrorEvent>("session:mention-error", (event) => {
+      if (event.payload.sourceSessionId === sessionId) {
+        setMentionNotice({ kind: "error", text: event.payload.message });
+        onRouteError?.(event.payload.message);
+      }
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+        return;
+      }
+      unlistenMentionError = unlisten;
+    });
+
     const waitForShellLayout = (): Promise<{ width: number; height: number }> => {
       return new Promise((resolve) => {
         if (!shell) {
@@ -1164,6 +1326,9 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
       activateAndQueueRef.current = null;
       pushInputRef.current = null;
       window.clearTimeout(resizeTimeout);
+      if (mentionNoticeTimeout !== null) {
+        window.clearTimeout(mentionNoticeTimeout);
+      }
       detachSession(sessionId).catch(() => undefined);
       dataDisposable.dispose();
       pathLinkDisposable.dispose();
@@ -1186,13 +1351,15 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
       unlistenPtyData?.();
       unlistenSessionExited?.();
       unlistenSessionError?.();
+      unlistenMentionRouted?.();
+      unlistenMentionError?.();
       terminal.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
       pendingInputLineRef.current = "";
       pendingInputReliableRef.current = true;
     };
-  }, [cwd, onPreviewFile, placeholderTokenForAttachment, resolveImagePlaceholders, sessionId, saveImageFiles]);
+  }, [cwd, onMentionRouted, onPreviewFile, onRouteError, placeholderTokenForAttachment, resolveImagePlaceholders, sessionId, saveImageFiles]);
 
   const handleContainerClick = () => {
     terminalRef.current?.focus();
@@ -1222,6 +1389,15 @@ function TerminalView({ sessionId, cwd, onPreviewFile, onSessionActivated, onAct
       <div className="terminal-workbench">
         <div className="terminal-shell" data-status={status} onClick={handleContainerClick} ref={shellRef}>
           <div className="terminal-surface" ref={surfaceRef} />
+          {mentionNotice ? (
+            <div
+              className={`terminal-mention-notice ${mentionNotice.kind}`}
+              role="status"
+              aria-live="polite"
+            >
+              {mentionNotice.text}
+            </div>
+          ) : null}
           {status === "connecting" ? (
             <div className="terminal-restore-overlay" role="status" aria-live="polite">
               <div className="terminal-restore-panel">

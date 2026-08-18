@@ -2434,6 +2434,29 @@ textarea:focus-visible {
   overflow: hidden;
 }
 
+.terminal-mention-notice {
+  position: absolute;
+  z-index: 12;
+  top: 12px;
+  right: 18px;
+  max-width: min(520px, calc(100% - 36px));
+  border: 1px solid rgba(126, 209, 216, 0.45);
+  border-radius: 7px;
+  background: rgba(19, 39, 43, 0.96);
+  color: #d8fbff;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.4;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  pointer-events: none;
+}
+
+.terminal-mention-notice.error {
+  border-color: rgba(255, 120, 117, 0.55);
+  background: rgba(67, 27, 29, 0.97);
+  color: #ffd7d5;
+}
+
 .terminal-attachment-tray {
   flex: 0 0 auto;
   z-index: 5;
@@ -2810,7 +2833,7 @@ textarea:focus-visible {
 
 .mode-toggle {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 4px;
   border: 1px solid var(--border-color);
   border-radius: 8px;

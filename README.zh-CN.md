@@ -35,6 +35,8 @@ waypoint 是一个桌面端本地 Agent CLI 会话路由器。它的目标是通
 - 指定 workspace 目录创建 PTY session；也可选择「None（不绑定工作区）」，会话归入独立分组，重启后仍保留。
 - 多个 session 并存，切换 UI 时不杀掉已有 PTY 进程。
 - 将一个 session 的上下文转发到另一个 session。
+- 通过 `Existing Session` 在同一会话树的父、子、祖先和后代 session 间发送更新或 review 请求；共享内容写入 handover 文件，短指令注入目标 PTY，且不会改变原有父子拓扑。
+- 在终端行首输入 `@@会话名 消息` 可直接跨会话投递；单个 `@` 保留给 Agent 自身的引用语法。
 - 新建会话时对 Claude Code / Codex 可勾选「跳过权限确认」dangerous 选项，标志会随 session 持久化，handover 与 native resume 时自动重新应用。
 - 在终端中粘贴或拖入图片时自动保存为会话附件，并在输入行插入 `[paste image N]` 占位符；按 Enter 提交前会反解为附件实际路径再发送给 agent。
 - Xterm 终端输入、输出和 resize。
@@ -217,13 +219,35 @@ Continue 弹窗右侧的 handover Markdown 支持直接编辑；点击 Create & 
 6. 手动粘贴到任何目标 session 中即可。
 ```
 
+同一会话树内还可以使用 **Existing Session** 模式完成 Phase 1 的人工串行同步：
+
+```text
+1. 在任意父/子/更深层级 session 中点击 Handover。
+2. 切换到 Existing Session。
+3. 选择一个仍在运行的关联 session。
+4. 在 Note 中填写「方案已更新，请 review 安全性」或 review 结论。
+5. 点击 Send Update。
+6. Waypoint 在目标工作区的 .waypoint-handovers/ 生成共享文件，并向目标 PTY 注入短引用。
+7. 目标 session 读取文件后按 User Note 继续处理；会话树父子关系保持不变。
+```
+
+也可以直接在源 session 的终端输入：
+
+```text
+@@codex1 方案已更新，帮我 review
+@@Security Reviewer 请重点检查权限边界
+告诉 @@codex1 我已经准备好了
+```
+
+`@@` 可位于输入行的任意位置，其后使用目标 session 的完整标题，目标收到的消息是会话名之后的内容。Waypoint 只匹配同一会话树内正在运行的 session；标题重名时会要求先重命名。`@@` 是 Waypoint 保留前缀，目标无效时会在终端上方显示错误；单个 `@` 不参与路由，会原样交给当前 Agent。运行中消息 inbox、自动完成检测和回调仍属于后续阶段。
+
 此外，会话标题可在顶栏直接编辑（点击铅笔图标），删除父会话时会级联删除所有子会话。
 
 ### Native session id 与恢复逻辑
 
 waypoint 自己的 session id 存在 `~/.waypoint/sessions/<session-id>/meta.json` 中；如果某个 agent 支持原生恢复，waypoint 会在 `nativeSessionRef` 中记录该 agent 的 native id、可选 project、恢复命令和发现时间。恢复历史会话时，后端先重新解析/补全 native 信息，再生成对应 agent 的 resume 命令。
 
-> **Dev / Prod 存储隔离**：`npm run tauri:dev`（debug 构建）使用 `~/.waypoint-dev/`，安装版 DMG（release 构建）使用 `~/.waypoint/`。两套 session、handover、附件互不干扰，重装 DMG 不会影响 dev 会话，反之亦然。前端 localStorage 同样按 `waypoint-dev:` / `waypoint:` 前缀隔离。
+> **Dev / Prod 存储隔离**：`npm run tauri:dev`（debug 构建）使用 `~/.waypoint-dev/`，安装版 DMG（release 构建）使用 `~/.waypoint/`，两套 session 元数据互不干扰。handover 和附件为了让受项目权限限制的 agent 可读，会写入 workspace 内的隐藏目录。前端 localStorage 同样按 `waypoint-dev:` / `waypoint:` 前缀隔离。
 
 不同 agent 的 native id 策略：
 
@@ -276,13 +300,13 @@ handover 不直接把完整上下文塞进目标 agent 的命令行。waypoint �
 
 ```text
 主文件：
-  ~/.waypoint/<workspace-name>/handover-<uuid>.md
+  <target-workspace>/.waypoint-handovers/handover-<uuid>.md
 
 Compact 模式的完整证据文件：
-  ~/.waypoint/<workspace-name>/handover-<uuid>-full-evidence.md
+  <target-workspace>/.waypoint-handovers/handover-<uuid>-full-evidence.md
 
-workspace-name：
-  取 workspace 路径最后一级目录名；无法解析时使用 workspace。
+Git 状态：
+  .waypoint-handovers/.gitignore 使用 * 忽略目录内容。
 
 模式选择：
   Recommended 模式下，如果估算上下文超过 24,000 字符，使用 Compact；
@@ -364,10 +388,13 @@ GitHub Copilot:
   handover 文件目录通过 --add-dir 传入；gh copilot 形态会通过 -- 分隔参数。
 
 Existing Session / Forward:
-  已改为 Copy Handover 模式。
-  先生成 handover 文件，然后把一段短指令复制到剪贴板：
-    「A handover context file is referenced at <路径>. Read only this exact file, acknowledge context loaded, then wait for my next instruction.」
-  用户手动粘贴到任何目标 session 中，不再通过 PTY bracketed paste 自动注入。
+  仅允许同一 handover 树内的运行中 session。
+  先在目标 workspace 生成 handover 文件，再通过 PTY bracketed paste 注入短引用。
+  目标 session 读取文件并执行 User Note；该操作不会改写 parentSessionId / handoverRootId。
+
+Copy Handover:
+  生成 handover 文件并把短指令复制到剪贴板。
+  用户可以手动粘贴到任意目标 session，不进行自动注入。
 
 Create Handover File:
   右上角的 handover file 按钮只生成文件，不启动/注入任何 agent。
