@@ -8,7 +8,7 @@
   <strong>桌面端本地 AI Agent CLI 会话路由器</strong>
 </p>
 
-<img width="3454" height="2148" alt="Waypoint Preview" src="https://github.com/user-attachments/assets/cd1f24ec-dd44-457b-bedb-e44c88c159cd" />
+<img width="100%" alt="Waypoint Preview" src="docs/assets/waypoint-screenshot.png" />
 
 Waypoint 是一个专为 AI 辅助编程设计的桌面端本地 Agent CLI 会话路由与管理工具。基于 **Tauri v2 + Rust + React + Xterm.js** 构建，支持在单一窗口中管理并保持多个本地 Agent CLI（如 Claude Code、Codex、Antigravity CLI、GitHub Copilot、Shell 等）长期存活、自由切换，并提供毫秒级的跨会话协作与上下文交接（Handover）能力。
 
