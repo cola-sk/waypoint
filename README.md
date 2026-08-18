@@ -25,6 +25,8 @@ Waypoint 是一个 Tauri 桌面应用，用于在一个窗口中管理多个本�
 - **多 agent 工作区路由**：固定工作区目录，并从每个目录启动可用的 agent。
 - **持久会话切换**：在会话之间切换时不杀掉底层进程。
 - **Agent handover**：将终端上下文、最近对话时间线和备注转发到另一个 agent 会话以延续工作；git 状态和 diff 不再内联，目标 agent 需要时直接查询 workspace。
+- **关联会话同步（Phase 1）**：父、子、祖先和后代会话可通过 `Existing Session` 发送共享 handover 文件与短指令；目标会话直接读取并执行 User Note，发送过程不会改变原有会话树。
+- **终端跨会话路由**：在终端行首输入 `@@会话名 消息`，可直接把当前上下文和消息投递给同一会话树中正在运行的目标；单个 `@` 保留给 Agent 自身语法。
 - **无工作区会话**：新建会话时可选择「None（不绑定工作区）」，会话归入独立分组，不与具体目录绑定；该标记持久化在 `meta.json` 中，重启后仍然保留。
 - **跳过权限确认**：对 Claude Code（`--dangerously-skip-permissions`）和 Codex（`--dangerously-bypass-approvals-and-sandbox`）可在新建会话时勾选 dangerous 选项；该标志同样持久化在 session meta 中，handover 和 native resume 时会自动重新应用。
 - **图片粘贴**：在终端中粘贴或拖入图片时，会自动保存为会话附件并在输入行插入 `[paste image N]` 占位符；按 Enter 提交前 Waypoint 会把占位符反解为附件的实际文件路径，再连同回车一起发给 agent。
@@ -146,10 +148,14 @@ Continue 流程将当前会话的上下文传递给另一个 agent。
 5. 添加可选的 note，描述下一个 agent 应该关注的内容。
 6. 点击 **Create & Continue**。
 
-Waypoint 会按 chat 顺序收集最近的对话时间线，将 handover 文件写到 `~/.waypoint/<workspace-name>/handover-*.md`，启动目标会话，并注入一段简短指令，指引目标 agent 读取该 handover 文件。目标 agent 需要 git 状态或 diff 时会直接从 workspace 查询。
+Waypoint 会按 chat 顺序收集最近的对话时间线，将 handover 文件写到目标工作区的 `.waypoint-handovers/handover-*.md`，启动目标会话，并注入一段简短指令，指引目标 agent 读取该 handover 文件。目标 agent 需要 git 状态或 diff 时会直接从 workspace 查询。
 Continue 弹窗右侧的 handover Markdown 支持直接编辑，点击 `Create & Continue` 时会使用编辑后的内容写入 handover 文件。
 
 也可以使用 **Copy Handover** 模式：生成 handover 文件并将一段短指令（含文件路径）复制到剪贴板，用户手动粘贴到任何目标会话中即可。不再需要选择目标会话或通过 PTY 自动注入。
+
+对已经位于同一 handover 树中的运行中会话，可使用 **Existing Session** 模式。选择父级、子级或更深层级的目标会话并填写 Note 后，Waypoint 会把上下文写入目标工作区的 `.waypoint-handovers/`（目录内置 `.gitignore`），再向目标 PTY 注入只包含来源和文件路径的短消息。
+
+同一能力也可直接从终端触发：`@@codex1 方案已更新，帮我 review`，或使用自然表达 `告诉 @@codex1 我已经准备好了`。`codex1` 是目标会话标题，支持包含空格的完整标题；标题重名时需要先重命名。`@@` 是 Waypoint 保留前缀，目标无效时会在终端上方显示错误；单个 `@` 会原样发送给当前 Agent。运行中消息 inbox、自动完成检测和回调仍属于后续阶段。
 
 会话标题可在顶栏直接编辑（点击铅笔图标）；删除父会话时会级联删除所有子会话。
 
@@ -157,7 +163,7 @@ Continue 弹窗右侧的 handover Markdown 支持直接编辑，点击 `Create &
 
 Waypoint 自己的 session 元数据存储在 `~/.waypoint/sessions/<session-id>/meta.json` 中。对于支持原生恢复的 agent，还会记录 `nativeSessionRef`，包含 provider、native id、可选 project、resume 命令和发现时间。重新激活历史会话时，后端会先刷新该 native 引用，再构造 agent 专属的 resume 命令。
 
-> **Dev / Prod 存储隔离**：`npm run tauri:dev`（debug 构建）使用 `~/.waypoint-dev/`，安装版 DMG（release 构建）使用 `~/.waypoint/`。两套 session、handover、附件互不干扰，重装 DMG 不会影响 dev 会话，反之亦然。前端 localStorage 同样按 `waypoint-dev:` / `waypoint:` 前缀隔离。
+> **Dev / Prod 存储隔离**：`npm run tauri:dev`（debug 构建）使用 `~/.waypoint-dev/`，安装版 DMG（release 构建）使用 `~/.waypoint/`，两套 session 元数据互不干扰。handover 和附件为了让受项目权限限制的 agent 可读，会写入 workspace 内的隐藏目录。前端 localStorage 同样按 `waypoint-dev:` / `waypoint:` 前缀隔离。
 
 不同 agent 的 native id 策略对比：
 
@@ -183,9 +189,9 @@ Handover 不会把完整上下文塞进目标 agent 的命令行，而是先生�
 
 | 项 | 说明 |
 |---|---|
-| 主文件 | `~/.waypoint/<workspace-name>/handover-<uuid>.md` |
-| Compact 模式完整证据文件 | `~/.waypoint/<workspace-name>/handover-<uuid>-full-evidence.md` |
-| `workspace-name` 取值 | workspace 路径最后一级目录名；无法解析时使用 `workspace` |
+| 主文件 | `<target-workspace>/.waypoint-handovers/handover-<uuid>.md` |
+| Compact 模式完整证据文件 | `<target-workspace>/.waypoint-handovers/handover-<uuid>-full-evidence.md` |
+| Git 状态 | `.waypoint-handovers/.gitignore` 使用 `*` 忽略目录内容 |
 | Recommended 模式 | 估算上下文超过 24,000 字符时使用 Compact，否则使用 Full |
 | 显式模式 | 用户可手动选择 Compact 或 Full |
 
@@ -228,6 +234,8 @@ Full 与 Compact 模式差异：
 | Codex | 默认命令带 `--no-alt-screen` | 通过 `--add-dir` 加入 handover 文件目录 | 指向 handover 文件，并包含新的 `waypoint_session_id` 标记 | 新建后等待更长启动延迟再注入，降低 Codex 未就绪时写入失败概率 |
 | Antigravity CLI (agy) | `agy --prompt-interactive "<startup prompt>"` | 通过 `--add-dir` 授权 handover 目录 | 只含 handover 文件路径和新的 `waypoint_session_id` 标记，避免长 diff/context 直接进入 agy TUI | — |
 | GitHub Copilot | `copilot -i "<startup prompt>"` | 通过 `--add-dir` 传入 handover 目录；`gh copilot` 形态通过 `--` 分隔参数 | startup prompt | — |
+
+Existing Session 对所有 agent 使用同一策略：文件位于目标 workspace 内，Waypoint 通过 PTY bracketed paste 注入来源 session、精确文件路径和执行 User Note 的短指令。
 
 Copy Handover 模式：
 

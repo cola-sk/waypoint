@@ -6,7 +6,7 @@ use pty_manager::{
     default_workspace, delete_session, delete_session_attachment, detach_session, forward_session,
     get_handover_draft, get_handover_preview, kill_session, list_agent_presets, list_chat_messages,
     list_session_attachments, list_sessions, reactivate_session, resize_session,
-    save_session_attachment, update_session_title, write_session, AppState,
+    route_session_mention, save_session_attachment, update_session_title, write_session, AppState,
 };
 use serde::Serialize;
 use std::fs;
@@ -352,6 +352,7 @@ pub fn run() {
             delete_session,
             update_session_title,
             forward_session,
+            route_session_mention,
             continue_session,
             create_handover_file,
             get_handover_draft,

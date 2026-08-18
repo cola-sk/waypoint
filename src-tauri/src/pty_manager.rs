@@ -316,6 +316,20 @@ struct SessionErrorEvent {
     message: String,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionMentionRoutedEvent {
+    source_session_id: String,
+    target_session: SessionInfo,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionMentionErrorEvent {
+    source_session_id: String,
+    message: String,
+}
+
 #[tauri::command]
 pub fn create_agent_session(
     state: State<'_, AppState>,
@@ -399,10 +413,11 @@ pub fn detach_session(state: State<'_, AppState>, session_id: String) -> Result<
 #[tauri::command]
 pub fn write_session(
     state: State<'_, AppState>,
+    app: AppHandle,
     session_id: String,
     data: String,
 ) -> Result<(), String> {
-    state.manager.write_session(&session_id, data)
+    state.manager.write_session(&app, &session_id, data)
 }
 
 #[tauri::command]
@@ -479,6 +494,17 @@ pub fn forward_session(
         handover_mode.unwrap_or_default(),
         edited_prompt,
     )
+}
+
+#[tauri::command]
+pub fn route_session_mention(
+    state: State<'_, AppState>,
+    source_session_id: String,
+    input: String,
+) -> Result<HandoverResult, String> {
+    state
+        .manager
+        .route_session_mention(&source_session_id, &input)
 }
 
 #[tauri::command]
@@ -1036,11 +1062,64 @@ impl SessionManager {
         )
     }
 
-    fn write_session(&self, session_id: &str, data: String) -> Result<(), String> {
+    fn write_session(
+        &self,
+        app: &AppHandle,
+        session_id: &str,
+        data: String,
+    ) -> Result<(), String> {
         let session = self.get(session_id)?;
         if !matches!(session.info().status, SessionStatus::Running) {
             return Err("session is not running".to_string());
         }
+
+        // Some full-screen CLIs (notably Codex) emit navigation/control
+        // sequences that make the frontend's line tracker intentionally give
+        // up. Keep a backend fallback at the actual Enter boundary so @@
+        // routing remains consistent across agent TUIs.
+        let mention_input = submitted_session_mention(
+            &session.pending_user_input.lock(),
+            &data,
+        );
+        if let Some(mention_input) = mention_input {
+            let route_result = self.route_session_mention(session_id, &mention_input);
+
+            match route_result {
+                Ok(result) => {
+                    let erase_input = "\x7f".repeat(mention_input.chars().count());
+                    session.append_input(&erase_input);
+                    session.capture_user_input(&erase_input);
+                    session
+                        .writer
+                        .lock()
+                        .write_all(erase_input.as_bytes())
+                        .map_err(|err| format!("failed to clear routed input from PTY: {err}"))?;
+                    session.meta.lock().last_active_at = unix_timestamp();
+                    session.persist_meta();
+                    let _ = app.emit(
+                        "session:mention-routed",
+                        SessionMentionRoutedEvent {
+                            source_session_id: session_id.to_string(),
+                            target_session: result.target_session,
+                        },
+                    );
+                }
+                Err(message) => {
+                    // Keep the source input intact so it can be corrected and
+                    // retried. The Enter is swallowed because @@ is reserved
+                    // for Waypoint routing.
+                    let _ = app.emit(
+                        "session:mention-error",
+                        SessionMentionErrorEvent {
+                            source_session_id: session_id.to_string(),
+                            message,
+                        },
+                    );
+                }
+            }
+            return Ok(());
+        }
+
         let data_to_write = if should_append_terminal_session_marker(&session, &data) {
             format!("{data}<!-- waypoint_session_id: {session_id} -->\r")
         } else {
@@ -1301,19 +1380,42 @@ impl SessionManager {
         let target = self.get(target_session_id)?;
         let source_info = source.info();
         let target_info = target.info();
+        if !matches!(target_info.status, SessionStatus::Running) {
+            return Err(format!(
+                "target session is not running: {}",
+                target_info.title
+            ));
+        }
+        let same_tree = handover_tree_id(&source_info) == handover_tree_id(&target_info);
+        let same_workspace = source_info.cwd == target_info.cwd;
+        if !same_tree && !same_workspace {
+            return Err(
+                "source and target sessions must belong to the same handover tree or workspace".to_string(),
+            );
+        }
 
         let handover = self.write_handover_for(
             &source,
             &source_info,
             &target_info,
-            note,
+            note.clone(),
             handover_mode,
             edited_prompt.as_deref(),
             &target_info.cwd,
         )?;
 
-        self.record_handover_link(&source_info, &target);
+        let short_instruction = existing_session_handover_prompt(
+            &handover.main_path,
+            &source_info,
+            note.as_deref(),
+        );
+        inject_with_retry(&target, &short_instruction)?;
         self.remember_handover(&target, &handover.prompt);
+        {
+            let mut meta = target.meta.lock();
+            meta.last_active_at = unix_timestamp();
+        }
+        target.persist_meta();
 
         Ok(HandoverResult {
             prompt: handover.prompt,
@@ -1326,6 +1428,42 @@ impl SessionManager {
                 .evidence_path
                 .map(|path| path.display().to_string()),
         })
+    }
+
+    fn route_session_mention(
+        &self,
+        source_session_id: &str,
+        input: &str,
+    ) -> Result<HandoverResult, String> {
+        let source = self.get(source_session_id)?;
+        let source_info = source.info();
+        if !matches!(source_info.status, SessionStatus::Running) {
+            return Err(format!(
+                "source session is not running: {}",
+                source_info.title
+            ));
+        }
+
+        let source_tree_id = handover_tree_id(&source_info);
+        let candidates = self
+            .list_sessions()
+            .into_iter()
+            .filter(|session| {
+                session.id != source_info.id
+                    && matches!(session.status, SessionStatus::Running)
+                    && (handover_tree_id(session) == source_tree_id
+                        || session.cwd == source_info.cwd)
+            })
+            .collect::<Vec<_>>();
+        let (target_id, note) = resolve_session_mention(input, &candidates)?;
+
+        self.forward_session(
+            source_session_id,
+            &target_id,
+            Some(note),
+            HandoverContentMode::Recommended,
+            None,
+        )
     }
 
     fn continue_session(
@@ -3292,13 +3430,183 @@ fn write_handover_files(
 }
 
 fn handover_workspace_dir(cwd: &str) -> Result<PathBuf, String> {
-    let workspace_name = Path::new(cwd)
-        .file_name()
-        .map(|name| name.to_string_lossy().trim().to_string())
-        .filter(|name| !name.is_empty() && name != "." && name != "..")
-        .unwrap_or_else(|| "workspace".to_string());
+    // Handover artifacts must be readable by already-running agents. Most
+    // agent CLIs only allow file access inside their startup workspace, so a
+    // file under ~/.waypoint cannot reliably be consumed by an existing
+    // session. Keep the shared artifact inside the target workspace and hide
+    // it from git status.
+    let cwd_path = PathBuf::from(cwd);
+    if !cwd_path.is_dir() {
+        return Err(format!("workspace directory does not exist: {cwd}"));
+    }
+    let cwd_canonical = fs::canonicalize(&cwd_path).unwrap_or(cwd_path);
+    let dir = cwd_canonical.join(".waypoint-handovers");
+    fs::create_dir_all(&dir).map_err(|err| {
+        format!(
+            "failed to create handover directory {}: {err}",
+            dir.display()
+        )
+    })?;
+    let gitignore = dir.join(".gitignore");
+    if !gitignore.exists() {
+        fs::write(&gitignore, "*\n").map_err(|err| {
+            format!(
+                "failed to create handover gitignore {}: {err}",
+                gitignore.display()
+            )
+        })?;
+    }
+    Ok(dir)
+}
 
-    Ok(waypoint_root_dir()?.join(workspace_name))
+fn existing_session_handover_prompt(
+    path: &Path,
+    source: &SessionInfo,
+    note: Option<&str>,
+) -> String {
+    if let Some(user_note) = note.map(str::trim).filter(|n| !n.is_empty()) {
+        format!(
+            "[Waypoint update from session \"{}\" (Agent: {})]\n{}\n\n(Detailed session context is archived at: {})",
+            source.title,
+            source.agent_name,
+            user_note,
+            path.display()
+        )
+    } else {
+        format!(
+            "[Waypoint update from session \"{}\" (Agent: {})]\nContext file: {}. Read this context and wait for next instruction.",
+            source.title,
+            source.agent_name,
+            path.display()
+        )
+    }
+}
+
+fn handover_tree_id(session: &SessionInfo) -> &str {
+    session
+        .handover_root_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or(&session.id)
+}
+
+fn resolve_session_mention(
+    input: &str,
+    candidates: &[SessionInfo],
+) -> Result<(String, String), String> {
+    let trimmed = input.trim();
+    let mention_offset = trimmed
+        .find("@@")
+        .ok_or_else(|| "会话路由指令必须包含 @@会话名。".to_string())?;
+    let raw_mention = trimmed[mention_offset + 2..].trim_start();
+    if raw_mention.is_empty() {
+        return Err("请在 @@ 后填写目标会话名。".to_string());
+    }
+
+    // Support optional quoted session titles: @@"Session Name" message or @@'Session Name' message
+    if raw_mention.starts_with('"') || raw_mention.starts_with('\'') {
+        let quote_char = raw_mention.chars().next().unwrap();
+        let unquoted = &raw_mention[1..];
+        if let Some(end_quote) = unquoted.find(quote_char) {
+            let target_title = unquoted[..end_quote].trim();
+            let remainder = unquoted[end_quote + 1..].trim();
+            let matched_candidates = candidates
+                .iter()
+                .filter(|session| session.title.trim().eq_ignore_ascii_case(target_title))
+                .collect::<Vec<_>>();
+            if matched_candidates.is_empty() {
+                let available = candidates
+                    .iter()
+                    .map(|session| session.title.trim())
+                    .filter(|title| !title.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("、");
+                return Err(if available.is_empty() {
+                    "当前没有其他正在运行的可用会话。".to_string()
+                } else {
+                    format!("未找到目标会话“{target_title}”。可用会话：{available}")
+                });
+            }
+            if matched_candidates.len() > 1 {
+                return Err(format!(
+                    "会话名“{}”不唯一，请先重命名重复会话。",
+                    target_title
+                ));
+            }
+            let target = matched_candidates[0];
+            if remainder.is_empty() {
+                return Err(format!(
+                    "请在 @@\"{}\" 后填写要发送的消息。",
+                    target.title.trim()
+                ));
+            }
+            return Ok((target.id.clone(), remainder.to_string()));
+        }
+    }
+
+    let mention = raw_mention;
+    let mut matched = candidates
+        .iter()
+        .filter_map(|session| {
+            let title = session.title.trim();
+            if title.is_empty() || mention.len() < title.len() {
+                return None;
+            }
+            let prefix = mention.get(..title.len())?;
+            if !prefix.eq_ignore_ascii_case(title) {
+                return None;
+            }
+            let remainder = mention.get(title.len()..)?;
+            if remainder
+                .chars()
+                .next()
+                .is_some_and(|character| !character.is_whitespace())
+            {
+                return None;
+            }
+            Some((session, title.len(), remainder.trim().to_string()))
+        })
+        .collect::<Vec<_>>();
+
+    if matched.is_empty() {
+        let available = candidates
+            .iter()
+            .map(|session| session.title.trim())
+            .filter(|title| !title.is_empty())
+            .collect::<Vec<_>>()
+            .join("、");
+        return Err(if available.is_empty() {
+            "当前没有其他正在运行的可用会话。".to_string()
+        } else {
+            format!("未找到目标会话。可用会话：{available}")
+        });
+    }
+
+    matched.sort_by(|left, right| right.1.cmp(&left.1));
+    let longest = matched[0].1;
+    let longest_matches = matched
+        .into_iter()
+        .filter(|(_, length, _)| *length == longest)
+        .collect::<Vec<_>>();
+    if longest_matches.len() > 1 {
+        return Err(format!(
+            "会话名“{}”不唯一，请先重命名重复会话。",
+            longest_matches[0].0.title.trim()
+        ));
+    }
+
+    let (target, _, note) = longest_matches
+        .into_iter()
+        .next()
+        .ok_or_else(|| "未找到目标会话。".to_string())?;
+    if note.is_empty() {
+        return Err(format!(
+            "请在 @@{} 后填写要发送的消息。",
+            target.title.trim()
+        ));
+    }
+
+    Ok((target.id.clone(), note))
 }
 
 fn handover_reference_startup_prompt(path: &Path, session_id: &str) -> String {
@@ -3342,12 +3650,14 @@ Continuation from {source_agent} session "{source_title}" in `{source_cwd}`.
 No semantic summary was generated; use the user note and evidence below.
 
 ## Source Session
+- ID: {source_id}
 - Agent: {source_agent}
 - Title: {source_title}
 - Command: {source_command}
 - Workspace: {source_cwd}
 
 ## Target Session
+- ID: {target_id}
 - Agent: {target_agent}
 - Title: {target_title}
 - Command: {target_command}
@@ -3368,7 +3678,6 @@ No semantic summary was generated; use the user note and evidence below.
 
 ## Recommended Next Steps
 - Start from the user note and recent conversation.
-- Inspect the workspace git state directly if it matters for the task.
 - Continue or rerun the most relevant validation for the task.
 
 ## Instructions
@@ -3380,10 +3689,12 @@ No semantic summary was generated; use the user note and evidence below.
 - Ask before destructive operations.
 "#,
         source_agent = source.agent_name,
+        source_id = source.id,
         source_title = source.title,
         source_command = source.command,
         source_cwd = source.cwd,
         target_agent = target.agent_name,
+        target_id = target.id,
         target_title = target.title,
         target_command = target.command,
         target_cwd = target.cwd,
@@ -3421,14 +3732,16 @@ Continue from the previous local agent session.
 
 ## Summary
 Continuation from {source_agent} session "{source_title}" in `{source_cwd}`.
-This compact handover includes short recent evidence. Inspect workspace state directly if needed.
+This compact handover includes short recent evidence.
 
 ## Source
+- ID: {source_id}
 - Agent: {source_agent}
 - Title: {source_title}
 - Workspace: {source_cwd}
 
 ## Target
+- ID: {target_id}
 - Agent: {target_agent}
 - Workspace: {target_cwd}
 
@@ -3450,7 +3763,6 @@ This compact handover includes short recent evidence. Inspect workspace state di
 
 ## Recommended Next Steps
 - Start from the user note and recent conversation.
-- Inspect the workspace git state directly if it matters for the task.
 - Continue or rerun the most relevant validation for the task.
 
 ## Instructions
@@ -3460,9 +3772,11 @@ This compact handover includes short recent evidence. Inspect workspace state di
 - Do not revert unrelated user changes.
 "#,
         source_agent = source.agent_name,
+        source_id = source.id,
         source_title = source.title,
         source_cwd = source.cwd,
         target_agent = target.agent_name,
+        target_id = target.id,
         target_cwd = target.cwd,
         note = if note.trim().is_empty() {
             "No additional note."
@@ -3497,12 +3811,14 @@ fn build_full_handover_evidence(
 This file contains larger raw evidence for a compact handover. The target agent should read it only if the main handover is insufficient.
 
 ## Source Session
+- ID: {source_id}
 - Agent: {source_agent}
 - Title: {source_title}
 - Command: {source_command}
 - Workspace: {source_cwd}
 
 ## Target Session
+- ID: {target_id}
 - Agent: {target_agent}
 - Title: {target_title}
 - Command: {target_command}
@@ -3520,10 +3836,12 @@ This file contains larger raw evidence for a compact handover. The target agent 
 ```
 "#,
         source_agent = source.agent_name,
+        source_id = source.id,
         source_title = source.title,
         source_command = source.command,
         source_cwd = source.cwd,
         target_agent = target.agent_name,
+        target_id = target.id,
         target_title = target.title,
         target_command = target.command,
         target_cwd = target.cwd,
@@ -3699,7 +4017,8 @@ fn is_meaningful_inherited_context(content: &str) -> bool {
 }
 
 fn inject_with_retry(target: &Arc<PtySession>, prompt: &str) -> Result<(), String> {
-    let injection = format!("\x1b[200~{prompt}\x1b[201~\n");
+    let normalized = prompt.replace("\r\n", "\r").replace('\n', "\r");
+    let injection = format!("{normalized}\r");
     let mut last_error = None;
 
     for attempt in 1..=HANDOVER_INJECT_ATTEMPTS {
@@ -3716,10 +4035,15 @@ fn inject_with_retry(target: &Arc<PtySession>, prompt: &str) -> Result<(), Strin
             ));
         }
 
-        match target.writer.lock().write_all(injection.as_bytes()) {
-            Ok(()) => return Ok(()),
+        let mut writer = target.writer.lock();
+        match writer.write_all(injection.as_bytes()) {
+            Ok(()) => {
+                let _ = writer.flush();
+                return Ok(());
+            }
             Err(err) => {
                 last_error = Some(err.to_string());
+                drop(writer);
                 if attempt < HANDOVER_INJECT_ATTEMPTS {
                     thread::sleep(Duration::from_millis(HANDOVER_INJECT_DELAY_MS));
                 }
@@ -4562,6 +4886,20 @@ fn extract_submitted_user_inputs(pending: &mut String, data: &str) -> Vec<String
     submitted
 }
 
+fn submitted_session_mention(pending: &str, data: &str) -> Option<String> {
+    if data.is_empty()
+        || !data
+            .chars()
+            .all(|character| matches!(character, '\r' | '\n'))
+    {
+        return None;
+    }
+    let mut pending = pending.to_string();
+    extract_submitted_user_inputs(&mut pending, data)
+        .into_iter()
+        .find(|candidate| candidate.contains("@@"))
+}
+
 fn merge_assistant_output(existing: &str, chunk: &str, replace_existing: bool) -> String {
     if existing.is_empty() {
         return chunk.to_string();
@@ -5231,6 +5569,27 @@ mod tests {
     use super::*;
     static HOME_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    fn mention_test_session(id: &str, title: &str) -> SessionInfo {
+        SessionInfo {
+            id: id.to_string(),
+            agent_id: "codex".to_string(),
+            agent_name: "Codex".to_string(),
+            title: title.to_string(),
+            command: "codex".to_string(),
+            cwd: "/tmp/workspace".to_string(),
+            status: SessionStatus::Running,
+            attached: false,
+            created_at: 1,
+            last_active_at: 1,
+            first_user_message: None,
+            native_session_ref: None,
+            parent_session_id: Some("root".to_string()),
+            handover_root_id: Some("root".to_string()),
+            dangerous: false,
+            none_workspace: false,
+        }
+    }
+
     #[test]
     fn test_strip_ansi() {
         assert_eq!(strip_ansi("\x1b[31mHello\x1b[0m"), "Hello");
@@ -5409,6 +5768,173 @@ mod tests {
         assert!(!result.contains("### Recent User Inputs (best effort)"));
         assert!(result.contains("## Recommended Next Steps"));
         assert!(result.contains("finish P0"));
+    }
+
+    #[test]
+    fn test_handover_tree_id_matches_root_and_descendant() {
+        let root = SessionInfo {
+            id: "root-session".to_string(),
+            agent_id: "codex".to_string(),
+            agent_name: "Codex".to_string(),
+            title: "Root".to_string(),
+            command: "codex".to_string(),
+            cwd: "/tmp/workspace".to_string(),
+            status: SessionStatus::Running,
+            attached: false,
+            created_at: 1,
+            last_active_at: 1,
+            first_user_message: None,
+            native_session_ref: None,
+            parent_session_id: None,
+            handover_root_id: None,
+            dangerous: false,
+            none_workspace: false,
+        };
+        let mut descendant = root.clone();
+        descendant.id = "grandchild-session".to_string();
+        descendant.parent_session_id = Some("child-session".to_string());
+        descendant.handover_root_id = Some(root.id.clone());
+
+        assert_eq!(handover_tree_id(&root), "root-session");
+        assert_eq!(handover_tree_id(&descendant), "root-session");
+    }
+
+    #[test]
+    fn test_resolve_session_mention_uses_longest_exact_title() {
+        let candidates = vec![
+            mention_test_session("short", "codex"),
+            mention_test_session("long", "codex1"),
+            mention_test_session("spaces", "Security Reviewer"),
+        ];
+
+        assert_eq!(
+            resolve_session_mention("@@codex1 方案已更新，帮我 review", &candidates).unwrap(),
+            ("long".to_string(), "方案已更新，帮我 review".to_string())
+        );
+        assert_eq!(
+            resolve_session_mention("@@Security Reviewer check auth", &candidates).unwrap(),
+            ("spaces".to_string(), "check auth".to_string())
+        );
+        assert_eq!(
+            resolve_session_mention("告诉 @@codex1 我已经准备好了", &candidates).unwrap(),
+            ("long".to_string(), "我已经准备好了".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_session_mention_rejects_duplicate_title() {
+        let candidates = vec![
+            mention_test_session("one", "reviewer"),
+            mention_test_session("two", "reviewer"),
+        ];
+
+        let error = resolve_session_mention("@@reviewer check this", &candidates).unwrap_err();
+
+        assert!(error.contains("不唯一"));
+    }
+
+    #[test]
+    fn test_resolve_session_mention_requires_message() {
+        let candidates = vec![mention_test_session("one", "reviewer")];
+
+        let error = resolve_session_mention("@@reviewer", &candidates).unwrap_err();
+
+        assert!(error.contains("填写要发送的消息"));
+    }
+
+    #[test]
+    fn test_resolve_session_mention_reserves_double_at_only() {
+        let candidates = vec![mention_test_session("one", "reviewer")];
+
+        let error = resolve_session_mention("@reviewer check this", &candidates).unwrap_err();
+
+        assert!(error.contains("@@会话名"));
+    }
+
+    #[test]
+    fn test_submitted_session_mention_detects_route_at_backend_enter_boundary() {
+        assert_eq!(
+            submitted_session_mention("告诉 @@g1 review下这个方案", "\r"),
+            Some("告诉 @@g1 review下这个方案".to_string())
+        );
+        assert_eq!(
+            submitted_session_mention("ordinary agent prompt", "\r"),
+            None
+        );
+        assert_eq!(submitted_session_mention("@@g1 review", "x"), None);
+    }
+
+    #[test]
+    fn test_resolve_session_mention_supports_quoted_title() {
+        let candidates = vec![
+            mention_test_session("spaces", "Security Reviewer"),
+            mention_test_session("codex", "Codex Pro"),
+        ];
+
+        assert_eq!(
+            resolve_session_mention("@@\"Security Reviewer\" check authorization logic", &candidates).unwrap(),
+            ("spaces".to_string(), "check authorization logic".to_string())
+        );
+        assert_eq!(
+            resolve_session_mention("@@'Codex Pro' review diff", &candidates).unwrap(),
+            ("codex".to_string(), "review diff".to_string())
+        );
+    }
+
+    #[test]
+    fn test_existing_session_prompt_routes_by_exact_artifact() {
+        let source = SessionInfo {
+            id: "source-session".to_string(),
+            agent_id: "codex".to_string(),
+            agent_name: "Codex".to_string(),
+            title: "Security review".to_string(),
+            command: "codex".to_string(),
+            cwd: "/tmp/workspace".to_string(),
+            status: SessionStatus::Running,
+            attached: false,
+            created_at: 1,
+            last_active_at: 1,
+            first_user_message: None,
+            native_session_ref: None,
+            parent_session_id: None,
+            handover_root_id: None,
+            dangerous: false,
+            none_workspace: false,
+        };
+
+        let prompt_with_note = existing_session_handover_prompt(
+            Path::new("/tmp/workspace/.waypoint-handovers/update.md"),
+            &source,
+            Some("方案已更新，帮我 review"),
+        );
+
+        assert!(prompt_with_note.contains("Security review"));
+        assert!(prompt_with_note.contains("方案已更新，帮我 review"));
+        assert!(prompt_with_note.contains("/tmp/workspace/.waypoint-handovers/update.md"));
+
+        let prompt_without_note = existing_session_handover_prompt(
+            Path::new("/tmp/workspace/.waypoint-handovers/update.md"),
+            &source,
+            None,
+        );
+        assert!(prompt_without_note.contains("Context file:"));
+        assert!(prompt_without_note.contains("/tmp/workspace/.waypoint-handovers/update.md"));
+    }
+
+    #[test]
+    fn test_handover_workspace_dir_is_agent_readable_and_git_ignored() {
+        let root = env::temp_dir().join(format!("waypoint-handover-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+
+        let dir = handover_workspace_dir(root.to_str().unwrap()).unwrap();
+
+        assert_eq!(
+            dir,
+            fs::canonicalize(&root).unwrap().join(".waypoint-handovers")
+        );
+        assert_eq!(fs::read_to_string(dir.join(".gitignore")).unwrap(), "*\n");
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
