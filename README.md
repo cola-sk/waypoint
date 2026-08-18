@@ -5,287 +5,105 @@
 </p>
 
 <p align="center">
-  <strong>桌面端本地 Agent CLI 会话路由器。</strong>
+  <strong>桌面端本地 AI Agent CLI 会话路由器</strong>
 </p>
 
-<p align="center">
-  <a href="README.zh-CN.md">中文文档（详细版）</a>
-</p>
-<img width="3454" height="2148" alt="image" src="https://github.com/user-attachments/assets/a813a068-160a-4ce1-8a0b-db98b0db253e" />
+<img width="3454" height="2148" alt="Waypoint Preview" src="https://github.com/user-attachments/assets/cd1f24ec-dd44-457b-bedb-e44c88c159cd" />
 
-Waypoint 是一个 Tauri 桌面应用，用于在一个窗口中管理多个本地 AI agent CLI 会话。它通过 PTY 保持会话长期存活，支持在工作区和 agent 之间切换，并提供 handover 流程，将上下文从一个 agent 会话传递给另一个 agent 会话。
+Waypoint 是一个专为 AI 辅助编程设计的桌面端本地 Agent CLI 会话路由与管理工具。基于 **Tauri v2 + Rust + React + Xterm.js** 构建，支持在单一窗口中管理并保持多个本地 Agent CLI（如 Claude Code、Codex、Antigravity CLI、GitHub Copilot、Shell 等）长期存活、自由切换，并提供毫秒级的跨会话协作与上下文交接（Handover）能力。
 
-它面向 Claude Code、Codex、Antigravity CLI、GitHub Copilot CLI 以及常规 shell 等工具。
+---
 
-## 核心能力
+## ✨ 核心特性
 
-- **本地 PTY 会话托管**：在桌面应用管理的真实终端会话中运行 agent CLI。
-- **多 agent 工作区路由**：固定工作区目录，并从每个目录启动可用的 agent。
-- **持久会话切换**：在会话之间切换时不杀掉底层进程。
-- **Agent handover**：将终端上下文、最近对话时间线和备注转发到另一个 agent 会话以延续工作；git 状态和 diff 不再内联，目标 agent 需要时直接查询 workspace。
-- **关联会话同步（Phase 1）**：父、子、祖先和后代会话可通过 `Existing Session` 发送共享 handover 文件与短指令；目标会话直接读取并执行 User Note，发送过程不会改变原有会话树。
-- **终端跨会话路由**：在终端行首输入 `@@会话名 消息`，可直接把当前上下文和消息投递给同一会话树中正在运行的目标；单个 `@` 保留给 Agent 自身语法。
-- **无工作区会话**：新建会话时可选择「None（不绑定工作区）」，会话归入独立分组，不与具体目录绑定；该标记持久化在 `meta.json` 中，重启后仍然保留。
-- **跳过权限确认**：对 Claude Code（`--dangerously-skip-permissions`）和 Codex（`--dangerously-bypass-approvals-and-sandbox`）可在新建会话时勾选 dangerous 选项；该标志同样持久化在 session meta 中，handover 和 native resume 时会自动重新应用。
-- **图片粘贴**：在终端中粘贴或拖入图片时，会自动保存为会话附件并在输入行插入 `[paste image N]` 占位符；按 Enter 提交前 Waypoint 会把占位符反解为附件的实际文件路径，再连同回车一起发给 agent。
-- **原生桌面外壳**：Tauri v2 + Rust 后端，React + xterm.js 前端。
-- **自动 CLI 检测**：通过用户 login shell 解析 agent 命令，使应用看到的 PATH 更接近终端环境。
+### 1. 跨会话实时同步（`@@` 提及指令）
+* **即时跨 Agent 调度**：在任意终端输入 `@@目标会话名 消息`，即可直接将任务或更新通知投递给目标 Agent。
+* **带引号会话名支持**：支持包含空格的会话名，如 `@@"Security Reviewer" 请核对鉴权逻辑`。
+* **避免语法冲突**：采用 `@@`（双 `@`）作为专用指令前缀，将单个 `@`（如 `@src/index.ts`）完整保留给 Agent 原生的文件与代码索引。
+* **发送后自动切屏**：回车发送后，终端自动擦除指令，界面**自动平滑切换至目标 Session 并高亮工作区**，即时查看目标 Agent 的流式响应。
+* **直出内联提示词（Direct Inline Prompt）**：目标 Agent 接收结构化的即时 Prompt（包含来源会话、标题与 User Note），无需读盘，适配终端 Raw 模式标准回车（`\r`）即时自动提交执行。
+* **广泛的会话可见性**：支持在同一会话树（父子、深层）以及**同一工作区下独立创建的平行会话**之间相互发现与通信。
 
-## 支持的 Agent
+### 2. 会话接力与上下文交接（Handover）
+* **New Session（会话继承）**：从源会话一键衍生出新的子会话，自动提取并格式化最近对话时间线（Timeline），将上下文完整交接给新的 Agent。
+* **Existing Session（关联同步）**：向已在运行的关联会话发送任务更新或 Review 结论。
+* **Copy Handover（手动交接）**：生成结构化 Handover 归档文件并复制短指令，方便跨终端手动粘贴。
+* **精炼的下一步引导**：提示词直奔用户需求（User Note），避免 Agent 接收任务后盲目运行 `git diff` 等无关指令。
 
-Waypoint 当前会识别以下 preset：
+### 3. 多会话与多工作区管理
+* **PTY 会话持久托管**：在真正的本地伪终端（PTY）中运行 Agent CLI，切换界面或最小化窗口时不杀底层进程。
+* **工作区路由与无工作区模式**：支持固定项目工作区目录，也可选择「None（不绑定工作区）」作为独立全局会话。
+* **树状层级拓扑**：支持父子会话嵌套展示，删除父会话时可级联删除衍生会话。
 
-| Agent | 命令 |
-|---|---|
-| Claude Code | `claude` |
-| Codex | `codex` |
-| Antigravity CLI | `agy` |
-| GitHub Copilot | `copilot`、`gh copilot` |
-| Shell | `$SHELL` |
+### 4. 权限确认跳过（Dangerous 模式）
+* 新建会话时对 Claude Code（`--dangerously-skip-permissions`）与 Codex（`--dangerously-bypass-approvals-and-sandbox`）提供快速勾选；配置持久化至会话元数据中，在 Handover 与 Native Resume 时自动生效。
 
-如果某个 agent 在你的 terminal 中可用，但在 Waypoint 中显示 missing，请用以下命令验证：
+### 5. 终端截图与附件粘贴
+* 在终端中直接粘贴（Cmd+V）或拖入图片，自动保存至当前工作区的 `.waypoint-attachments/` 目录；
+* 在输入行插入 `[paste image N]` 占位符，回车提交前自动反解为附件的绝对物理路径，便于 Claude Code 等 Agent 准确读取。
 
+### 6. Agent 原生状态恢复（Native Resume）
+* 会话退出或应用重启后进入只读回放（Replay）模式；输入任意内容自动调用 Agent 原生命令（如 `codex resume <id>`、`claude --resume=<id>`、`agy --conversation=<id>`）重新唤醒会话。
+
+---
+
+## 🤖 支持的 Agent CLI
+
+Waypoint 会在启动时通过用户的 Login Shell 自动检测以下 CLI 工具：
+
+| Agent | 预设命令 |
+| :--- | :--- |
+| **Claude Code** | `claude` |
+| **Codex** | `codex` |
+| **Antigravity CLI** | `agy` |
+| **GitHub Copilot** | `copilot`、`gh copilot` |
+| **系统 Shell** | `$SHELL` (zsh / bash / fish) |
+
+> 💡 **排查提示**：如果某个 Agent 在系统终端中可用但在 Waypoint 中显示 missing，可以在终端执行 `command -v <agent_name>` 确认是否已加入 Login Shell 的 `PATH`。
+
+---
+
+## 🛠️ 技术栈
+
+* **桌面外壳**：Tauri v2 + Rust
+* **前端界面**：React 18 + TypeScript + Vite + Lucide Icons
+* **终端引擎**：`@xterm/xterm` + `@xterm/addon-fit`
+* **PTY 托管**：`portable-pty`
+* **构建产物**：macOS `.app`、`.dmg`
+
+---
+
+## 🚀 快速开始
+
+### 1. 环境要求
+* **macOS**：已安装 Xcode Command Line Tools (`xcode-select --install`)
+* **Node.js**：v18+ 及 npm
+* **Rust**：最新稳定版 (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
+
+### 2. 本地开发与调试
 ```bash
-command -v claude
-command -v codex
-command -v agy
-command -v copilot
-command -v gh
-```
-
-## 技术栈
-
-- **桌面外壳**：Tauri v2 + Rust
-- **前端**：React + TypeScript + Vite
-- **终端 UI**：`@xterm/xterm` + `@xterm/addon-fit`
-- **PTY 托管**：`portable-pty`
-
-## 环境准备
-
-Waypoint 需要 Node.js、npm 和 Rust 工具链。
-
-在 macOS 上，先确认 Xcode Command Line Tools 已安装：
-
-```bash
-xcode-select -p
-```
-
-如未安装：
-
-```bash
-xcode-select --install
-```
-
-使用 `rustup` 安装 Rust：
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
-```
-
-
-## 开发
-
-安装依赖：
-
-```bash
+# 1. 安装前端依赖
 npm install
-```
 
-以开发模式启动桌面应用：
-
-```bash
+# 2. 启动桌面应用开发模式
 npm run tauri:dev
 ```
 
-该命令会启动 Vite 开发服务器并打开 Tauri 桌面外壳。
-
-> [!IMPORTANT]
-> PTY 管理运行在 Tauri 桌面进程中。在普通浏览器中访问 `http://127.0.0.1:1420/` 只能用于 UI 预览；创建和使用真实 PTY 会话必须在 Tauri 桌面窗口中进行。
-
-构建前端：
-
+### 3. 构建 DMG 安装包
 ```bash
-npm run build
+npm run tauri:build
 ```
+打包成功后，可在 `src-tauri/target/release/bundle/dmg/` 目录下获取最新的 `.dmg` 安装包。
 
-构建 Tauri 应用（不打包安装器）：
+---
 
-```bash
-npm run tauri -- build --debug --no-bundle --ci
-```
+## ❓ 常见问题排查
 
-## 手动验收流程
+#### 1. 为什么历史会话提示无法恢复？
+重启应用后，历史会话处于只读状态。恢复依赖于该 Agent 本地保存的原生 Session 标识。如果会话为旧版本创建或本地日志已被 Agent 自身清理，Waypoint 会自动提示并在当前工作区为你创建同类型的新会话。
 
-1. 用 `npm run tauri:dev` 启动桌面应用。
-2. 确认左侧 agent 环境列表显示可用与缺失的本地 agent。
-3. 固定或选择一个本地工作区目录。
-4. 从该工作区启动一个可用 agent。
-5. 确认终端在选定工作区中启动。
-6. 启动第二个会话并切回第一个。
-7. 确认第一个 PTY 进程仍然存活。
+#### 2. 浏览器打开 `http://127.0.0.1:1420/` 显示 `Tauri runtime unavailable`
+此为正常现象。PTY 进程托管与本地文件系统交互依赖 Tauri 桌面底层运行时，请在桌面客户端窗口中操作。
 
-## 会话选项与图片粘贴
-
-- **跳过权限确认（dangerous）**：在「新对话」弹窗中，选择 Claude Code 或 Codex 时会显示该复选框。Claude Code 注入 `--dangerously-skip-permissions`，Codex 注入 `--dangerously-bypass-approvals-and-sandbox`。该标志写入 session meta，后续 handover、continue、native resume 都会自动重新应用。
-- **无工作区会话（None）**：工作区下拉框选择「None（不绑定工作区）」时，会话归入左侧「无工作区会话」分组，启动目录由系统当前目录兜底。该标记持久化在 `meta.json` 中，重启后仍然保留。
-- **图片粘贴/拖入**：在已挂起的 agent 终端里粘贴（Cmd+V）或拖入图片时，Waypoint 会把图片保存为会话附件，并在输入行插入 `[paste image N]` 占位符。按 Enter 提交前，占位符会被反解为附件的实际文件路径，再连同回车一起发送给 agent。附件保存在 `<workspace>/.waypoint-attachments/<session-id>/` 下（自动写入 `.gitignore`），落在 agent 的工作区目录内，因此 Claude Code 等具有项目作用域读取权限的 agent 可以直接通过 Read 工具读取该路径。
-- **冒号与符号输入**：xterm 在某些 agent 输入框中会吞掉半角/全角冒号、`+` 等单字符符号；Waypoint 通过 keydown + beforeinput 拦截所有无修饰键的单字符可打印输入（含 `:`、`：`、`+` 等），绕过 textarea 直接走 PTY 输入通道，并跳过 IME 组合态以避免影响中文输入。
-- **侧栏快速启动 + dangerous**：左侧工作区目录上的 `+` 按钮弹出快速启动菜单时，菜单底部提供「跳过权限确认」复选框；勾选后点击 Claude Code / Codex 等支持的 Agent 会以 dangerous 模式启动，并在 Agent 名称旁显示 `dangerous` 标记。该复选框状态在快速启动菜单间保持，便于连续启动多个 dangerous 会话。
-
-## Continue / Handover
-
-Continue 流程将当前会话的上下文传递给另一个 agent。
-
-新目标会话流程：
-
-1. 打开源会话。
-2. 点击 **Continue**。
-3. 选择 **New Session**。
-4. 选择目标 agent 和工作区。
-5. 添加可选的 note，描述下一个 agent 应该关注的内容。
-6. 点击 **Create & Continue**。
-
-Waypoint 会按 chat 顺序收集最近的对话时间线，将 handover 文件写到目标工作区的 `.waypoint-handovers/handover-*.md`，启动目标会话，并注入一段简短指令，指引目标 agent 读取该 handover 文件。目标 agent 需要 git 状态或 diff 时会直接从 workspace 查询。
-Continue 弹窗右侧的 handover Markdown 支持直接编辑，点击 `Create & Continue` 时会使用编辑后的内容写入 handover 文件。
-
-也可以使用 **Copy Handover** 模式：生成 handover 文件并将一段短指令（含文件路径）复制到剪贴板，用户手动粘贴到任何目标会话中即可。不再需要选择目标会话或通过 PTY 自动注入。
-
-对已经位于同一 handover 树中的运行中会话，可使用 **Existing Session** 模式。选择父级、子级或更深层级的目标会话并填写 Note 后，Waypoint 会把上下文写入目标工作区的 `.waypoint-handovers/`（目录内置 `.gitignore`），再向目标 PTY 注入只包含来源和文件路径的短消息。
-
-同一能力也可直接从终端触发：`@@codex1 方案已更新，帮我 review`，或使用自然表达 `告诉 @@codex1 我已经准备好了`。`codex1` 是目标会话标题，支持包含空格的完整标题；标题重名时需要先重命名。`@@` 是 Waypoint 保留前缀，目标无效时会在终端上方显示错误；单个 `@` 会原样发送给当前 Agent。运行中消息 inbox、自动完成检测和回调仍属于后续阶段。
-
-会话标题可在顶栏直接编辑（点击铅笔图标）；删除父会话时会级联删除所有子会话。
-
-### Native Session ID 与恢复
-
-Waypoint 自己的 session 元数据存储在 `~/.waypoint/sessions/<session-id>/meta.json` 中。对于支持原生恢复的 agent，还会记录 `nativeSessionRef`，包含 provider、native id、可选 project、resume 命令和发现时间。重新激活历史会话时，后端会先刷新该 native 引用，再构造 agent 专属的 resume 命令。
-
-> **Dev / Prod 存储隔离**：`npm run tauri:dev`（debug 构建）使用 `~/.waypoint-dev/`，安装版 DMG（release 构建）使用 `~/.waypoint/`，两套 session 元数据互不干扰。handover 和附件为了让受项目权限限制的 agent 可读，会写入 workspace 内的隐藏目录。前端 localStorage 同样按 `waypoint-dev:` / `waypoint:` 前缀隔离。
-
-不同 agent 的 native id 策略对比：
-
-| Agent | 创建时是否注入 native id | native id 来源 | 恢复命令 |
-|---|---|---|---|
-| Claude Code | 是，将 Waypoint session id 作为 `--session-id` 注入；若启动参数已含 `--resume`/`-r`/`--session-id` 则不重复注入 | Waypoint session id | `claude --resume <id>` |
-| Codex | 否，不在创建时强制指定 | 若 meta 已有则用之，否则无 | 有 native id：`codex resume <id>`；无：`codex resume --last` |
-| Antigravity CLI (agy) | 否，agy 不支持外部指定 conversation id | 首次真实提交用户输入时写入 `<!-- waypoint_session_id: <id> -->` 标记，扫描 brain 目录下的 transcript 反查得到 conversation id；若终端 transcript 出现 "Resume in the same project" 行，则解析 `--project=<project>` 作为补充 | `agy --conversation=<conversation-id> [--project=<project>]` |
-| GitHub Copilot | 是，将 Waypoint session id 作为 `--session-id=<id>` 注入；若启动参数已含 `--continue`/`--resume`/`-r`/`--session-id` 则不重复注入；`gh copilot` 形式在必要时通过 `--` 分隔参数 | Waypoint session id | `copilot --resume=<id>` 或 `gh copilot -- --resume=<id>` |
-| Shell | 不适用 | 无 agent 原生 session id | 仅保留 Waypoint 自身的 PTY transcript 和 replay |
-
-Claude Code 恢复前还会确认 `~/.claude/projects/<workspace-as-claude-project>/<id>.jsonl` 存在；若标准路径不存在，会在 `~/.claude/projects` 下按文件名兜底搜索 `<id>.jsonl`。
-
-Codex 在读取原生 transcript 时，优先用 native id 在 `~/.codex/sessions` 和 `~/.codex/archived_sessions` 中查找；没有 native id 时按 workspace cwd 与 session 创建时间选最近 transcript。
-
-agy 通过扫描 `~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript.jsonl` 来匹配 `waypoint_session_id` 标记，匹配到的 brain 目录名即为 agy conversation id。
-
-### Handover 文件生成
-
-Handover 不会把完整上下文塞进目标 agent 的命令行，而是先生成文件，再让目标 agent 读取该精确文件。
-
-文件布局与模式选择：
-
-| 项 | 说明 |
-|---|---|
-| 主文件 | `<target-workspace>/.waypoint-handovers/handover-<uuid>.md` |
-| Compact 模式完整证据文件 | `<target-workspace>/.waypoint-handovers/handover-<uuid>-full-evidence.md` |
-| Git 状态 | `.waypoint-handovers/.gitignore` 使用 `*` 忽略目录内容 |
-| Recommended 模式 | 估算上下文超过 24,000 字符时使用 Compact，否则使用 Full |
-| 显式模式 | 用户可手动选择 Compact 或 Full |
-
-handover 文件收集的内容：
-
-1. 源会话与目标会话的 agent、命令、workspace。
-2. Continue 面板中用户填写的 note。
-3. 最近对话时间线，尽量按原始 chat 顺序保留 User / Assistant 往返。
-4. 上一跳 inherited handover context。
-5. agy 会话生成的 markdown artifacts（来自 `~/.gemini/antigravity-cli/brain/<conversation-id>/*.md`）。
-
-不同 agent 的上下文来源优先级对比：
-
-| Agent | 首选来源 | 回退来源 |
-|---|---|---|
-| Claude Code | `~/.claude/projects/.../<native-id>.jsonl` 原生 transcript | Waypoint 自身的 terminal/chat buffer |
-| Codex | 有 native id：`~/.codex/sessions` 或 `archived_sessions` 中匹配 native id 的 transcript；无 native id：按 workspace 与创建时间选最近 transcript | Waypoint 自身的 terminal/chat buffer |
-| Antigravity CLI | 先通过 `waypoint_session_id` 标记反查 conversation id，再读 `~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/logs/transcript.jsonl` | Waypoint 自身的 terminal/chat buffer |
-| GitHub Copilot / Shell | Waypoint 自身的 terminal/chat buffer 与输入 ring | — |
-
-> 对于 Copilot / Shell，如果 Waypoint 无法构造有序的 User / Assistant 时间线，会在同一个 timeline 区块中注明只捕获到用户输入，而不会把 assistant/context 与 user inputs 拆成两个独立 evidence 区块。
-
-Full 与 Compact 模式差异：
-
-| 维度 | Full 模式 | Compact 模式 |
-|---|---|---|
-| 主文件对话内容 | 完整结构 + 最近有序对话 | 更短的有序对话 |
-| git 状态 / diff | 不内联，目标 agent 按需查询 workspace | 不内联，目标 agent 按需查询 workspace |
-| 附件清单 | 不内联，沿用会话记录里的附件上下文 | 不内联，沿用会话记录里的附件上下文 |
-| 完整证据文件 | ❌ | ✅（`*-full-evidence.md`，含更长的最近对话证据） |
-| 目标 agent 读取方式 | 直接读主文件 | 主文件引用 evidence 文件路径，目标 agent 按需读取 |
-
-### Agent Handover 启动/注入策略
-
-不同 agent 在 New Session 与 Existing Session 下的注入方式对比：
-
-| Agent | New Session 启动形态 | 目录授权 | startup prompt 内容 | 其他说明 |
-|---|---|---|---|---|
-| Claude Code | `claude "<startup prompt>"` | — | 只读取 handover 文件，并包含新的 `waypoint_session_id` 标记 | 创建目标 session 后记录 `parentSessionId` 和 `handoverRootId` |
-| Codex | 默认命令带 `--no-alt-screen` | 通过 `--add-dir` 加入 handover 文件目录 | 指向 handover 文件，并包含新的 `waypoint_session_id` 标记 | 新建后等待更长启动延迟再注入，降低 Codex 未就绪时写入失败概率 |
-| Antigravity CLI (agy) | `agy --prompt-interactive "<startup prompt>"` | 通过 `--add-dir` 授权 handover 目录 | 只含 handover 文件路径和新的 `waypoint_session_id` 标记，避免长 diff/context 直接进入 agy TUI | — |
-| GitHub Copilot | `copilot -i "<startup prompt>"` | 通过 `--add-dir` 传入 handover 目录；`gh copilot` 形态通过 `--` 分隔参数 | startup prompt | — |
-
-Existing Session 对所有 agent 使用同一策略：文件位于目标 workspace 内，Waypoint 通过 PTY bracketed paste 注入来源 session、精确文件路径和执行 User Note 的短指令。
-
-Copy Handover 模式：
-
-- 先生成 handover 文件。
-- 将一段短指令复制到剪贴板：`A handover context file is referenced at <路径>. Read only this exact file, acknowledge context loaded, then wait for my next instruction.`
-- 用户手动粘贴到任何目标会话中，不再通过 PTY 自动注入。
-
-Create Handover File：
-
-- 顶栏的 handover-file 按钮只生成文件，不启动或注入任何 agent。
-- target 被标记为 Manual handover，便于将文件路径手动复制给外部工具。
-
-每次 handover 的目标 session 会记住这次 handover 摘要；如果之后继续从该目标 session 再 handover 到第三个 agent，Waypoint 会把上一跳 handover 作为 inherited context 一并写入新的 handover 文件。
-
-## 故障排查
-
-### `cargo` 或 `rustc` command not found
-
-在当前 shell 中加载 Cargo：
-
-```bash
-source "$HOME/.cargo/env"
-```
-
-然后检查：
-
-```bash
-rustc --version
-cargo --version
-```
-
-### `npm run tauri:dev` 提示 Rust 未安装
-
-查看 Tauri 能检测到的环境：
-
-```bash
-npm run tauri -- info
-```
-
-如果未检测到 `rustc`，重新加载 shell 环境或将 Cargo 加入 shell profile。
-
-### 浏览器中提示 `Tauri runtime unavailable`
-
-这是预期行为。Tauri 的 PTY 会话、本地文件访问、原生命令等 API 只存在于 Tauri 桌面外壳内部。
-
-### Continue 时报 `failed to write handover`
-
-目标 agent 可能已在 Waypoint 注入 handover prompt 前退出，或正在等待登录/配置。
-
-请先直接启动目标 agent，确认它能保持在可交互状态。如果它立即退出，先解决其自身的认证或 CLI 配置问题，再将其作为 handover 目标。
-
-## 相关文档
-
-- [技术设计](AGENTRELAY_TECHNICAL_DESIGN.md)
-- [架构摘要](AGENTRELAY_ARCHITECTURE_SUMMARY.md)
+#### 3. 执行 Handover 提示 `failed to write handover`
+请确认目标 Agent CLI 是否处于正常待命状态（如未登录、启动即退出或需要交互式授权）。
