@@ -69,6 +69,14 @@ export function listAgentPresets(): Promise<AgentPresetInfo[]> {
         resolvedCommand: null,
       },
       {
+        id: "opencode",
+        name: "OpenCode",
+        description: "OpenCode AI Agent CLI",
+        available: false,
+        command: "opencode",
+        resolvedCommand: null,
+      },
+      {
         id: "agy",
         name: "Antigravity CLI",
         description: "Google Antigravity CLI",

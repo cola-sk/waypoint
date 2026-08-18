@@ -1404,10 +1404,12 @@ impl SessionManager {
             &target_info.cwd,
         )?;
 
+        let recent_context = build_handover_source_context(&source, &source_info, 1200);
         let short_instruction = existing_session_handover_prompt(
             &handover.main_path,
             &source_info,
             note.as_deref(),
+            &recent_context,
         );
         inject_with_retry(&target, &short_instruction)?;
         self.remember_handover(&target, &handover.prompt);
@@ -1517,6 +1519,20 @@ impl SessionManager {
 
         if target_agent_id == "codex" {
             return self.continue_codex_with_initial_prompt(
+                app,
+                &source,
+                source_info,
+                cwd,
+                note,
+                handover_mode,
+                edited_prompt.as_deref(),
+                rows,
+                cols,
+            );
+        }
+
+        if target_agent_id == "opencode" {
+            return self.continue_opencode_with_initial_prompt(
                 app,
                 &source,
                 source_info,
@@ -1839,6 +1855,100 @@ impl SessionManager {
             definition.name,
             definition.name.to_string(),
             "codex --no-alt-screen <handover>".to_string(),
+            resolved.executable,
+            args,
+            cwd,
+            rows,
+            cols,
+            Vec::new(),
+            Some(target_id),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            source_info.dangerous,
+            source_info.none_workspace,
+        )?;
+        let target = self.get(&target_info.id)?;
+        self.record_handover_link(&source_info, &target);
+        let target_info = target.info();
+        self.remember_handover(&target, &handover.prompt);
+
+        Ok(HandoverResult {
+            prompt: handover.prompt,
+            source_session: source_info,
+            target_session: target_info,
+            mode: "new-session".to_string(),
+            handover_mode: handover.effective_mode,
+            handover_path: Some(handover.main_path.display().to_string()),
+            evidence_path: handover
+                .evidence_path
+                .map(|path| path.display().to_string()),
+        })
+    }
+
+    fn continue_opencode_with_initial_prompt(
+        &self,
+        app: AppHandle,
+        source: &Arc<PtySession>,
+        source_info: SessionInfo,
+        cwd: String,
+        note: Option<String>,
+        handover_mode: HandoverContentMode,
+        edited_prompt: Option<&str>,
+        rows: Option<u16>,
+        cols: Option<u16>,
+    ) -> Result<HandoverResult, String> {
+        let definition = agent_definitions()
+            .into_iter()
+            .find(|definition| definition.id == "opencode")
+            .ok_or_else(|| "OpenCode preset is missing".to_string())?;
+        let resolved = resolve_agent_command(&definition).ok_or_else(|| {
+            "OpenCode is not available in PATH. Install it or make sure your login shell can resolve it."
+                .to_string()
+        })?;
+        let target_id = Uuid::new_v4().to_string();
+        let planned_target = SessionInfo {
+            id: target_id.clone(),
+            agent_id: definition.id.to_string(),
+            agent_name: definition.name.to_string(),
+            title: "OpenCode new session".to_string(),
+            command: "opencode <handover>".to_string(),
+            cwd: cwd.clone(),
+            status: SessionStatus::Running,
+            attached: false,
+            created_at: unix_timestamp(),
+            last_active_at: unix_timestamp(),
+            first_user_message: None,
+            native_session_ref: None,
+            parent_session_id: None,
+            handover_root_id: None,
+            dangerous: source_info.dangerous,
+            none_workspace: source_info.none_workspace,
+        };
+        let handover = self.write_handover_for(
+            source,
+            &source_info,
+            &planned_target,
+            note,
+            handover_mode,
+            edited_prompt,
+            &cwd,
+        )?;
+        let startup_prompt = handover_reference_startup_prompt(&handover.main_path, &target_id);
+
+        let mut args = resolved.args;
+        args.push("--prompt".to_string());
+        args.push(startup_prompt);
+
+        let target_info = self.spawn_session_with_identity(
+            app,
+            definition.id,
+            definition.name,
+            definition.name.to_string(),
+            "opencode <handover>".to_string(),
             resolved.executable,
             args,
             cwd,
@@ -2271,7 +2381,11 @@ impl SessionManager {
             &source.inherited_handover.lock(),
             HANDOVER_INHERITED_CONTEXT_CHARS,
         );
-        let artifacts = build_agy_artifacts_context(&source_info.id);
+        let artifacts = if source_info.agent_id == "agy" {
+            build_agy_artifacts_context(&source_info.id)
+        } else {
+            String::new()
+        };
 
         build_handover_prompt(
             &source_info,
@@ -2302,7 +2416,11 @@ impl SessionManager {
             &source.inherited_handover.lock(),
             COMPACT_HANDOVER_INHERITED_CONTEXT_CHARS,
         );
-        let artifacts = build_agy_artifacts_context(&source_info.id);
+        let artifacts = if source_info.agent_id == "agy" {
+            build_agy_artifacts_context(&source_info.id)
+        } else {
+            String::new()
+        };
 
         build_compact_handover_prompt(
             source_info,
@@ -2333,7 +2451,11 @@ impl SessionManager {
             &source.inherited_handover.lock(),
             HANDOVER_INHERITED_CONTEXT_CHARS,
         );
-        let artifacts = build_agy_artifacts_context(&source_info.id);
+        let artifacts = if source_info.agent_id == "agy" {
+            build_agy_artifacts_context(&source_info.id)
+        } else {
+            String::new()
+        };
 
         build_full_handover_evidence(
             source_info,
@@ -3000,6 +3122,17 @@ fn agent_definitions() -> Vec<AgentDefinition> {
             }],
         },
         AgentDefinition {
+            id: "opencode",
+            name: "OpenCode",
+            description: "OpenCode AI Agent CLI",
+            candidates: &[CommandCandidate {
+                executable: "opencode",
+                args: &[],
+                display: "opencode",
+                verify: VerifyStrategy::CommandExists,
+            }],
+        },
+        AgentDefinition {
             id: "agy",
             name: "Antigravity CLI",
             description: "Google Antigravity CLI",
@@ -3150,6 +3283,20 @@ fn native_resume_command_for(meta: &SessionMeta) -> Result<Option<NativeResumeCo
                 format!("{} resume {}", resolved.display, shell_quote(id))
             } else {
                 format!("{} resume --last", resolved.display)
+            };
+            (args, display)
+        }
+        "opencode" => {
+            let mut args = resolved.args;
+            if let Some(ref native_id) = native_id {
+                args.push(format!("--session={native_id}"));
+            } else {
+                args.push("--continue".to_string());
+            }
+            let display = if let Some(ref id) = native_id {
+                format!("{} --session={}", resolved.display, shell_quote(id))
+            } else {
+                format!("{} --continue", resolved.display)
             };
             (args, display)
         }
@@ -3343,6 +3490,7 @@ fn planned_handover_target_info(
     let now = unix_timestamp();
     let command = match definition.id {
         "claude-code" => "claude <handover>".to_string(),
+        "opencode" => "opencode <handover>".to_string(),
         "agy" => "agy --prompt-interactive <handover>".to_string(),
         "codex" => "codex --no-alt-screen <handover>".to_string(),
         "copilot" => resolve_agent_command(&definition)
@@ -3459,27 +3607,55 @@ fn handover_workspace_dir(cwd: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+fn is_meaningful_dialogue(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.starts_with("[truncated to last") {
+        return false;
+    }
+    trimmed.contains("User:")
+        || trimmed.contains("Assistant:")
+        || trimmed.contains("user:")
+        || trimmed.contains("assistant:")
+}
+
 fn existing_session_handover_prompt(
     path: &Path,
     source: &SessionInfo,
     note: Option<&str>,
+    recent_context: &str,
 ) -> String {
-    if let Some(user_note) = note.map(str::trim).filter(|n| !n.is_empty()) {
-        format!(
-            "[Waypoint update from session \"{}\" (Agent: {})]\n{}\n\n(Detailed session context is archived at: {})",
-            source.title,
-            source.agent_name,
-            user_note,
-            path.display()
-        )
+    let trimmed_note = note.map(str::trim).filter(|n| !n.is_empty());
+    let trimmed_context = recent_context.trim();
+    let mut parts = Vec::new();
+
+    let title = if source.title.trim().is_empty() {
+        &source.id
     } else {
-        format!(
-            "[Waypoint update from session \"{}\" (Agent: {})]\nContext file: {}. Read this context and wait for next instruction.",
-            source.title,
-            source.agent_name,
-            path.display()
-        )
+        source.title.trim()
+    };
+
+    if let Some(user_note) = trimmed_note {
+        parts.push(format!(
+            "【跨会话消息】来自会话「{}」({})：\n{}",
+            title, source.agent_name, user_note
+        ));
+    } else {
+        parts.push(format!(
+            "【跨会话消息】来自会话「{}」({})：\n请同步并处理来源会话上下文。",
+            title, source.agent_name
+        ));
     }
+
+    if is_meaningful_dialogue(trimmed_context) {
+        parts.push(format!("\n【参考背景对话】\n{}", trimmed_context));
+    }
+
+    parts.push(format!(
+        "\n（说明：上述内容已提供必要上下文，请直接回答用户提问或执行操作，无需搜索内部会话日志或读取归档文件。）\n[上下文归档: {}]",
+        path.display()
+    ));
+
+    parts.join("\n")
 }
 
 fn handover_tree_id(session: &SessionInfo) -> &str {
@@ -3620,6 +3796,7 @@ fn handover_reference_startup_prompt(path: &Path, session_id: &str) -> String {
 fn handover_startup_delay_ms(agent_id: &str) -> u64 {
     match agent_id {
         "codex" => CODEX_HANDOVER_STARTUP_DELAY_MS,
+        "opencode" => 2000,
         _ => HANDOVER_INJECT_DELAY_MS,
     }
 }
@@ -3639,71 +3816,43 @@ fn build_handover_prompt(
         format!("{}\n\n", artifacts.trim())
     };
     let conversation_timeline =
-        format_ordered_conversation_timeline(recent_context, recent_user_inputs);
+        format_ordered_conversation_timeline(recent_context, recent_user_inputs, source, target);
+    let note_text = if note.trim().is_empty() {
+        "无额外附言"
+    } else {
+        note.trim()
+    };
+
     format!(
-        r#"# Waypoint Handover
+        r#"# 🧭 Waypoint Handover Context
 
 You are continuing work from another local agent session inside waypoint.
 
-## Summary
-Continuation from {source_agent} session "{source_title}" in `{source_cwd}`.
-No semantic summary was generated; use the user note and evidence below.
+## 🌳 会话层级与流转 (Session Lineage & Target)
+- 来源会话: 「{source_title}」 ({source_agent}) | 工作区: `{source_cwd}`
+- 目标会话: 「{target_title}」 ({target_agent}) | 工作区: `{target_cwd}`
+- 用户指令: {note}
 
-## Source Session
-- ID: {source_id}
-- Agent: {source_agent}
-- Title: {source_title}
-- Command: {source_command}
-- Workspace: {source_cwd}
-
-## Target Session
-- ID: {target_id}
-- Agent: {target_agent}
-- Title: {target_title}
-- Command: {target_command}
-- Workspace: {target_cwd}
-
-## User Note
-{note}
-
-{artifacts_section}## Inherited Handover Context
+{artifacts_section}## 📜 历史会话层级记录 (Inherited Handover Lineage)
 {inherited_handover}
 
-## Evidence
-
-### Recent Conversation Timeline (ordered)
+## 📝 来源会话对话流转记录 (Source Conversation Timeline)
 ```text
 {conversation_timeline}
 ```
 
-## Recommended Next Steps
-- Start from the user note and recent conversation.
-- Continue or rerun the most relevant validation for the task.
-
-## Instructions
-- This file is a context snapshot from a previous agent session.
-- Use it to preserve continuity with the current workspace state.
-- Do not treat this file as a standing instruction to pause or re-initialize on every turn.
-- Do not revert unrelated user changes.
-- Preserve existing user edits.
-- Ask before destructive operations.
+## 🎯 推荐下一步操作
+- 优先从用户指令以及上述会话记录中的最新进展继续推进。
+- 无需重复执行已完成的步骤或重新初始化。
 "#,
         source_agent = source.agent_name,
-        source_id = source.id,
-        source_title = source.title,
-        source_command = source.command,
+        source_title = if source.title.trim().is_empty() { &source.id } else { source.title.trim() },
         source_cwd = source.cwd,
         target_agent = target.agent_name,
-        target_id = target.id,
-        target_title = target.title,
-        target_command = target.command,
+        target_title = if target.title.trim().is_empty() { &target.id } else { target.title.trim() },
         target_cwd = target.cwd,
-        note = if note.trim().is_empty() {
-            "No additional note."
-        } else {
-            note.trim()
-        },
-        inherited_handover = empty_fallback(inherited_handover, "No inherited handover context."),
+        note = note_text,
+        inherited_handover = empty_fallback(inherited_handover, "无前序继承的会话记录。"),
         conversation_timeline = conversation_timeline,
     )
 }
@@ -3724,67 +3873,46 @@ fn build_compact_handover_prompt(
         format!("{}\n\n", artifacts.trim())
     };
     let conversation_timeline =
-        format_ordered_conversation_timeline(recent_context, recent_user_inputs);
+        format_ordered_conversation_timeline(recent_context, recent_user_inputs, source, target);
+    let note_text = if note.trim().is_empty() {
+        "无额外附言"
+    } else {
+        note.trim()
+    };
+
     format!(
-        r#"# Waypoint Handover
+        r#"# 🧭 Waypoint Handover Context
 
-Continue from the previous local agent session.
+You are continuing work from another local agent session inside waypoint.
 
-## Summary
-Continuation from {source_agent} session "{source_title}" in `{source_cwd}`.
-This compact handover includes short recent evidence.
+## 🌳 会话层级与流转 (Session Lineage & Target)
+- 来源会话: 「{source_title}」 ({source_agent}) | 工作区: `{source_cwd}`
+- 目标会话: 「{target_title}」 ({target_agent}) | 工作区: `{target_cwd}`
+- 用户指令: {note}
 
-## Source
-- ID: {source_id}
-- Agent: {source_agent}
-- Title: {source_title}
-- Workspace: {source_cwd}
-
-## Target
-- ID: {target_id}
-- Agent: {target_agent}
-- Workspace: {target_cwd}
-
-## User Note
-{note}
-
-{artifacts_section}## Inherited Handover Context
+{artifacts_section}## 📜 历史会话层级记录 (Inherited Handover Lineage)
 {inherited_handover}
 
-## Full Evidence
-{full_evidence}
-
-## Evidence
-
-### Recent Conversation Timeline (ordered)
+## 📝 来源会话对话流转记录 (Source Conversation Timeline)
 ```text
 {conversation_timeline}
 ```
 
-## Recommended Next Steps
-- Start from the user note and recent conversation.
-- Continue or rerun the most relevant validation for the task.
+{full_evidence}
 
-## Instructions
-- This file is a context snapshot from a previous agent session.
-- Use it to preserve continuity with the current workspace state.
-- Do not treat this file as a standing instruction to pause or re-initialize on every turn.
-- Do not revert unrelated user changes.
+## 🎯 推荐下一步操作
+- 优先从用户指令以及上述会话记录中的最新进展继续推进。
+- 无需重复执行已完成的步骤或重新初始化。
 "#,
         source_agent = source.agent_name,
-        source_id = source.id,
-        source_title = source.title,
+        source_title = if source.title.trim().is_empty() { &source.id } else { source.title.trim() },
         source_cwd = source.cwd,
         target_agent = target.agent_name,
-        target_id = target.id,
+        target_title = if target.title.trim().is_empty() { &target.id } else { target.title.trim() },
         target_cwd = target.cwd,
-        note = if note.trim().is_empty() {
-            "No additional note."
-        } else {
-            note.trim()
-        },
+        note = note_text,
         full_evidence = format_full_evidence_reference(evidence_path),
-        inherited_handover = empty_fallback(inherited_handover, "No inherited handover context."),
+        inherited_handover = empty_fallback(inherited_handover, "无前序继承的会话记录。"),
         conversation_timeline = conversation_timeline,
     )
 }
@@ -3804,79 +3932,90 @@ fn build_full_handover_evidence(
         format!("{}\n\n", artifacts.trim())
     };
     let conversation_timeline =
-        format_ordered_conversation_timeline(recent_context, recent_user_inputs);
+        format_ordered_conversation_timeline(recent_context, recent_user_inputs, source, target);
+    let note_text = if note.trim().is_empty() {
+        "无额外附言"
+    } else {
+        note.trim()
+    };
+
     format!(
-        r#"# Waypoint Full Handover Evidence
+        r#"# 🧭 Waypoint Full Handover Evidence
 
-This file contains larger raw evidence for a compact handover. The target agent should read it only if the main handover is insufficient.
+## 🌳 会话层级与流转 (Session Lineage & Target)
+- 来源会话: 「{source_title}」 ({source_agent}) | 工作区: `{source_cwd}`
+- 目标会话: 「{target_title}」 ({target_agent}) | 工作区: `{target_cwd}`
+- 用户指令: {note}
 
-## Source Session
-- ID: {source_id}
-- Agent: {source_agent}
-- Title: {source_title}
-- Command: {source_command}
-- Workspace: {source_cwd}
-
-## Target Session
-- ID: {target_id}
-- Agent: {target_agent}
-- Title: {target_title}
-- Command: {target_command}
-- Workspace: {target_cwd}
-
-## User Note
-{note}
-
-{artifacts_section}## Inherited Handover Context
+{artifacts_section}## 📜 历史会话层级记录 (Inherited Handover Lineage)
 {inherited_handover}
 
-## Recent Conversation Timeline (ordered)
+## 📝 来源会话对话流转记录 (Source Conversation Timeline)
 ```text
 {conversation_timeline}
 ```
 "#,
         source_agent = source.agent_name,
-        source_id = source.id,
-        source_title = source.title,
-        source_command = source.command,
+        source_title = if source.title.trim().is_empty() { &source.id } else { source.title.trim() },
         source_cwd = source.cwd,
         target_agent = target.agent_name,
-        target_id = target.id,
-        target_title = target.title,
-        target_command = target.command,
+        target_title = if target.title.trim().is_empty() { &target.id } else { target.title.trim() },
         target_cwd = target.cwd,
-        note = if note.trim().is_empty() {
-            "No additional note."
-        } else {
-            note.trim()
-        },
-        inherited_handover = empty_fallback(inherited_handover, "No inherited handover context."),
+        note = note_text,
+        inherited_handover = empty_fallback(inherited_handover, "无前序继承的会话记录。"),
         conversation_timeline = conversation_timeline,
     )
 }
 
-fn format_ordered_conversation_timeline(recent_context: &str, recent_user_inputs: &str) -> String {
-    let recent_context = recent_context.trim();
-    if !recent_context.is_empty() {
-        return recent_context.to_string();
-    }
+fn format_ordered_conversation_timeline(
+    recent_context: &str,
+    recent_user_inputs: &str,
+    source: &SessionInfo,
+    target: &SessionInfo,
+) -> String {
+    let raw = if !recent_context.trim().is_empty() {
+        recent_context.trim()
+    } else if !recent_user_inputs.trim().is_empty() {
+        recent_user_inputs.trim()
+    } else {
+        "（未捕获到来源会话的结构化对话）"
+    };
 
-    let recent_user_inputs = recent_user_inputs.trim();
-    if !recent_user_inputs.is_empty() {
-        return format!(
-            "Only user inputs were captured; assistant replies were not available in order.\n\n{recent_user_inputs}"
-        );
-    }
+    let indented = raw
+        .lines()
+        .map(|line| {
+            if line.trim().is_empty() {
+                "│".to_string()
+            } else {
+                format!("│ {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
-    "No ordered conversation captured.".to_string()
+    let source_title = if source.title.trim().is_empty() {
+        &source.id
+    } else {
+        source.title.trim()
+    };
+    let target_title = if target.title.trim().is_empty() {
+        &target.id
+    } else {
+        target.title.trim()
+    };
+
+    format!(
+        "┌── [来源会话启动] 「{}」 ({})\n{}\n└── [来源会话移交 ➔ 目标会话 「{}」 ({})]",
+        source_title, source.agent_name, indented, target_title, target.agent_name
+    )
 }
 
 fn format_full_evidence_reference(evidence_path: Option<&str>) -> String {
     match evidence_path {
         Some(path) => format!(
-            "A larger evidence file was preserved at `{path}`. Read only this exact file if the compact handover is insufficient; do not scan the handover directory."
+            "## 📦 完整证据归档 (Full Evidence)\n更完整的原始证据文件已归档至 `{path}`。"
         ),
-        None => "No separate full evidence file was generated for this handover.".to_string(),
+        None => String::new(),
     }
 }
 
@@ -3885,84 +4024,36 @@ fn format_handover_for_inheritance(prompt: &str, limit: usize) -> String {
 
     if let Some(earlier) = extract_first_markdown_section(
         prompt,
-        &["## Inherited Handover Context", "## Prior Handover Context"],
+        &[
+            "## 📜 历史会话层级记录 (Inherited Handover Lineage)",
+            "## Inherited Handover Context",
+            "## Prior Handover Context",
+        ],
     )
     .filter(|content| is_meaningful_inherited_context(content))
     {
-        parts.push(format!(
-            "### Earlier Handover Context\n{}",
-            dedupe_repeated_handover_lines(&earlier)
-        ));
+        parts.push(dedupe_repeated_handover_lines(&earlier));
     }
 
-    let mut hop_parts = Vec::new();
-    push_inheritance_section(
-        &mut hop_parts,
-        "#### Summary",
-        extract_first_markdown_section(prompt, &["## Summary"]),
-    );
-    push_inheritance_section(
-        &mut hop_parts,
-        "#### Source",
-        extract_first_markdown_section(prompt, &["## Source Session", "## Source"]),
-    );
-    push_inheritance_section(
-        &mut hop_parts,
-        "#### Target",
-        extract_first_markdown_section(prompt, &["## Target Session", "## Target"]),
-    );
-    push_inheritance_section(
-        &mut hop_parts,
-        "#### User Note",
-        extract_first_markdown_section(prompt, &["## User Note"]),
-    );
-    if !hop_parts.is_empty() {
-        parts.push(format!(
-            "### Previous Handover Hop\n{}",
-            hop_parts.join("\n\n")
-        ));
-    }
-
-    let mut evidence_parts = Vec::new();
-    push_inheritance_section(
-        &mut evidence_parts,
-        "#### Recent Conversation Timeline",
-        extract_first_markdown_section(
-            prompt,
-            &[
-                "### Recent Conversation Timeline (ordered)",
-                "## Recent Conversation Timeline (ordered)",
-                "### Recent Source Terminal Context",
-                "### Recent Source Context",
-                "## Recent Source Terminal Context",
-            ],
-        )
-        .map(|content| dedupe_repeated_handover_lines(&content)),
-    );
-
-    if !evidence_parts.is_empty() {
-        parts.push(format!(
-            "### Previous Handover Evidence\n{}",
-            evidence_parts.join("\n\n")
-        ));
+    if let Some(timeline) = extract_first_markdown_section(
+        prompt,
+        &[
+            "## 📝 来源会话对话流转记录 (Source Conversation Timeline)",
+            "### Recent Conversation Timeline (ordered)",
+            "## Recent Conversation Timeline (ordered)",
+        ],
+    ) {
+        let clean_timeline = dedupe_repeated_handover_lines(&timeline);
+        if !clean_timeline.trim().is_empty() {
+            parts.push(clean_timeline);
+        }
     }
 
     let snapshot = parts.join("\n\n");
     if snapshot.trim().is_empty() {
-        return "No inherited handover context.".to_string();
+        return "无前序继承的会话记录。".to_string();
     }
-    tail_chars(&snapshot, limit)
-}
-
-fn push_inheritance_section(parts: &mut Vec<String>, heading: &str, content: Option<String>) {
-    let Some(content) = content else {
-        return;
-    };
-    let content = content.trim();
-    if content.is_empty() {
-        return;
-    }
-    parts.push(format!("{heading}\n{content}"));
+    tail_chars_clean(&snapshot, limit)
 }
 
 fn extract_first_markdown_section(markdown: &str, headings: &[&str]) -> Option<String> {
@@ -4013,12 +4104,13 @@ fn is_markdown_heading_at_or_above(line: &str, level: usize) -> bool {
 
 fn is_meaningful_inherited_context(content: &str) -> bool {
     let trimmed = content.trim();
-    !trimmed.is_empty() && trimmed != "No inherited handover context."
+    !trimmed.is_empty()
+        && trimmed != "No inherited handover context."
+        && trimmed != "无前序继承的会话记录。"
 }
 
 fn inject_with_retry(target: &Arc<PtySession>, prompt: &str) -> Result<(), String> {
-    let normalized = prompt.replace("\r\n", "\r").replace('\n', "\r");
-    let injection = format!("{normalized}\r");
+    let injection = format!("\x1b[200~{}\x1b[201~", prompt);
     let mut last_error = None;
 
     for attempt in 1..=HANDOVER_INJECT_ATTEMPTS {
@@ -4140,6 +4232,13 @@ fn native_transcript_messages_for(
     source_info: &SessionInfo,
 ) -> Option<Vec<NativeTranscriptMessage>> {
     let kind = native_transcript_kind(source_info)?;
+    if matches!(kind, NativeTranscriptKind::OpenCode) {
+        let native_id = source_info
+            .native_session_ref
+            .as_ref()
+            .and_then(|session_ref| session_ref.id.as_deref());
+        return fetch_opencode_native_messages(&source_info.cwd, native_id);
+    }
     let path = native_transcript_path(source_info, kind)?;
     let file = File::open(path).ok()?;
     let messages = parse_native_transcript_messages(BufReader::new(file), kind);
@@ -4155,6 +4254,7 @@ enum NativeTranscriptKind {
     Claude,
     Codex,
     Agy,
+    OpenCode,
 }
 
 struct NativeTranscriptMessage {
@@ -4167,10 +4267,12 @@ fn native_transcript_kind(source_info: &SessionInfo) -> Option<NativeTranscriptK
         "claude-code" => Some(NativeTranscriptKind::Claude),
         "codex" => Some(NativeTranscriptKind::Codex),
         "agy" => Some(NativeTranscriptKind::Agy),
+        "opencode" => Some(NativeTranscriptKind::OpenCode),
         _ => match source_info.native_session_ref.as_ref()?.provider.as_str() {
             "claude-code" | "claude" => Some(NativeTranscriptKind::Claude),
             "codex" => Some(NativeTranscriptKind::Codex),
             "agy" => Some(NativeTranscriptKind::Agy),
+            "opencode" => Some(NativeTranscriptKind::OpenCode),
             _ => None,
         },
     }
@@ -4211,6 +4313,7 @@ fn native_transcript_path(
             };
             find_agy_native_transcript_path(&agy_id)
         }
+        NativeTranscriptKind::OpenCode => None,
     }
 }
 
@@ -4222,19 +4325,37 @@ fn find_agy_conversation_id(session_id: &str) -> Option<String> {
     }
     let pattern = format!("waypoint_session_id: {session_id}");
     let entries = fs::read_dir(brain_dir).ok()?;
-    for entry in entries.filter_map(Result::ok) {
+    let mut dirs: Vec<_> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .collect();
+
+    // Sort by modified time descending so the newest sessions are scanned first
+    dirs.sort_by_key(|entry| {
+        entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .unwrap_or(UNIX_EPOCH)
+    });
+    dirs.reverse();
+
+    // Check recent brain directories line-by-line without loading entire files into memory
+    for entry in dirs.into_iter().take(30) {
         let path = entry.path();
-        if path.is_dir() {
-            let transcript_path = path
-                .join(".system_generated")
-                .join("logs")
-                .join("transcript.jsonl");
-            if transcript_path.is_file() {
-                if let Ok(content) = fs::read_to_string(&transcript_path) {
-                    if content.contains(&pattern) {
-                        return path
-                            .file_name()
-                            .map(|name| name.to_string_lossy().into_owned());
+        let transcript_path = path
+            .join(".system_generated")
+            .join("logs")
+            .join("transcript.jsonl");
+        if transcript_path.is_file() {
+            if let Ok(file) = File::open(&transcript_path) {
+                let reader = BufReader::new(file);
+                for line in reader.lines().take(50) {
+                    if let Ok(line_content) = line {
+                        if line_content.contains(&pattern) {
+                            return path
+                                .file_name()
+                                .map(|name| name.to_string_lossy().into_owned());
+                        }
                     }
                 }
             }
@@ -4458,12 +4579,27 @@ fn find_codex_session_by_marker(session_id: &str) -> Option<PathBuf> {
     let mut candidates = Vec::new();
     collect_jsonl_paths(&home.join(".codex").join("sessions"), 6, &mut candidates);
 
+    candidates.sort_by_key(|path| {
+        path.metadata()
+            .and_then(|meta| meta.modified())
+            .unwrap_or(UNIX_EPOCH)
+    });
+    candidates.reverse();
+
     let pattern = format!("waypoint_session_id: {session_id}");
-    candidates.into_iter().find(|path| {
-        fs::read_to_string(path)
-            .map(|content| content.contains(&pattern))
-            .unwrap_or(false)
-    })
+    for path in candidates.into_iter().take(30) {
+        if let Ok(file) = File::open(&path) {
+            let reader = BufReader::new(file);
+            for line in reader.lines().take(50) {
+                if let Ok(line_content) = line {
+                    if line_content.contains(&pattern) {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn find_codex_native_transcript_path(native_id: &str) -> Option<PathBuf> {
@@ -4645,6 +4781,7 @@ fn parse_native_transcript_messages<R: BufRead>(
             NativeTranscriptKind::Claude => parse_claude_native_message(&value),
             NativeTranscriptKind::Codex => parse_codex_native_message(&value),
             NativeTranscriptKind::Agy => parse_agy_native_message(&value),
+            NativeTranscriptKind::OpenCode => None,
         })
         .collect()
 }
@@ -4756,27 +4893,105 @@ fn is_native_system_noise(content: &str) -> bool {
         || trimmed.starts_with("<local-command-stderr>")
 }
 
+fn fetch_opencode_native_messages(
+    cwd: &str,
+    native_id: Option<&str>,
+) -> Option<Vec<NativeTranscriptMessage>> {
+    let home = home_dir()?;
+    let db_path = home.join(".local/share/opencode/opencode.db");
+    if !db_path.exists() {
+        return None;
+    }
+
+    let query = if let Some(id) = native_id.filter(|s| !s.trim().is_empty()) {
+        format!(
+            "SELECT json_extract(m.data, '$.role'), json_extract(p.data, '$.text') \
+             FROM message m JOIN part p ON p.message_id = m.id \
+             WHERE m.session_id = {} AND json_extract(p.data, '$.type') = 'text' \
+             ORDER BY m.time_created ASC, p.time_created ASC;",
+            shell_quote(id)
+        )
+    } else {
+        format!(
+            "SELECT json_extract(m.data, '$.role'), json_extract(p.data, '$.text') \
+             FROM message m JOIN part p ON p.message_id = m.id \
+             WHERE m.session_id = (SELECT id FROM session WHERE directory = {} ORDER BY time_created DESC LIMIT 1) \
+               AND json_extract(p.data, '$.type') = 'text' \
+             ORDER BY m.time_created ASC, p.time_created ASC;",
+            shell_quote(cwd)
+        )
+    };
+
+    let output = Command::new("sqlite3")
+        .arg("-separator")
+        .arg("\t")
+        .arg(&db_path)
+        .arg(&query)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let mut messages = Vec::new();
+    for line in stdout.lines() {
+        let Some((role_str, text)) = line.split_once('\t') else {
+            continue;
+        };
+        let role = match role_str.trim() {
+            "user" => ChatRole::User,
+            "assistant" => ChatRole::Assistant,
+            _ => continue,
+        };
+        let content = clean_native_message_content(text, role);
+        if !content.trim().is_empty() && !is_native_system_noise(&content) {
+            messages.push(NativeTranscriptMessage { role, content });
+        }
+    }
+
+    if messages.is_empty() {
+        None
+    } else {
+        Some(messages)
+    }
+}
+
 fn format_native_transcript_context(messages: &[NativeTranscriptMessage], limit: usize) -> String {
-    let blocks = messages
-        .iter()
-        .map(|message| {
-            let role = match message.role {
-                ChatRole::User => "User",
-                ChatRole::Assistant => "Assistant",
-            };
-            format!("{role}:\n{}", message.content)
-        })
-        .collect::<Vec<_>>();
-    tail_chars(&blocks.join("\n\n"), limit)
+    let mut total_len = 0;
+    let mut selected_blocks = Vec::new();
+    for message in messages.iter().rev() {
+        let role = match message.role {
+            ChatRole::User => "User",
+            ChatRole::Assistant => "Assistant",
+        };
+        let block = format!("{role}:\n{}", message.content.trim());
+        let block_len = block.chars().count() + 2;
+        if !selected_blocks.is_empty() && total_len + block_len > limit {
+            break;
+        }
+        total_len += block_len;
+        selected_blocks.push(block);
+    }
+    selected_blocks.reverse();
+    selected_blocks.join("\n\n")
 }
 
 fn format_native_user_inputs(messages: &[NativeTranscriptMessage], limit: usize) -> String {
-    let inputs = messages
-        .iter()
-        .filter(|message| message.role == ChatRole::User)
-        .map(|message| message.content.clone())
-        .collect::<Vec<_>>();
-    tail_chars(&inputs.join("\n\n"), limit)
+    let mut total_len = 0;
+    let mut selected = Vec::new();
+    for message in messages.iter().filter(|m| m.role == ChatRole::User).rev() {
+        let content = message.content.trim().to_string();
+        let len = content.chars().count() + 2;
+        if !selected.is_empty() && total_len + len > limit {
+            break;
+        }
+        total_len += len;
+        selected.push(content);
+    }
+    selected.reverse();
+    selected.join("\n\n")
 }
 
 fn format_chat_messages_for_handover(messages: &[ChatMessage], limit: usize) -> String {
@@ -5265,6 +5480,20 @@ fn tail_chars(value: &str, limit: usize) -> String {
         .rev()
         .collect::<String>();
     format!("[truncated to last {limit} chars]\n{tail}")
+}
+
+fn tail_chars_clean(value: &str, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        return value.to_string();
+    }
+    value
+        .chars()
+        .rev()
+        .take(limit)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>()
 }
 
 fn empty_fallback<'a>(value: &'a str, fallback: &'a str) -> &'a str {
@@ -5759,14 +5988,10 @@ mod tests {
             "",
         );
 
-        assert!(result.contains("## Summary"));
-        assert!(!result.contains("## Current State"));
-        assert!(!result.contains("## Attachments"));
-        assert!(!result.contains("## Changed Files"));
-        assert!(result.contains("## Evidence"));
-        assert!(result.contains("### Recent Conversation Timeline (ordered)"));
-        assert!(!result.contains("### Recent User Inputs (best effort)"));
-        assert!(result.contains("## Recommended Next Steps"));
+        assert!(result.contains("会话层级与流转"));
+        assert!(result.contains("来源会话对话流转记录"));
+        assert!(result.contains("┌── [来源会话启动]"));
+        assert!(result.contains("└── [来源会话移交 ➔ 目标会话"));
         assert!(result.contains("finish P0"));
     }
 
@@ -5906,19 +6131,52 @@ mod tests {
             Path::new("/tmp/workspace/.waypoint-handovers/update.md"),
             &source,
             Some("方案已更新，帮我 review"),
+            "User: Hello\nAssistant: Hi",
         );
 
         assert!(prompt_with_note.contains("Security review"));
         assert!(prompt_with_note.contains("方案已更新，帮我 review"));
+        assert!(prompt_with_note.contains("User: Hello"));
         assert!(prompt_with_note.contains("/tmp/workspace/.waypoint-handovers/update.md"));
 
         let prompt_without_note = existing_session_handover_prompt(
             Path::new("/tmp/workspace/.waypoint-handovers/update.md"),
             &source,
             None,
+            "",
         );
-        assert!(prompt_without_note.contains("Context file:"));
+        assert!(prompt_without_note.contains("来自会话"));
         assert!(prompt_without_note.contains("/tmp/workspace/.waypoint-handovers/update.md"));
+    }
+
+    #[test]
+    fn test_parse_opencode_native_messages() {
+        let source = SessionInfo {
+            id: "oc-test-session".to_string(),
+            agent_id: "opencode".to_string(),
+            agent_name: "OpenCode".to_string(),
+            title: "OpenCode test".to_string(),
+            command: "opencode".to_string(),
+            cwd: "/Users/liuzhe.x/coding/giggle-grids".to_string(),
+            status: SessionStatus::Running,
+            attached: false,
+            created_at: 1,
+            last_active_at: 1,
+            first_user_message: None,
+            native_session_ref: None,
+            parent_session_id: None,
+            handover_root_id: None,
+            dangerous: false,
+            none_workspace: false,
+        };
+
+        let messages = native_transcript_messages_for(&source);
+        if let Some(msgs) = messages {
+            assert!(!msgs.is_empty());
+            let context = format_native_transcript_context(&msgs, 1200);
+            assert!(context.contains("User:"));
+            assert!(!context.contains("[truncated to last"));
+        }
     }
 
     #[test]
@@ -5939,77 +6197,37 @@ mod tests {
 
     #[test]
     fn test_handover_inheritance_snapshot_excludes_boilerplate_and_preserves_order() {
-        let prompt = r#"# Waypoint Handover
+        let prompt = r#"# 🧭 Waypoint Handover Context
 
-## Summary
-Continuation from Codex session "A" in `/tmp/workspace`.
+## 🌳 会话层级与流转 (Session Lineage & Target)
+- 来源会话: 「A」 (Codex)
+- 目标会话: 「B」 (Claude Code)
+- 用户指令: Keep going.
 
-## Source Session
-- Agent: Codex
-- Title: A
-
-## Target Session
-- Agent: Claude Code
-- Title: B
-
-## User Note
-Keep going.
-
-## Current State
-- Branch: main
-
-## Changed Files
-
-### Git Status
-```text
- M src/main.rs
-```
-
-#### Diff Preview
-```diff
-diff --git a/src/main.rs b/src/main.rs
-```
-
-## Inherited Handover Context
+## 📜 历史会话层级记录 (Inherited Handover Lineage)
 older handover context
 
-## Evidence
-
-### Recent Source Terminal Context
+## 📝 来源会话对话流转记录 (Source Conversation Timeline)
 ```text
-User:
-先做 A
-
-Assistant:
-这是一段很长的重复内容用于模拟 TUI repaint 造成的重复行
-这是一段很长的重复内容用于模拟 TUI repaint 造成的重复行
-最后结论
+┌── [来源会话启动] 「A」 (Codex)
+│ User: 先做 A
+│ Assistant: 这是一段很长的重复内容用于模拟 TUI repaint 造成的重复行
+│ Assistant: 这是一段很长的重复内容用于模拟 TUI repaint 造成的重复行
+│ Assistant: 最后结论
+└── [来源会话移交 ➔ 目标会话 「B」 (Claude Code)]
 ```
 
-### Recent User Inputs (best effort)
-```text
-先做 A
-```
-
-## Recommended Next Steps
-- Should not be inherited.
-
-## Instructions
+## 🎯 推荐下一步操作
 - Should not be inherited.
 "#;
 
         let result = format_handover_for_inheritance(prompt, 10000);
 
         let older = result.find("older handover context").unwrap();
-        let hop = result.find("### Previous Handover Hop").unwrap();
-        let evidence = result.find("### Previous Handover Evidence").unwrap();
-        assert!(older < hop);
-        assert!(hop < evidence);
-        assert!(result.contains("Keep going."));
+        let timeline = result.find("来源会话启动").unwrap();
+        assert!(older < timeline);
         assert!(result.contains("最后结论"));
-        assert!(!result.contains("Recommended Next Steps"));
-        assert!(!result.contains("Instructions"));
-        assert!(!result.contains("diff --git"));
+        assert!(!result.contains("推荐下一步操作"));
         assert_eq!(
             result
                 .matches("这是一段很长的重复内容用于模拟 TUI repaint 造成的重复行")

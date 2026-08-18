@@ -55,6 +55,7 @@ Waypoint 会在启动时通过用户的 Login Shell 自动检测以下 CLI 工�
 | :--- | :--- |
 | **Claude Code** | `claude` |
 | **Codex** | `codex` |
+| **OpenCode** | `opencode` |
 | **Antigravity CLI** | `agy` |
 | **GitHub Copilot** | `copilot`、`gh copilot` |
 | **系统 Shell** | `$SHELL` (zsh / bash / fish) |

@@ -1216,6 +1216,11 @@ textarea:focus-visible {
   color: #1c7466;
 }
 
+.session-agent-badge.agent-opencode {
+  background: rgba(59, 130, 246, 0.12);
+  color: #2563eb;
+}
+
 .session-agent-badge.agent-agy {
   background: rgba(232, 124, 78, 0.12);
   color: #a84f2f;
