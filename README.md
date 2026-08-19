@@ -109,7 +109,7 @@ Waypoint 统一使用 UUID 跟踪管理会话生命周期。针对不同 Agent C
 | **Claude Code** | ✅ **支持** (`--session-id <id>`) | `~/.claude/projects/<project>/<id>.jsonl` | 启动时由 Waypoint 生成并直接传入 UUID | `claude --resume=<id>` |
 | **GitHub Copilot** | ✅ **支持** (`--session-id=<id>`) | `~/.copilot/` | 启动时由 Waypoint 生成并直接传入 UUID | `copilot --resume=<id>` |
 | **Codex CLI** | ❌ 不支持（内部自动生成） | `~/.codex/sessions/YYYY-MM-DD/rollout-<id>.jsonl` | ① 首条提问 / Handover Marker 比对<br>② CWD + 文件创建时间戳就近比对 | `codex resume <id>` |
-| **Antigravity CLI** | ❌ 不支持（内部自动生成） | `~/.gemini/antigravity-cli/brain/<id>/` | ① 首条提问 HTML 注释 Marker<br>② 终端 Resume 命令特征字符串解析 | `agy --conversation=<id> --project=<proj>` |
+| **Antigravity CLI** | ❌ 不支持（内部自动生成） | `~/.gemini/antigravity-cli/brain/<id>/` | ① 首条提问 Unicode Tags 零宽 Marker<br>② 终端 Resume 命令特征字符串解析 | `agy --conversation=<id> --project=<proj>` |
 | **OpenCode** | ❌ 不支持（内部自动生成） | `~/.local/share/opencode/opencode.db` (SQLite) | ① 首条提问 Marker 反查<br>② 查询同工作区最新 `session.id` | `opencode --session=<id>` |
 | **系统 Shell** | ➖ 不适用 | N/A | 纯 PTY 伪终端会话 | `$SHELL` |
 
@@ -140,6 +140,7 @@ Waypoint 统一使用 UUID 跟踪管理会话生命周期。针对不同 Agent C
 #### ② Antigravity CLI (`agy`)
 * **用户提问 Marker 注入**：用户在终端输入首条消息时，Waypoint 静默追加 Unicode Tags 编码的零宽 Marker，AGY 写入其 `brain/<id>/.system_generated/logs/transcript.jsonl` 后，Waypoint 遍历 `brain/` 目录命中该 marker 即可精准匹配 Conversation ID。
 * **终端输出字符串解析**：AGY 运行或退出时会在终端输出 `Resume in the same project: agy --conversation=<id> --project=<proj>`，Waypoint 的 PTY 输出流与 `transcript.log` 会正则实时提取参数。
+* **已知时序行为**：AGY 的原生 transcript 为异步写入。运行中会话的首次扫描若早于 marker 落盘，`nativeSessionRef` 会暂时保持为空，Waypoint 不会自动重试；重启应用后点击“恢复”会重新扫描原生 transcript，命中 marker 后持久化精确的 Conversation ID。
 
 #### ③ OpenCode
 * **SQLite Marker 关联**：首条提问提交前静默追加不可见 Marker，随后在 `part.data` 的文本内容中查找 Marker，并精确取得对应的 `part.session_id`。
