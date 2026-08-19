@@ -49,7 +49,7 @@ const BRACKETED_PASTE_END = "\x1b[201~";
 const INTERCEPTED_INPUT_SUPPRESSION_MS = 250;
 const MAX_INTERCEPTED_INPUT_SUPPRESSIONS = 20;
 const TERMINAL_FILE_PATH_PATTERN =
-  /(?:"([^"\r\n]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?)"|'([^'\r\n]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?)'|((?:~|\/|\.{1,2}\/)?[A-Za-z0-9_.@%+=,~/-]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?))/g;
+  /(?:"([^"\r\n]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?)"|'([^'\r\n]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?)'|(file:\/\/\/[A-Za-z0-9_.@%+=,~/-]+(?:\.[A-Za-z0-9]{1,12})?(?::\d+(?::\d+)?)?(?:#[A-Za-z0-9_#-]+)?)|((?:~|\/|\.{1,2}\/)?[A-Za-z0-9_.@%+=,~/-]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?(?:#[A-Za-z0-9_#-]+)?))/g;
 const TERMINAL_PATH_TRAILING_PUNCTUATION = /[),.;\]}]+$/;
 
 function isSessionRouteCommand(value: string): boolean {
@@ -161,7 +161,9 @@ function trimTerminalPathToken(value: string): string {
   return value
     .trim()
     .replace(TERMINAL_PATH_TRAILING_PUNCTUATION, "")
-    .replace(/:\d+(?::\d+)?$/, "");
+    .replace(/:\d+(?::\d+)?$/, "")
+    .replace(/#L\d+(?:-L\d+)?$/, "")
+    .replace(/#.*$/, "");
 }
 
 // Max number of wrapped buffer rows to walk when reconstructing a logical line
@@ -177,6 +179,49 @@ interface LogicalLineCell {
 // Reconstruct the logical (wrapped) line that contains `bufferLineNumber` and
 // return the joined text plus per-row start offsets so regex matches can be
 // mapped back to buffer cell positions across wrapped rows.
+function areLinesConnected(line1Text: string, line2Text: string): boolean {
+  if (!line1Text || !line2Text) {
+    return false;
+  }
+  const lastChar = line1Text[line1Text.length - 1];
+  const firstChar = line2Text[0];
+
+  const pathCharRegex = /[A-Za-z0-9_.@%+=,~/\-:#?&]/;
+  if (!pathCharRegex.test(lastChar) || !pathCharRegex.test(firstChar)) {
+    return false;
+  }
+
+  // If line1 ends with a complete file extension, it's likely already complete,
+  // EXCEPT if there is an unclosed parenthesis (e.g., in a markdown link).
+  const completePathEndRegex = /\.[A-Za-z0-9]{1,12}$/;
+  if (completePathEndRegex.test(line1Text)) {
+    const openCount = (line1Text.match(/\(/g) || []).length;
+    const closeCount = (line1Text.match(/\)/g) || []).length;
+    if (openCount <= closeCount) {
+      return false;
+    }
+  }
+
+  if (
+    line1Text.includes("file://") ||
+    line1Text.includes("http://") ||
+    line1Text.includes("https://") ||
+    line2Text.includes("file://") ||
+    line2Text.includes("http://") ||
+    line2Text.includes("https://") ||
+    line1Text.includes("/") ||
+    line2Text.includes("/") ||
+    (line1Text.includes("(") && line2Text.includes(")"))
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+// Reconstruct the logical (wrapped) line that contains `bufferLineNumber` and
+// return the joined text plus per-row start offsets so regex matches can be
+// mapped back to buffer cell positions across wrapped rows.
 function readLogicalLine(
   buffer: { getLine: (index: number) => ({ translateToString(trimRight: boolean): string; isWrapped: boolean } | null | undefined) },
   bufferLineNumber: number,
@@ -185,8 +230,14 @@ function readLogicalLine(
   let probe = startLineNumber;
   let walked = 0;
   while (probe > 1 && walked < TERMINAL_LINK_WRAP_SCAN_MAX) {
-    const prev = buffer.getLine(probe - 2);
-    if (!prev || !prev.isWrapped) {
+    const currentLine = buffer.getLine(probe - 1);
+    const prevLine = buffer.getLine(probe - 2);
+    if (!prevLine || !currentLine) {
+      break;
+    }
+    const isSoftWrapped = currentLine.isWrapped;
+    const isHardWrapped = areLinesConnected(prevLine.translateToString(true), currentLine.translateToString(true));
+    if (!isSoftWrapped && !isHardWrapped) {
       break;
     }
     startLineNumber = probe - 1;
@@ -208,7 +259,12 @@ function readLogicalLine(
     text += line.translateToString(true);
     cursor++;
     const next = buffer.getLine(cursor - 1);
-    if (!next || !next.isWrapped) {
+    if (!next) {
+      break;
+    }
+    const isSoftWrapped = next.isWrapped;
+    const isHardWrapped = areLinesConnected(line.translateToString(true), next.translateToString(true));
+    if (!isSoftWrapped && !isHardWrapped) {
       break;
     }
   }
@@ -228,7 +284,13 @@ function logicalOffsetToCell(
 }
 
 function resolveTerminalPath(value: string, cwd?: string | null): string {
-  const token = trimTerminalPathToken(value);
+  let token = trimTerminalPathToken(value);
+  if (token.startsWith("file://")) {
+    token = token.slice(7);
+    if (token.startsWith("/") && /^[A-Za-z]:[\\/]/.test(token.slice(1))) {
+      token = token.slice(1);
+    }
+  }
   if (!token || token.startsWith("/") || token.startsWith("~") || /^[A-Za-z]:[\\/]/.test(token)) {
     return token;
   }
@@ -655,12 +717,12 @@ function TerminalView({
         while ((match = TERMINAL_FILE_PATH_PATTERN.exec(logical.text)) !== null) {
           const quotedWithDouble = Boolean(match[1]);
           const quotedWithSingle = Boolean(match[2]);
-          const rawPath = match[1] ?? match[2] ?? match[3] ?? "";
+          const rawPath = match[1] ?? match[2] ?? match[3] ?? match[4] ?? "";
           const targetPath = resolveTerminalPath(rawPath, cwd);
           if (!targetPath) {
             continue;
           }
-          const shownPath = trimTerminalPathToken(rawPath);
+          const shownPath = rawPath.trim().replace(TERMINAL_PATH_TRAILING_PUNCTUATION, "");
           const startOffset = match.index + (quotedWithDouble || quotedWithSingle ? 1 : 0);
           const endOffset = startOffset + shownPath.length;
           if (endOffset <= startOffset) {
@@ -668,9 +730,8 @@ function TerminalView({
           }
           const startCell = logicalOffsetToCell(startOffset, logical.rowStartOffsets, logical.rowLineNumbers);
           const endCell = logicalOffsetToCell(endOffset - 1, logical.rowStartOffsets, logical.rowLineNumbers);
-          // Only emit when the link starts on the requested row so xterm
-          // registers it once and renders the underline across the full span.
-          if (startCell.y !== bufferLineNumber) {
+          // Only emit when the link spans the requested row
+          if (bufferLineNumber < startCell.y || bufferLineNumber > endCell.y) {
             continue;
           }
           links.push({
