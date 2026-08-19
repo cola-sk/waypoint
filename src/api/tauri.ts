@@ -37,6 +37,8 @@ export function createAgentSession(
   cwd: string,
   dangerous = false,
   noneWorkspace = false,
+  title?: string,
+  sessionId?: string,
 ): Promise<SessionInfo> {
   assertTauriRuntime();
   return invoke("create_agent_session", {
@@ -44,6 +46,8 @@ export function createAgentSession(
     cwd,
     dangerous,
     noneWorkspace,
+    title: title?.trim() || null,
+    sessionId: sessionId || null,
     rows: DEFAULT_TERMINAL_ROWS,
     cols: DEFAULT_TERMINAL_COLS,
   });
@@ -209,6 +213,8 @@ export function continueSession(
   handoverMode: HandoverContentMode,
   editedPrompt?: string,
   dangerous?: boolean,
+  title?: string,
+  sessionId?: string,
 ): Promise<HandoverResult> {
   assertTauriRuntime();
   return invoke("continue_session", {
@@ -219,6 +225,8 @@ export function continueSession(
     handoverMode,
     editedPrompt: editedPrompt ?? null,
     dangerous: dangerous ?? null,
+    title: title?.trim() || null,
+    sessionId: sessionId || null,
     rows: DEFAULT_TERMINAL_ROWS,
     cols: DEFAULT_TERMINAL_COLS,
   });
@@ -235,6 +243,7 @@ export function getHandoverDraft(params: {
   targetSessionId?: string | null;
   targetAgentId?: string | null;
   cwd?: string | null;
+  targetTitle?: string | null;
   note: string;
   handoverMode: HandoverContentMode;
 }): Promise<HandoverDraft> {

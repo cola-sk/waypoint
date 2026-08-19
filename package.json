@@ -9,7 +9,8 @@
     "preview": "vite preview --host 127.0.0.1 --port 1420",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "tauri:build:dmg": "node scripts/build-dmg.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

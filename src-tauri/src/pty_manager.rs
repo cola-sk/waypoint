@@ -338,6 +338,8 @@ pub fn create_agent_session(
     app: AppHandle,
     agent_id: String,
     cwd: String,
+    title: Option<String>,
+    session_id: Option<String>,
     dangerous: Option<bool>,
     none_workspace: Option<bool>,
     rows: Option<u16>,
@@ -347,6 +349,8 @@ pub fn create_agent_session(
         app,
         &agent_id,
         cwd,
+        title,
+        session_id,
         dangerous.unwrap_or(false),
         none_workspace.unwrap_or(false),
         rows,
@@ -516,6 +520,8 @@ pub fn continue_session(
     source_session_id: String,
     target_agent_id: String,
     cwd: String,
+    title: Option<String>,
+    session_id: Option<String>,
     note: Option<String>,
     handover_mode: Option<HandoverContentMode>,
     edited_prompt: Option<String>,
@@ -528,6 +534,8 @@ pub fn continue_session(
         &source_session_id,
         &target_agent_id,
         cwd,
+        title,
+        session_id,
         note,
         handover_mode.unwrap_or_default(),
         edited_prompt,
@@ -553,6 +561,7 @@ pub fn get_handover_draft(
     target_session_id: Option<String>,
     target_agent_id: Option<String>,
     cwd: Option<String>,
+    target_title: Option<String>,
     note: Option<String>,
     handover_mode: Option<HandoverContentMode>,
 ) -> Result<HandoverDraft, String> {
@@ -562,6 +571,7 @@ pub fn get_handover_draft(
         target_session_id.as_deref(),
         target_agent_id.as_deref(),
         cwd.as_deref(),
+        target_title.as_deref(),
         note,
         handover_mode.unwrap_or_default(),
     )
@@ -614,6 +624,8 @@ impl SessionManager {
         app: AppHandle,
         agent_id: &str,
         cwd: String,
+        title: Option<String>,
+        session_id: Option<String>,
         dangerous: bool,
         none_workspace: bool,
         rows: Option<u16>,
@@ -633,6 +645,10 @@ impl SessionManager {
         if dangerous {
             apply_dangerous_flag(agent_id, &mut args);
         }
+        let requested_id = normalize_requested_session_id(session_id)?;
+        let title_override = title
+            .map(|value| normalize_requested_session_title(&value))
+            .transpose()?;
         self.spawn_session(
             app,
             definition.id,
@@ -645,6 +661,8 @@ impl SessionManager {
             rows,
             cols,
             Vec::new(),
+            requested_id,
+            title_override,
             dangerous,
             none_workspace,
         )
@@ -664,6 +682,8 @@ impl SessionManager {
         rows: Option<u16>,
         cols: Option<u16>,
         extra_env: Vec<(String, String)>,
+        existing_id: Option<String>,
+        title_override: Option<String>,
         dangerous: bool,
         none_workspace: bool,
     ) -> Result<SessionInfo, String> {
@@ -679,8 +699,8 @@ impl SessionManager {
             rows,
             cols,
             extra_env,
-            None,
-            None,
+            existing_id,
+            title_override,
             None,
             None,
             None,
@@ -1035,7 +1055,14 @@ impl SessionManager {
         if !PathBuf::from(&meta.cwd).is_dir() {
             return Err(format!("workspace directory does not exist: {}", meta.cwd));
         }
-        if cache_agy_resume_ref_in_meta(&mut meta) {
+        let native_ref_changed = match meta.agent_id.as_str() {
+            "agy" => cache_agy_resume_ref_in_meta(&mut meta),
+            "codex" => cache_codex_resume_ref_in_meta(&mut meta),
+            "claude-code" => cache_claude_resume_ref_in_meta(&mut meta),
+            "opencode" => cache_opencode_resume_ref_in_meta(&mut meta),
+            _ => false,
+        };
+        if native_ref_changed {
             persist_session_meta(&meta)?;
         }
 
@@ -1070,12 +1097,7 @@ impl SessionManager {
         )
     }
 
-    fn write_session(
-        &self,
-        app: &AppHandle,
-        session_id: &str,
-        data: String,
-    ) -> Result<(), String> {
+    fn write_session(&self, app: &AppHandle, session_id: &str, data: String) -> Result<(), String> {
         let session = self.get(session_id)?;
         if !matches!(session.info().status, SessionStatus::Running) {
             return Err("session is not running".to_string());
@@ -1085,10 +1107,7 @@ impl SessionManager {
         // sequences that make the frontend's line tracker intentionally give
         // up. Keep a backend fallback at the actual Enter boundary so @@
         // routing remains consistent across agent TUIs.
-        let mention_input = submitted_session_mention(
-            &session.pending_user_input.lock(),
-            &data,
-        );
+        let mention_input = submitted_session_mention(&session.pending_user_input.lock(), &data);
         if let Some(mention_input) = mention_input {
             let route_result = self.route_session_mention(session_id, &mention_input);
 
@@ -1128,11 +1147,8 @@ impl SessionManager {
             return Ok(());
         }
 
-        let data_to_write = if should_append_terminal_session_marker(&session, &data) {
-            format!("{data}<!-- waypoint_session_id: {session_id} -->\r")
-        } else {
-            data.clone()
-        };
+        let data_to_write = terminal_input_with_session_marker(&session, &data, session_id)
+            .unwrap_or_else(|| data.clone());
         session.append_input(&data);
         session.capture_user_input(&data);
         session
@@ -1244,16 +1260,14 @@ impl SessionManager {
             return Ok(());
         }
 
-        let is_first_message = {
+        let should_append_marker = {
             let meta = session.meta.lock();
             meta.first_user_message.is_none()
+                && meta.parent_session_id.is_none()
+                && agent_uses_terminal_session_marker(&meta.agent_id)
         };
-        let info = session.info();
-        let payload = if is_first_message && info.agent_id == "agy" {
-            format!(
-                "{}\n<!-- waypoint_session_id: {} -->",
-                clean_msg, session_id
-            )
+        let payload = if should_append_marker {
+            format!("{}{}", clean_msg, invisible_session_marker(session_id))
         } else {
             clean_msg.to_string()
         };
@@ -1351,7 +1365,7 @@ impl SessionManager {
             .kill()
             .map_err(|err| format!("failed to kill session: {err}"))?;
         session.mark_status(SessionStatus::Exited);
-        cache_agy_resume_ref_on_session(&session);
+        resolve_and_cache_native_session_ref(&session);
         Ok(())
     }
 
@@ -1399,7 +1413,8 @@ impl SessionManager {
         let same_workspace = source_info.cwd == target_info.cwd;
         if !same_tree && !same_workspace {
             return Err(
-                "source and target sessions must belong to the same handover tree or workspace".to_string(),
+                "source and target sessions must belong to the same handover tree or workspace"
+                    .to_string(),
             );
         }
 
@@ -1484,6 +1499,8 @@ impl SessionManager {
         source_session_id: &str,
         target_agent_id: &str,
         cwd: String,
+        title: Option<String>,
+        session_id: Option<String>,
         note: Option<String>,
         handover_mode: HandoverContentMode,
         edited_prompt: Option<String>,
@@ -1500,6 +1517,11 @@ impl SessionManager {
             ));
         }
         let target_dangerous = dangerous.unwrap_or(source_info.dangerous);
+        let target_id = normalize_requested_session_id(session_id)?
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let target_title = title
+            .map(|value| normalize_requested_session_title(&value))
+            .transpose()?;
 
         if target_agent_id == "agy" {
             return self.continue_agy_with_initial_prompt(
@@ -1507,6 +1529,8 @@ impl SessionManager {
                 &source,
                 source_info,
                 cwd,
+                target_id,
+                target_title,
                 note,
                 handover_mode,
                 edited_prompt.as_deref(),
@@ -1522,6 +1546,8 @@ impl SessionManager {
                 &source,
                 source_info,
                 cwd,
+                target_id,
+                target_title,
                 note,
                 handover_mode,
                 edited_prompt.as_deref(),
@@ -1537,6 +1563,8 @@ impl SessionManager {
                 &source,
                 source_info,
                 cwd,
+                target_id,
+                target_title,
                 note,
                 handover_mode,
                 edited_prompt.as_deref(),
@@ -1552,6 +1580,8 @@ impl SessionManager {
                 &source,
                 source_info,
                 cwd,
+                target_id,
+                target_title,
                 note,
                 handover_mode,
                 edited_prompt.as_deref(),
@@ -1567,6 +1597,8 @@ impl SessionManager {
                 &source,
                 source_info,
                 cwd,
+                target_id,
+                target_title,
                 note,
                 handover_mode,
                 edited_prompt.as_deref(),
@@ -1576,7 +1608,9 @@ impl SessionManager {
             );
         }
 
-        Err(format!("unsupported continue target agent: {target_agent_id}"))
+        Err(format!(
+            "unsupported continue target agent: {target_agent_id}"
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1586,6 +1620,8 @@ impl SessionManager {
         source: &Arc<PtySession>,
         source_info: SessionInfo,
         cwd: String,
+        target_id: String,
+        requested_title: Option<String>,
         note: Option<String>,
         handover_mode: HandoverContentMode,
         edited_prompt: Option<&str>,
@@ -1601,12 +1637,13 @@ impl SessionManager {
             "Claude Code is not available in PATH. Install it or make sure your login shell can resolve it."
                 .to_string()
         })?;
-        let target_id = Uuid::new_v4().to_string();
+        let session_title =
+            requested_title.unwrap_or_else(|| default_session_title(definition.name, &target_id));
         let planned_target = SessionInfo {
             id: target_id.clone(),
             agent_id: definition.id.to_string(),
             agent_name: definition.name.to_string(),
-            title: "Claude Code new session".to_string(),
+            title: session_title.clone(),
             command: "claude <handover>".to_string(),
             cwd: cwd.clone(),
             status: SessionStatus::Running,
@@ -1650,7 +1687,7 @@ impl SessionManager {
             cols,
             Vec::new(),
             Some(target_id),
-            None,
+            Some(session_title),
             None,
             None,
             None,
@@ -1689,6 +1726,8 @@ impl SessionManager {
         source: &Arc<PtySession>,
         source_info: SessionInfo,
         cwd: String,
+        target_id: String,
+        requested_title: Option<String>,
         note: Option<String>,
         handover_mode: HandoverContentMode,
         edited_prompt: Option<&str>,
@@ -1704,12 +1743,13 @@ impl SessionManager {
             "Antigravity CLI is not available in PATH. Install it or make sure your login shell can resolve it."
                 .to_string()
         })?;
-        let target_id = Uuid::new_v4().to_string();
+        let session_title =
+            requested_title.unwrap_or_else(|| default_session_title(definition.name, &target_id));
         let planned_target = SessionInfo {
             id: target_id.clone(),
             agent_id: definition.id.to_string(),
             agent_name: definition.name.to_string(),
-            title: "Antigravity CLI new session".to_string(),
+            title: session_title.clone(),
             command: "agy --prompt-interactive <handover>".to_string(),
             cwd: cwd.clone(),
             status: SessionStatus::Running,
@@ -1756,7 +1796,7 @@ impl SessionManager {
             cols,
             Vec::new(),
             Some(target_id),
-            None,
+            Some(session_title),
             None,
             None,
             None,
@@ -1795,6 +1835,8 @@ impl SessionManager {
         source: &Arc<PtySession>,
         source_info: SessionInfo,
         cwd: String,
+        target_id: String,
+        requested_title: Option<String>,
         note: Option<String>,
         handover_mode: HandoverContentMode,
         edited_prompt: Option<&str>,
@@ -1810,12 +1852,13 @@ impl SessionManager {
             "Codex CLI is not available in PATH. Install it or make sure your login shell can resolve it."
                 .to_string()
         })?;
-        let target_id = Uuid::new_v4().to_string();
+        let session_title =
+            requested_title.unwrap_or_else(|| default_session_title(definition.name, &target_id));
         let planned_target = SessionInfo {
             id: target_id.clone(),
             agent_id: definition.id.to_string(),
             agent_name: definition.name.to_string(),
-            title: "Codex new session".to_string(),
+            title: session_title.clone(),
             command: "codex --no-alt-screen <handover>".to_string(),
             cwd: cwd.clone(),
             status: SessionStatus::Running,
@@ -1863,7 +1906,7 @@ impl SessionManager {
             cols,
             Vec::new(),
             Some(target_id),
-            None,
+            Some(session_title),
             None,
             None,
             None,
@@ -1902,6 +1945,8 @@ impl SessionManager {
         source: &Arc<PtySession>,
         source_info: SessionInfo,
         cwd: String,
+        target_id: String,
+        requested_title: Option<String>,
         note: Option<String>,
         handover_mode: HandoverContentMode,
         edited_prompt: Option<&str>,
@@ -1917,12 +1962,13 @@ impl SessionManager {
             "OpenCode is not available in PATH. Install it or make sure your login shell can resolve it."
                 .to_string()
         })?;
-        let target_id = Uuid::new_v4().to_string();
+        let session_title =
+            requested_title.unwrap_or_else(|| default_session_title(definition.name, &target_id));
         let planned_target = SessionInfo {
             id: target_id.clone(),
             agent_id: definition.id.to_string(),
             agent_name: definition.name.to_string(),
-            title: "OpenCode new session".to_string(),
+            title: session_title.clone(),
             command: "opencode <handover>".to_string(),
             cwd: cwd.clone(),
             status: SessionStatus::Running,
@@ -1967,7 +2013,7 @@ impl SessionManager {
             cols,
             Vec::new(),
             Some(target_id),
-            None,
+            Some(session_title),
             None,
             None,
             None,
@@ -2006,6 +2052,8 @@ impl SessionManager {
         source: &Arc<PtySession>,
         source_info: SessionInfo,
         cwd: String,
+        target_id: String,
+        requested_title: Option<String>,
         note: Option<String>,
         handover_mode: HandoverContentMode,
         edited_prompt: Option<&str>,
@@ -2022,12 +2070,13 @@ impl SessionManager {
                 .to_string()
         })?;
         let display_command = format!("{} -i <handover>", resolved.display);
-        let target_id = Uuid::new_v4().to_string();
+        let session_title =
+            requested_title.unwrap_or_else(|| default_session_title(definition.name, &target_id));
         let planned_target = SessionInfo {
             id: target_id.clone(),
             agent_id: definition.id.to_string(),
             agent_name: definition.name.to_string(),
-            title: "GitHub Copilot new session".to_string(),
+            title: session_title.clone(),
             command: display_command.clone(),
             cwd: cwd.clone(),
             status: SessionStatus::Running,
@@ -2076,7 +2125,7 @@ impl SessionManager {
             cols,
             Vec::new(),
             Some(target_id),
-            None,
+            Some(session_title),
             None,
             None,
             None,
@@ -2183,6 +2232,7 @@ impl SessionManager {
         target_session_id: Option<&str>,
         target_agent_id: Option<&str>,
         cwd: Option<&str>,
+        target_title: Option<&str>,
         note: Option<String>,
         requested_mode: HandoverContentMode,
     ) -> Result<HandoverDraft, String> {
@@ -2190,9 +2240,7 @@ impl SessionManager {
         let source_info = source.info();
         let target_info = match target_mode {
             "existing" => {
-                if let Some(target_id) =
-                    target_session_id.filter(|id| !id.trim().is_empty())
-                {
+                if let Some(target_id) = target_session_id.filter(|id| !id.trim().is_empty()) {
                     self.get(target_id)?.info()
                 } else {
                     planned_file_handover_target_info(&source_info)
@@ -2212,6 +2260,8 @@ impl SessionManager {
                     target_cwd,
                     source_info.dangerous,
                     source_info.none_workspace,
+                    target_session_id,
+                    target_title,
                 )?
             }
             other => return Err(format!("unknown handover target mode: {other}")),
@@ -2767,29 +2817,104 @@ fn cache_claude_resume_ref_on_session(session: &Arc<PtySession>) -> bool {
     changed
 }
 
+fn cache_opencode_resume_ref_on_session(session: &Arc<PtySession>) -> bool {
+    let changed = {
+        let mut meta = session.meta.lock();
+        cache_opencode_resume_ref_in_meta(&mut meta)
+    };
+    if changed {
+        session.persist_meta();
+    }
+    changed
+}
+
 fn resolve_and_cache_native_session_ref(session: &Arc<PtySession>) -> bool {
     let agent_id = { session.meta.lock().agent_id.clone() };
     match agent_id.as_str() {
         "codex" => cache_codex_resume_ref_on_session(session),
         "agy" => cache_agy_resume_ref_on_session(session),
         "claude-code" => cache_claude_resume_ref_on_session(session),
+        "opencode" => cache_opencode_resume_ref_on_session(session),
         _ => false,
     }
 }
 
-fn should_append_terminal_session_marker(session: &Arc<PtySession>, data: &str) -> bool {
+fn terminal_input_with_session_marker(
+    session: &Arc<PtySession>,
+    data: &str,
+    session_id: &str,
+) -> Option<String> {
     if !data.contains('\r') && !data.contains('\n') {
-        return false;
+        return None;
     }
     {
         let meta = session.meta.lock();
-        if meta.agent_id != "agy" || meta.first_user_message.is_some() {
-            return false;
+        if !agent_uses_terminal_session_marker(&meta.agent_id)
+            || meta.first_user_message.is_some()
+            || meta.parent_session_id.is_some()
+        {
+            return None;
         }
     }
 
-    let mut pending = session.pending_user_input.lock().clone();
-    !extract_submitted_user_inputs(&mut pending, data).is_empty()
+    let pending = session.pending_user_input.lock().clone();
+    insert_terminal_session_marker(&pending, data, session_id)
+}
+
+fn agent_uses_terminal_session_marker(agent_id: &str) -> bool {
+    matches!(agent_id, "agy" | "codex" | "opencode")
+}
+
+fn insert_terminal_session_marker(pending: &str, data: &str, session_id: &str) -> Option<String> {
+    let submit_at = first_submitted_input_boundary(pending, data)?;
+    let marker = invisible_session_marker(session_id);
+    let mut payload = String::with_capacity(data.len() + marker.len());
+    payload.push_str(&data[..submit_at]);
+    payload.push_str(&marker);
+    payload.push_str(&data[submit_at..]);
+    Some(payload)
+}
+
+fn invisible_session_marker(session_id: &str) -> String {
+    const TAG_OFFSET: u32 = 0xE0000;
+    const TAG_START: char = '\u{E0001}';
+    const TAG_END: char = '\u{E007F}';
+
+    let payload = format!("waypoint_session_id:{session_id}");
+    let mut marker = String::with_capacity((payload.len() + 2) * 4);
+    marker.push(TAG_START);
+    for byte in payload.bytes() {
+        if let Some(tag) = char::from_u32(TAG_OFFSET + u32::from(byte)) {
+            marker.push(tag);
+        }
+    }
+    marker.push(TAG_END);
+    marker
+}
+
+fn contains_session_marker(text: &str, session_id: &str) -> bool {
+    let marker = invisible_session_marker(session_id);
+    let legacy_marker = format!("waypoint_session_id: {session_id}");
+    if text.contains(&marker) || text.contains(&legacy_marker) {
+        return true;
+    }
+
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .is_some_and(|value| json_value_contains_marker(&value, &marker, &legacy_marker))
+}
+
+fn json_value_contains_marker(value: &Value, marker: &str, legacy_marker: &str) -> bool {
+    match value {
+        Value::String(text) => text.contains(marker) || text.contains(legacy_marker),
+        Value::Array(items) => items
+            .iter()
+            .any(|item| json_value_contains_marker(item, marker, legacy_marker)),
+        Value::Object(fields) => fields
+            .values()
+            .any(|field| json_value_contains_marker(field, marker, legacy_marker)),
+        _ => false,
+    }
 }
 
 fn cache_agy_resume_ref_in_meta(meta: &mut SessionMeta) -> bool {
@@ -2880,26 +3005,31 @@ fn cache_codex_resume_ref_in_meta(meta: &mut SessionMeta) -> bool {
     }
 
     let existing = meta.native_session_ref.clone();
-    if let Some(ref current) = existing {
-        if let (Some(id), Some(path_str)) = (&current.id, &current.transcript_path) {
-            if !id.trim().is_empty() && Path::new(path_str).is_file() {
-                return false;
+    let marker_path = find_codex_session_by_marker(&meta.id);
+    if marker_path.is_none() {
+        if let Some(ref current) = existing {
+            if let (Some(id), Some(path_str)) = (&current.id, &current.transcript_path) {
+                if !id.trim().is_empty() && Path::new(path_str).is_file() {
+                    return false;
+                }
             }
         }
     }
 
-    let path_opt = existing
-        .as_ref()
-        .and_then(|r| r.transcript_path.as_deref())
-        .map(PathBuf::from)
-        .filter(|p| p.is_file())
+    let path_opt = marker_path
+        .or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|r| r.transcript_path.as_deref())
+                .map(PathBuf::from)
+                .filter(|p| p.is_file())
+        })
         .or_else(|| {
             existing
                 .as_ref()
                 .and_then(|r| r.id.as_deref())
                 .and_then(find_codex_native_transcript_path)
         })
-        .or_else(|| find_codex_session_by_marker(&meta.id))
         .or_else(|| find_latest_codex_native_transcript_path(&meta.cwd, meta.created_at));
 
     let Some(path) = path_opt else {
@@ -2946,6 +3076,68 @@ fn cache_codex_resume_ref_in_meta(meta: &mut SessionMeta) -> bool {
         })
         .unwrap_or(true);
 
+    if changed {
+        meta.native_session_ref = Some(next);
+        meta.last_active_at = unix_timestamp();
+    }
+    changed
+}
+
+fn cache_opencode_resume_ref_in_meta(meta: &mut SessionMeta) -> bool {
+    if meta.agent_id != "opencode" {
+        return false;
+    }
+
+    let existing = meta.native_session_ref.clone();
+    let marker_id = find_opencode_session_id_by_marker(&meta.id);
+    if marker_id.is_none() {
+        if let Some(ref current) = existing {
+            if current
+                .id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+            {
+                return false;
+            }
+        }
+    }
+
+    let native_id = marker_id
+        .or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|session_ref| session_ref.id.clone())
+        })
+        .or_else(|| find_latest_opencode_session_id(&meta.cwd));
+    let Some(native_id) = native_id else {
+        return false;
+    };
+
+    let display_command = format!("opencode --session={}", shell_quote(&native_id));
+    let next = NativeSessionRef {
+        provider: "opencode".to_string(),
+        id: Some(native_id),
+        name: existing
+            .as_ref()
+            .and_then(|session_ref| session_ref.name.clone()),
+        project: None,
+        resume_command: Some(display_command),
+        transcript_path: None,
+        discovered_at: existing
+            .as_ref()
+            .map(|session_ref| session_ref.discovered_at)
+            .filter(|value| *value > 0)
+            .unwrap_or_else(unix_timestamp),
+    };
+
+    let changed = existing
+        .as_ref()
+        .map(|current| {
+            current.provider != next.provider
+                || current.id != next.id
+                || current.resume_command != next.resume_command
+        })
+        .unwrap_or(true);
     if changed {
         meta.native_session_ref = Some(next);
         meta.last_active_at = unix_timestamp();
@@ -3672,6 +3864,8 @@ fn planned_handover_target_info(
     cwd: &str,
     dangerous: bool,
     none_workspace: bool,
+    target_session_id: Option<&str>,
+    target_title: Option<&str>,
 ) -> Result<SessionInfo, String> {
     let definition = agent_definitions()
         .into_iter()
@@ -3688,12 +3882,21 @@ fn planned_handover_target_info(
             .unwrap_or_else(|| "copilot -i <handover>".to_string()),
         _ => format!("{} <handover>", definition.name),
     };
+    let target_id = target_session_id
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "pending".to_string());
+    let session_title = match target_title.filter(|value| !value.trim().is_empty()) {
+        Some(value) => normalize_requested_session_title(value)?,
+        None if target_id == "pending" => format!("{} new session", definition.name),
+        None => default_session_title(definition.name, &target_id),
+    };
 
     Ok(SessionInfo {
-        id: "pending".to_string(),
+        id: target_id,
         agent_id: definition.id.to_string(),
         agent_name: definition.name.to_string(),
-        title: format!("{} new session", definition.name),
+        title: session_title,
         command,
         cwd: cwd.to_string(),
         status: SessionStatus::Running,
@@ -3977,9 +4180,9 @@ fn resolve_session_mention(
 
 fn handover_reference_startup_prompt(path: &Path, session_id: &str) -> String {
     format!(
-        "Initialization step for this new session: read only this exact handover file now: {}. This single-file read is explicitly allowed. Do not list/search directories, do not use glob patterns, and do not read any other files during this initialization turn. After loading that single file, reply exactly: \"Context loaded. Waiting for your instruction.\" and wait for the next user message. Crucially, this constraint applies ONLY to this first startup turn; in all subsequent turns, you must fully use your normal tools, file reading, and directory search capabilities to assist the user.\n<!-- waypoint_session_id: {} -->",
+        "Initialization step for this new session: read only this exact handover file now: {}. This single-file read is explicitly allowed. Do not list/search directories, do not use glob patterns, and do not read any other files during this initialization turn. After loading that single file, reply exactly: \"Context loaded. Waiting for your instruction.\" and wait for the next user message. Crucially, this constraint applies ONLY to this first startup turn; in all subsequent turns, you must fully use your normal tools, file reading, and directory search capabilities to assist the user.{}",
         path.display(),
-        session_id
+        invisible_session_marker(session_id)
     )
 }
 
@@ -4036,10 +4239,18 @@ You are continuing work from another local agent session inside waypoint.
 - 无需重复执行已完成的步骤或重新初始化。
 "#,
         source_agent = source.agent_name,
-        source_title = if source.title.trim().is_empty() { &source.id } else { source.title.trim() },
+        source_title = if source.title.trim().is_empty() {
+            &source.id
+        } else {
+            source.title.trim()
+        },
         source_cwd = source.cwd,
         target_agent = target.agent_name,
-        target_title = if target.title.trim().is_empty() { &target.id } else { target.title.trim() },
+        target_title = if target.title.trim().is_empty() {
+            &target.id
+        } else {
+            target.title.trim()
+        },
         target_cwd = target.cwd,
         note = note_text,
         inherited_handover = empty_fallback(inherited_handover, "无前序继承的会话记录。"),
@@ -4095,10 +4306,18 @@ You are continuing work from another local agent session inside waypoint.
 - 无需重复执行已完成的步骤或重新初始化。
 "#,
         source_agent = source.agent_name,
-        source_title = if source.title.trim().is_empty() { &source.id } else { source.title.trim() },
+        source_title = if source.title.trim().is_empty() {
+            &source.id
+        } else {
+            source.title.trim()
+        },
         source_cwd = source.cwd,
         target_agent = target.agent_name,
-        target_title = if target.title.trim().is_empty() { &target.id } else { target.title.trim() },
+        target_title = if target.title.trim().is_empty() {
+            &target.id
+        } else {
+            target.title.trim()
+        },
         target_cwd = target.cwd,
         note = note_text,
         full_evidence = format_full_evidence_reference(evidence_path),
@@ -4146,10 +4365,18 @@ fn build_full_handover_evidence(
 ```
 "#,
         source_agent = source.agent_name,
-        source_title = if source.title.trim().is_empty() { &source.id } else { source.title.trim() },
+        source_title = if source.title.trim().is_empty() {
+            &source.id
+        } else {
+            source.title.trim()
+        },
         source_cwd = source.cwd,
         target_agent = target.agent_name,
-        target_title = if target.title.trim().is_empty() { &target.id } else { target.title.trim() },
+        target_title = if target.title.trim().is_empty() {
+            &target.id
+        } else {
+            target.title.trim()
+        },
         target_cwd = target.cwd,
         note = note_text,
         inherited_handover = empty_fallback(inherited_handover, "无前序继承的会话记录。"),
@@ -4202,9 +4429,9 @@ fn format_ordered_conversation_timeline(
 
 fn format_full_evidence_reference(evidence_path: Option<&str>) -> String {
     match evidence_path {
-        Some(path) => format!(
-            "## 📦 完整证据归档 (Full Evidence)\n更完整的原始证据文件已归档至 `{path}`。"
-        ),
+        Some(path) => {
+            format!("## 📦 完整证据归档 (Full Evidence)\n更完整的原始证据文件已归档至 `{path}`。")
+        }
         None => String::new(),
     }
 }
@@ -4500,8 +4727,12 @@ fn native_transcript_path(
             if !native_id.is_empty() {
                 find_codex_native_transcript_path(native_id)
             } else {
-                find_codex_session_by_marker(&source_info.id)
-                    .or_else(|| find_latest_codex_native_transcript_path(&source_info.cwd, source_info.created_at))
+                find_codex_session_by_marker(&source_info.id).or_else(|| {
+                    find_latest_codex_native_transcript_path(
+                        &source_info.cwd,
+                        source_info.created_at,
+                    )
+                })
             }
         }
         NativeTranscriptKind::Agy => {
@@ -4522,7 +4753,6 @@ fn find_agy_conversation_id(session_id: &str) -> Option<String> {
     if !brain_dir.is_dir() {
         return None;
     }
-    let pattern = format!("waypoint_session_id: {session_id}");
     let entries = fs::read_dir(brain_dir).ok()?;
     let mut dirs: Vec<_> = entries
         .filter_map(Result::ok)
@@ -4550,7 +4780,7 @@ fn find_agy_conversation_id(session_id: &str) -> Option<String> {
                 let reader = BufReader::new(file);
                 for line in reader.lines().take(50) {
                     if let Ok(line_content) = line {
-                        if line_content.contains(&pattern) {
+                        if contains_session_marker(&line_content, session_id) {
                             return path
                                 .file_name()
                                 .map(|name| name.to_string_lossy().into_owned());
@@ -4791,13 +5021,12 @@ fn find_codex_session_by_marker(session_id: &str) -> Option<PathBuf> {
     });
     candidates.reverse();
 
-    let pattern = format!("waypoint_session_id: {session_id}");
     for path in candidates.into_iter().take(30) {
         if let Ok(file) = File::open(&path) {
             let reader = BufReader::new(file);
             for line in reader.lines().take(50) {
                 if let Ok(line_content) = line {
-                    if line_content.contains(&pattern) {
+                    if contains_session_marker(&line_content, session_id) {
                         return Some(path);
                     }
                 }
@@ -4847,8 +5076,7 @@ fn find_latest_codex_native_transcript_path(cwd: &str, created_at: u64) -> Optio
         .filter(|path| codex_transcript_matches_workspace(path, cwd, normalized_cwd.as_deref()))
         .filter_map(|path| {
             // Birth time is stable; fall back to modified time if unavailable.
-            let born_at = path_created_secs(&path)
-                .or_else(|| path_modified_secs(&path))?;
+            let born_at = path_created_secs(&path).or_else(|| path_modified_secs(&path))?;
             // Exclude transcripts that were already old (> 30 s) before this session started.
             if born_at.saturating_add(30) < created_at {
                 return None;
@@ -5121,6 +5349,54 @@ fn is_native_system_noise(content: &str) -> bool {
         || trimmed.starts_with("<local-command-stderr>")
 }
 
+fn sqlite_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn query_opencode_session_id(query: &str) -> Option<String> {
+    let db_path = home_dir()?.join(".local/share/opencode/opencode.db");
+    if !db_path.is_file() {
+        return None;
+    }
+
+    let output = Command::new("sqlite3")
+        .arg("-json")
+        .arg(db_path)
+        .arg(query)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let rows: Vec<Value> = serde_json::from_slice(&output.stdout).ok()?;
+    rows.first()
+        .and_then(|row| row.get("id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn find_opencode_session_id_by_marker(session_id: &str) -> Option<String> {
+    let marker = sqlite_string_literal(&invisible_session_marker(session_id));
+    let legacy_marker = sqlite_string_literal(&format!("waypoint_session_id: {session_id}"));
+    query_opencode_session_id(&format!(
+        "SELECT p.session_id AS id FROM part p \
+         WHERE json_extract(p.data, '$.type') = 'text' \
+           AND (instr(json_extract(p.data, '$.text'), {marker}) > 0 \
+                OR instr(json_extract(p.data, '$.text'), {legacy_marker}) > 0) \
+         ORDER BY p.time_created ASC LIMIT 1;"
+    ))
+}
+
+fn find_latest_opencode_session_id(cwd: &str) -> Option<String> {
+    let cwd = sqlite_string_literal(cwd);
+    query_opencode_session_id(&format!(
+        "SELECT id FROM session WHERE directory = {cwd} ORDER BY time_created DESC LIMIT 1;"
+    ))
+}
+
 fn fetch_opencode_native_messages(
     cwd: &str,
     native_id: Option<&str>,
@@ -5140,7 +5416,7 @@ fn fetch_opencode_native_messages(
              FROM message m JOIN part p ON p.message_id = m.id \
              WHERE m.session_id = {} AND json_extract(p.data, '$.type') = 'text' \
              ORDER BY m.time_created ASC, p.time_created ASC;",
-            shell_quote(id)
+            sqlite_string_literal(id)
         )
     } else {
         format!(
@@ -5149,7 +5425,7 @@ fn fetch_opencode_native_messages(
              WHERE m.session_id = (SELECT id FROM session WHERE directory = {} ORDER BY time_created DESC LIMIT 1) \
                AND json_extract(p.data, '$.type') = 'text' \
              ORDER BY m.time_created ASC, p.time_created ASC;",
-            shell_quote(cwd)
+            sqlite_string_literal(cwd)
         )
     };
 
@@ -5303,10 +5579,28 @@ fn clean_handover_text_minimal(content: &str, limit: usize) -> String {
 }
 
 fn extract_submitted_user_inputs(pending: &mut String, data: &str) -> Vec<String> {
+    extract_submitted_user_inputs_with_boundaries(pending, data)
+        .into_iter()
+        .map(|(input, _)| input)
+        .collect()
+}
+
+fn first_submitted_input_boundary(pending: &str, data: &str) -> Option<usize> {
+    let mut pending = pending.to_string();
+    extract_submitted_user_inputs_with_boundaries(&mut pending, data)
+        .into_iter()
+        .next()
+        .map(|(_, boundary)| boundary)
+}
+
+fn extract_submitted_user_inputs_with_boundaries(
+    pending: &mut String,
+    data: &str,
+) -> Vec<(String, usize)> {
     let mut submitted = Vec::new();
     let mut ignoring_escape = false;
 
-    for ch in data.chars() {
+    for (index, ch) in data.char_indices() {
         if ignoring_escape {
             if ch.is_ascii_alphabetic() || ch == '~' {
                 ignoring_escape = false;
@@ -5322,7 +5616,7 @@ fn extract_submitted_user_inputs(pending: &mut String, data: &str) -> Vec<String
                 let candidate = pending.trim().to_string();
                 pending.clear();
                 if !candidate.is_empty() {
-                    submitted.push(candidate);
+                    submitted.push((candidate, index));
                 }
             }
             '\u{7f}' | '\u{8}' => {
@@ -5416,6 +5710,31 @@ fn normalize_session_title(value: &str) -> String {
         "{}...",
         collapsed.chars().take(45).collect::<String>().trim_end()
     )
+}
+
+fn normalize_requested_session_id(value: Option<String>) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Uuid::parse_str(trimmed)
+        .map(|id| Some(id.to_string()))
+        .map_err(|_| "invalid session id".to_string())
+}
+
+fn normalize_requested_session_title(value: &str) -> Result<String, String> {
+    let normalized = normalize_session_title(value);
+    if normalized.is_empty() {
+        return Err("session title cannot be empty".to_string());
+    }
+    Ok(normalized)
+}
+
+fn default_session_title(agent_name: &str, session_id: &str) -> String {
+    format!("{} {}", agent_name, &session_id[..session_id.len().min(8)])
 }
 
 fn clean_chat_chunk(raw: &str) -> String {
@@ -6148,6 +6467,75 @@ mod tests {
     }
 
     #[test]
+    fn test_insert_terminal_session_marker_before_enter() {
+        let marker = invisible_session_marker("test-session");
+
+        assert_eq!(
+            insert_terminal_session_marker("hello", "\r", "test-session"),
+            Some(format!("{marker}\r"))
+        );
+        assert_eq!(
+            insert_terminal_session_marker("", "hello\r", "test-session"),
+            Some(format!("hello{marker}\r"))
+        );
+        assert_eq!(
+            insert_terminal_session_marker("", "hello\r\n", "test-session"),
+            Some(format!("hello{marker}\r\n"))
+        );
+        assert_eq!(
+            insert_terminal_session_marker("", "\rhello\r", "test-session"),
+            Some(format!("\rhello{marker}\r"))
+        );
+        assert_eq!(
+            insert_terminal_session_marker("", "hello", "test-session"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_invisible_session_marker_is_tag_encoded_and_backward_compatible() {
+        let marker = invisible_session_marker("test-session");
+        let decoded = marker
+            .chars()
+            .skip(1)
+            .take_while(|character| *character != '\u{E007F}')
+            .filter_map(|character| {
+                let codepoint = u32::from(character).checked_sub(0xE0000)?;
+                char::from_u32(codepoint)
+            })
+            .collect::<String>();
+
+        assert_eq!(decoded, "waypoint_session_id:test-session");
+        assert!(!marker.contains("waypoint_session_id"));
+        assert!(contains_session_marker(
+            &format!("hello{marker}"),
+            "test-session"
+        ));
+        assert!(contains_session_marker(
+            "hello<!-- waypoint_session_id: test-session -->",
+            "test-session"
+        ));
+
+        let escaped_marker = marker
+            .encode_utf16()
+            .map(|unit| format!("\\u{unit:04x}"))
+            .collect::<String>();
+        assert!(contains_session_marker(
+            &format!(r#"{{"text":"hello{escaped_marker}"}}"#),
+            "test-session"
+        ));
+    }
+
+    #[test]
+    fn test_terminal_session_marker_agents() {
+        assert!(agent_uses_terminal_session_marker("agy"));
+        assert!(agent_uses_terminal_session_marker("codex"));
+        assert!(agent_uses_terminal_session_marker("opencode"));
+        assert!(!agent_uses_terminal_session_marker("claude-code"));
+        assert!(!agent_uses_terminal_session_marker("copilot"));
+    }
+
+    #[test]
     fn test_merge_assistant_output_keeps_existing_when_repaint_is_suffix_fragment() {
         let existing = "要我帮你生成一份CLAUDE.md模板，或者直接改成方案3的自动推断？";
         let chunk = "份CLAUDE.md模板，或者直接改成方案3的自动推断？";
@@ -6333,8 +6721,15 @@ mod tests {
         ];
 
         assert_eq!(
-            resolve_session_mention("@@\"Security Reviewer\" check authorization logic", &candidates).unwrap(),
-            ("spaces".to_string(), "check authorization logic".to_string())
+            resolve_session_mention(
+                "@@\"Security Reviewer\" check authorization logic",
+                &candidates
+            )
+            .unwrap(),
+            (
+                "spaces".to_string(),
+                "check authorization logic".to_string()
+            )
         );
         assert_eq!(
             resolve_session_mention("@@'Codex Pro' review diff", &candidates).unwrap(),
@@ -6413,6 +6808,85 @@ mod tests {
             assert!(context.contains("User:"));
             assert!(!context.contains("[truncated to last"));
         }
+    }
+
+    #[test]
+    fn test_opencode_marker_resolves_and_corrects_cached_session_id() {
+        let _guard = HOME_MUTEX.lock().unwrap();
+        let old_home = env::var("HOME").ok();
+        let root = env::temp_dir().join(format!("waypoint-test-opencode-{}", Uuid::new_v4()));
+        let db_dir = root.join(".local/share/opencode");
+        fs::create_dir_all(&db_dir).unwrap();
+        env::set_var("HOME", &root);
+
+        let session_id = "waypoint-session-123";
+        let native_id = "opencode-native-correct";
+        let marker = invisible_session_marker(session_id);
+        let db_path = db_dir.join("opencode.db");
+        let sql = format!(
+            r#"
+            CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, time_created INTEGER);
+            CREATE TABLE part (session_id TEXT, time_created INTEGER, data TEXT);
+            INSERT INTO session VALUES ('opencode-native-stale', '/tmp/workspace', 1);
+            INSERT INTO session VALUES ('{native_id}', '/tmp/workspace', 2);
+            INSERT INTO part VALUES (
+                '{native_id}',
+                3,
+                json_object('type', 'text', 'text', 'hello{marker}')
+            );
+            "#
+        );
+        let status = Command::new("sqlite3")
+            .arg(&db_path)
+            .arg(sql)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            find_opencode_session_id_by_marker(session_id),
+            Some(native_id.to_string())
+        );
+
+        let mut meta = SessionMeta {
+            id: session_id.to_string(),
+            agent_id: "opencode".to_string(),
+            agent_name: "OpenCode".to_string(),
+            title: "OpenCode session".to_string(),
+            command: "opencode".to_string(),
+            cwd: "/tmp/workspace".to_string(),
+            status: SessionStatus::Exited,
+            attached: false,
+            created_at: 1,
+            last_active_at: 1,
+            first_user_message: Some("hello".to_string()),
+            native_session_ref: Some(NativeSessionRef {
+                provider: "opencode".to_string(),
+                id: Some("opencode-native-stale".to_string()),
+                name: None,
+                project: None,
+                resume_command: Some("opencode --session='opencode-native-stale'".to_string()),
+                transcript_path: None,
+                discovered_at: 1,
+            }),
+            parent_session_id: None,
+            handover_root_id: None,
+            dangerous: false,
+            none_workspace: false,
+        };
+        assert!(cache_opencode_resume_ref_in_meta(&mut meta));
+        let native_ref = meta.native_session_ref.unwrap();
+        assert_eq!(native_ref.id, Some(native_id.to_string()));
+        assert_eq!(
+            native_ref.resume_command,
+            Some(format!("opencode --session='{}'", native_id))
+        );
+
+        if let Some(home) = old_home {
+            env::set_var("HOME", home);
+        } else {
+            env::remove_var("HOME");
+        }
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -6622,7 +7096,10 @@ older handover context
         let transcript_path = log_dir.join("transcript.jsonl");
         fs::write(
             &transcript_path,
-            format!("some log lines\nwaypoint_session_id: {session_id}\nmore lines"),
+            format!(
+                "some log lines\n{}\nmore lines",
+                invisible_session_marker(session_id)
+            ),
         )
         .unwrap();
 
@@ -6970,7 +7447,11 @@ Resume in the same project: agy --conversation=c79caf4a-cdf9-4b20-a2fb-e6143ba1d
         apply_dangerous_flag("opencode", &mut opencode_args);
         assert_eq!(opencode_args, vec!["--auto", "--prompt", "prompt"]);
 
-        let mut copilot_args = vec!["copilot".to_string(), "-i".to_string(), "prompt".to_string()];
+        let mut copilot_args = vec![
+            "copilot".to_string(),
+            "-i".to_string(),
+            "prompt".to_string(),
+        ];
         apply_dangerous_flag("copilot", &mut copilot_args);
         assert_eq!(
             copilot_args,
@@ -7001,6 +7482,75 @@ Resume in the same project: agy --conversation=c79caf4a-cdf9-4b20-a2fb-e6143ba1d
         assert!(inputs.contains("用户追问"));
         assert!(!context.contains("duplicated event"));
         assert!(!context.contains("hidden"));
+    }
+
+    #[test]
+    fn test_codex_marker_corrects_heuristic_cached_transcript() {
+        let _guard = HOME_MUTEX.lock().unwrap();
+        let old_home = env::var("HOME").ok();
+        let root = env::temp_dir().join(format!("waypoint-test-codex-marker-{}", Uuid::new_v4()));
+        let sessions_dir = root.join(".codex/sessions/2026/08/19");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        env::set_var("HOME", &root);
+
+        let waypoint_id = "waypoint-codex-123";
+        let stale_path = sessions_dir.join("rollout-native-stale.jsonl");
+        let correct_path = sessions_dir.join("rollout-native-correct.jsonl");
+        fs::write(
+            &stale_path,
+            r#"{"type":"session_meta","payload":{"id":"native-stale","cwd":"/tmp/workspace"}}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            &correct_path,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"native-correct\",\"cwd\":\"/tmp/workspace\"}}}}\n{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"hello{}\"}}]}}}}\n",
+                invisible_session_marker(waypoint_id)
+            ),
+        )
+        .unwrap();
+
+        let mut meta = SessionMeta {
+            id: waypoint_id.to_string(),
+            agent_id: "codex".to_string(),
+            agent_name: "Codex".to_string(),
+            title: "Codex session".to_string(),
+            command: "codex".to_string(),
+            cwd: "/tmp/workspace".to_string(),
+            status: SessionStatus::Running,
+            attached: false,
+            created_at: 1,
+            last_active_at: 1,
+            first_user_message: Some("hello".to_string()),
+            native_session_ref: Some(NativeSessionRef {
+                provider: "codex".to_string(),
+                id: Some("native-stale".to_string()),
+                name: None,
+                project: None,
+                resume_command: Some("codex resume 'native-stale'".to_string()),
+                transcript_path: Some(stale_path.to_string_lossy().into_owned()),
+                discovered_at: 1,
+            }),
+            parent_session_id: None,
+            handover_root_id: None,
+            dangerous: false,
+            none_workspace: false,
+        };
+        assert!(cache_codex_resume_ref_in_meta(&mut meta));
+        let native_ref = meta.native_session_ref.unwrap();
+        assert_eq!(native_ref.id, Some("native-correct".to_string()));
+        assert_eq!(
+            native_ref.transcript_path,
+            Some(correct_path.to_string_lossy().into_owned())
+        );
+
+        if let Some(home) = old_home {
+            env::set_var("HOME", home);
+        } else {
+            env::remove_var("HOME");
+        }
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

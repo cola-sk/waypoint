@@ -83,6 +83,24 @@ function formatHandoverChars(value: number) {
   return `${value} chars`;
 }
 
+function createDraftSessionId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+  return "00000000-0000-4000-8000-000000000000";
+}
+
+function defaultSessionTitle(agentName: string, sessionId: string) {
+  return `${agentName} ${sessionId.slice(0, 8)}`;
+}
+
 function formatFileSize(bytes: number) {
   if (bytes >= 1024 * 1024) {
     return `${(bytes / 1024 / 1024).toFixed(bytes >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
@@ -561,6 +579,9 @@ function App() {
   const [handoverMode, setHandoverMode] = useState<"new" | "existing" | "copy">("new");
   const [continueAgentId, setContinueAgentId] = useState("codex");
   const [continueWorkspacePath, setContinueWorkspacePath] = useState("");
+  const [continueSessionId, setContinueSessionId] = useState("");
+  const [continueSessionTitle, setContinueSessionTitle] = useState("");
+  const [continueSessionTitleEdited, setContinueSessionTitleEdited] = useState(false);
   const [continueDangerous, setContinueDangerous] = useState(false);
   const [existingTargetSessionId, setExistingTargetSessionId] = useState("");
   const [handoverNote, setHandoverNote] = useState("");
@@ -583,6 +604,9 @@ function App() {
   const [isDeletingSession, setIsDeletingSession] = useState(false);
   const [removeWorkspaceTarget, setRemoveWorkspaceTarget] = useState<WorkspaceFolder | null>(null);
   const [newConversationOpen, setNewConversationOpen] = useState(false);
+  const [newConversationSessionId, setNewConversationSessionId] = useState("");
+  const [newConversationTitle, setNewConversationTitle] = useState("");
+  const [newConversationTitleEdited, setNewConversationTitleEdited] = useState(false);
   const [newConversationWorkspaceValue, setNewConversationWorkspaceValue] =
     useState<string>(NONE_WORKSPACE_VALUE);
   const [newConversationCustomWorkspace, setNewConversationCustomWorkspace] = useState("");
@@ -1177,6 +1201,11 @@ function App() {
     setSelectedAgentId(firstAvailableAgent);
     setNewConversationWorkspaceValue(normalizedWorkspaceValue || NONE_WORKSPACE_VALUE);
     setNewConversationCustomWorkspace("");
+    const draftSessionId = createDraftSessionId();
+    const draftAgent = agents.find((agent) => agent.id === firstAvailableAgent);
+    setNewConversationSessionId(draftSessionId);
+    setNewConversationTitle(defaultSessionTitle(draftAgent?.name ?? firstAvailableAgent, draftSessionId));
+    setNewConversationTitleEdited(false);
     setNewConversationDangerous(false);
     setNewConversationOpen(true);
   }
@@ -1185,6 +1214,11 @@ function App() {
     setError(null);
     if (!selectedAgentId) {
       setError("请先选择 Agent。");
+      return;
+    }
+    const sessionTitle = newConversationTitle.trim();
+    if (!sessionTitle) {
+      setError("会话名不能为空。");
       return;
     }
     const useNoneWorkspace = newConversationWorkspaceValue === NONE_WORKSPACE_VALUE;
@@ -1209,6 +1243,8 @@ function App() {
         launchPath,
         newConversationDangerous,
         useNoneWorkspace,
+        sessionTitle,
+        newConversationSessionId,
       );
       if (!useNoneWorkspace) {
         rememberNewConversationWorkspace(session.cwd);
@@ -1299,6 +1335,11 @@ function App() {
       "claude-code";
     setContinueAgentId(firstAvailableAgent);
     setContinueWorkspacePath(activeSession?.cwd ?? workspacePath);
+    const draftSessionId = createDraftSessionId();
+    const draftAgent = agents.find((agent) => agent.id === firstAvailableAgent);
+    setContinueSessionId(draftSessionId);
+    setContinueSessionTitle(defaultSessionTitle(draftAgent?.name ?? firstAvailableAgent, draftSessionId));
+    setContinueSessionTitleEdited(false);
     setContinueDangerous(Boolean(activeSession?.dangerous && supportsDangerousFlag(firstAvailableAgent)));
     const preferredRelatedSession =
       relatedRunningSessions.find((session) => session.id === activeSession?.parentSessionId) ??
@@ -1375,6 +1416,10 @@ function App() {
   async function handleContinue() {
     if (!activeSessionId) return;
     if (handoverMode === "new" && (!continueAgentId || !continueWorkspacePath.trim())) return;
+    if (handoverMode === "new" && !continueSessionTitle.trim()) {
+      setError("会话名不能为空。");
+      return;
+    }
     if (handoverMode === "existing" && !existingTargetSessionId) return;
     if (handoverPromptEdited && !handoverPromptEdit.trim()) {
       setError("Handover Markdown 不能为空。");
@@ -1430,6 +1475,8 @@ function App() {
           handoverContentMode,
           editedPrompt,
           continueDangerous,
+          continueSessionTitle,
+          continueSessionId,
         );
         revealWorkspacePath(result.targetSession.cwd);
         setHandoverResult(result);
@@ -1479,6 +1526,7 @@ function App() {
         targetSessionId: handoverMode === "existing" ? existingTargetSessionId : null,
         targetAgentId: handoverMode === "new" ? continueAgentId : null,
         cwd: handoverMode === "new" ? continueWorkspacePath.trim() : null,
+        targetTitle: handoverMode === "new" ? continueSessionTitle.trim() : null,
         note: handoverNote,
         handoverMode: handoverContentMode,
       })
@@ -1507,6 +1555,7 @@ function App() {
   }, [
     activeSessionId,
     continueAgentId,
+    continueSessionTitle,
     continueWorkspacePath,
     existingTargetSessionId,
     handoverContentMode,
@@ -2533,7 +2582,16 @@ function App() {
                 <select
                   id="new-conversation-agent"
                   value={selectedAgentId}
-                  onChange={(event) => setSelectedAgentId(event.target.value)}
+                  onChange={(event) => {
+                    const nextAgentId = event.target.value;
+                    setSelectedAgentId(nextAgentId);
+                    if (!newConversationTitleEdited) {
+                      const nextAgent = agents.find((agent) => agent.id === nextAgentId);
+                      setNewConversationTitle(
+                        defaultSessionTitle(nextAgent?.name ?? nextAgentId, newConversationSessionId),
+                      );
+                    }
+                  }}
                 >
                   {agents.map((agent) => (
                     <option key={agent.id} value={agent.id} disabled={!agent.available}>
@@ -2547,6 +2605,23 @@ function App() {
               <div className="agent-status">
                 <span className={`status-dot ${newConversationAgent?.available ? "running" : "error"}`} />
                 <span>{newConversationAgent?.resolvedCommand ?? newConversationAgent?.command ?? "Detecting..."}</span>
+              </div>
+
+              <div className="field">
+                <label htmlFor="new-conversation-title">
+                  <MessageSquare aria-hidden="true" size={14} />
+                  <span>会话名</span>
+                </label>
+                <input
+                  id="new-conversation-title"
+                  value={newConversationTitle}
+                  onChange={(event) => {
+                    setNewConversationTitleEdited(true);
+                    setNewConversationTitle(event.target.value);
+                  }}
+                  placeholder="Agent name"
+                  maxLength={48}
+                />
               </div>
 
               {supportsDangerousFlag(selectedAgentId) ? (
@@ -2808,6 +2883,12 @@ function App() {
                         const nextAgentId = event.target.value;
                         setHandoverResult(null);
                         setContinueAgentId(nextAgentId);
+                        if (!continueSessionTitleEdited) {
+                          const nextAgent = agents.find((agent) => agent.id === nextAgentId);
+                          setContinueSessionTitle(
+                            defaultSessionTitle(nextAgent?.name ?? nextAgentId, continueSessionId),
+                          );
+                        }
                         setContinueDangerous((prev) => prev && supportsDangerousFlag(nextAgentId));
                       }}
                     >
@@ -2875,6 +2956,24 @@ function App() {
                         <FolderOpen size={14} />
                       </button>
                     </div>
+                  </div>
+
+                  <div className="field">
+                    <label htmlFor="continue-session-title">
+                      <MessageSquare aria-hidden="true" size={14} />
+                      <span>会话名</span>
+                    </label>
+                    <input
+                      id="continue-session-title"
+                      value={continueSessionTitle}
+                      onChange={(event) => {
+                        setHandoverResult(null);
+                        setContinueSessionTitleEdited(true);
+                        setContinueSessionTitle(event.target.value);
+                      }}
+                      placeholder="Agent name"
+                      maxLength={48}
+                    />
                   </div>
                 </>
               ) : handoverMode === "existing" ? (
