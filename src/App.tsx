@@ -111,6 +111,9 @@ function isImagePreview(file: FilePreview | null) {
 const DANGEROUS_FLAGS: Record<string, string> = {
   "claude-code": "--dangerously-skip-permissions",
   codex: "--dangerously-bypass-approvals-and-sandbox",
+  agy: "--dangerously-skip-permissions",
+  opencode: "--auto",
+  copilot: "--yolo",
 };
 
 function supportsDangerousFlag(agentId: string): boolean {
@@ -558,6 +561,7 @@ function App() {
   const [handoverMode, setHandoverMode] = useState<"new" | "existing" | "copy">("new");
   const [continueAgentId, setContinueAgentId] = useState("codex");
   const [continueWorkspacePath, setContinueWorkspacePath] = useState("");
+  const [continueDangerous, setContinueDangerous] = useState(false);
   const [existingTargetSessionId, setExistingTargetSessionId] = useState("");
   const [handoverNote, setHandoverNote] = useState("");
   const [handoverContentMode, setHandoverContentMode] = useState<HandoverContentMode>("recommended");
@@ -1295,6 +1299,7 @@ function App() {
       "claude-code";
     setContinueAgentId(firstAvailableAgent);
     setContinueWorkspacePath(activeSession?.cwd ?? workspacePath);
+    setContinueDangerous(Boolean(activeSession?.dangerous && supportsDangerousFlag(firstAvailableAgent)));
     const preferredRelatedSession =
       relatedRunningSessions.find((session) => session.id === activeSession?.parentSessionId) ??
       relatedRunningSessions[0];
@@ -1424,6 +1429,7 @@ function App() {
           handoverNote,
           handoverContentMode,
           editedPrompt,
+          continueDangerous,
         );
         revealWorkspacePath(result.targetSession.cwd);
         setHandoverResult(result);
@@ -2799,8 +2805,10 @@ function App() {
                       id="continue-agent"
                       value={continueAgentId}
                       onChange={(event) => {
+                        const nextAgentId = event.target.value;
                         setHandoverResult(null);
-                        setContinueAgentId(event.target.value);
+                        setContinueAgentId(nextAgentId);
+                        setContinueDangerous((prev) => prev && supportsDangerousFlag(nextAgentId));
                       }}
                     >
                       {agents.map((agent) => (
@@ -2816,6 +2824,28 @@ function App() {
                     <span className={`status-dot ${continueAgent?.available ? "running" : "error"}`} />
                     <span>{continueAgent?.resolvedCommand ?? continueAgent?.command ?? "Detecting..."}</span>
                   </div>
+
+                  {supportsDangerousFlag(continueAgentId) ? (
+                    <div className="checkbox-field">
+                      <label htmlFor="continue-dangerous" className="checkbox-label">
+                        <input
+                          id="continue-dangerous"
+                          type="checkbox"
+                          checked={continueDangerous}
+                          onChange={(event) => {
+                            setHandoverResult(null);
+                            setContinueDangerous(event.target.checked);
+                          }}
+                        />
+                        <span>
+                          跳过权限确认（{dangerousFlagLabel(continueAgentId)}）
+                          <span className="checkbox-hint">
+                            危险：将跳过该 Agent 的工具调用确认。请仅在可信工作区使用。
+                          </span>
+                        </span>
+                      </label>
+                    </div>
+                  ) : null}
 
                   <div className="field">
                     <label htmlFor="continue-workspace">

@@ -98,6 +98,57 @@ npm run tauri:build
 
 ---
 
+## 🔬 原生会话集成与技术细节
+
+### 1. 创建时指定 Session ID 支持情况与会话关联恢复机制
+
+Waypoint 统一使用 UUID 跟踪管理会话生命周期。针对不同 Agent CLI 的支持特性，采用两种不同的关联与恢复模式：
+
+| Agent | 创建时支持指定 Session ID | 原生存储位置 | Waypoint 关联手段 | 原生唤醒恢复命令 (Native Resume) |
+| :--- | :---: | :--- | :--- | :--- |
+| **Claude Code** | ✅ **支持** (`--session-id <id>`) | `~/.claude/projects/<project>/<id>.jsonl` | 启动时由 Waypoint 生成并直接传入 UUID | `claude --resume=<id>` |
+| **GitHub Copilot** | ✅ **支持** (`--session-id=<id>`) | `~/.copilot/` | 启动时由 Waypoint 生成并直接传入 UUID | `copilot --resume=<id>` |
+| **Codex CLI** | ❌ 不支持（内部自动生成） | `~/.codex/sessions/YYYY-MM-DD/rollout-<id>.jsonl` | ① Handover Marker 比对<br>② CWD + 文件创建时间戳就近比对 | `codex resume <id>` |
+| **Antigravity CLI** | ❌ 不支持（内部自动生成） | `~/.gemini/antigravity-cli/brain/<id>/` | ① 首条提问 HTML 注释 Marker<br>② 终端 Resume 命令特征字符串解析 | `agy --conversation=<id> --project=<proj>` |
+| **OpenCode** | ❌ 不支持（内部自动生成） | `~/.local/share/opencode/opencode.db` (SQLite) | 查询同工作区 `directory` 下最新创建的 `session.id` | N/A（直接载入最新会话） |
+| **系统 Shell** | ➖ 不适用 | N/A | 纯 PTY 伪终端会话 | `$SHELL` |
+
+---
+
+### 2. 支持的 Agent 危险模式（Dangerous Flag）支持矩阵
+
+在创建会话或执行 Handover 移交时，若开启危险模式（自动跳过权限确认与审批），Waypoint 会根据 Agent 类型自动附加对应的 CLI 标志：
+
+| Agent | 危险模式 CLI 参数 | 作用与行为说明 |
+| :--- | :--- | :--- |
+| **Claude Code** | `--dangerously-skip-permissions` | 跳过执行文件编辑、Bash 命令时的权限确认提示 |
+| **Codex CLI** | `--dangerously-bypass-approvals-and-sandbox` | 跳过沙箱审批提示，直接执行写入与修改 |
+| **Antigravity CLI** | `--dangerously-skip-permissions` | 自动批准工具调用与命令执行 |
+| **OpenCode** | `--auto` | 自动执行并接受工具调用计划 |
+| **GitHub Copilot** | `--yolo` | YOLO 自动确认模式 |
+
+---
+
+### 3. 非指定 Session ID Agent 的真实 ID 关联与捕获逻辑
+
+对于无法在创建时直接传入 `--session-id` 的 Agent，Waypoint 采用**特征标记注入 + 时间戳/工作区就近关联 + 本地数据库查询**三层捕获逻辑，并在首次交互后实现 $O(1)$ 绝对路径持久化缓存：
+
+#### ① Codex CLI
+* **Handover 移交会话**：在注入的 Prompt 开头附加隐藏标记 `waypoint_session_id: <waypoint-uuid>`，Codex 接收后写入 `rollout-*.jsonl` 首行。Waypoint 扫描文件前 50 行命中 marker 后，直接提取 `payload.id`。
+* **独立新建会话**：筛选同工作区（`payload.cwd`）下的所有 `rollout-*.jsonl`，比对文件诞生时间戳（Birth Time）与 Waypoint 会话创建时间戳，命中启动后 1~2 秒内创建的文件并提取 ID。
+
+#### ② Antigravity CLI (`agy`)
+* **用户提问 Marker 注入**：用户在终端输入首条消息时，Waypoint 静默追加 `<!-- waypoint_session_id: <waypoint-uuid> -->`，AGY 写入其 `brain/<id>/.system_generated/logs/transcript.jsonl` 后，Waypoint 遍历 `brain/` 目录命中该 marker 即可精准匹配 Conversation ID。
+* **终端输出字符串解析**：AGY 运行或退出时会在终端输出 `Resume in the same project: agy --conversation=<id> --project=<proj>`，Waypoint 的 PTY 输出流与 `transcript.log` 会正则实时提取参数。
+
+#### ③ OpenCode
+* **SQLite 本地数据库关联**：OpenCode 将元数据存放在 `~/.local/share/opencode/opencode.db`。Waypoint 通过本地 `sqlite3` 查询 `SELECT id FROM session WHERE directory = '<cwd>' ORDER BY time_created DESC LIMIT 1;` 快速关联原生 ID。
+
+#### 🚀 绝对路径缓存与持久化优化（Fast Path）
+一旦 Codex、AGY 或 Claude Code 的原生 ID 与文件被首次定位成功，Waypoint 会立即将其实际**绝对文件路径**（`transcript_path`）持久化写入 `~/.waypoint/sessions/<id>.json`。后续触发 `@@` 提及、Handover 上下文构建或 Resume 恢复时，**直接打开已缓存的文件路径（$O(1)$），完全消除重复的磁盘递归扫描**。
+
+---
+
 ## ❓ 常见问题排查
 
 #### 1. 为什么历史会话提示无法恢复？

@@ -104,6 +104,8 @@ pub struct NativeSessionRef {
     #[serde(default)]
     project: Option<String>,
     resume_command: Option<String>,
+    #[serde(default)]
+    transcript_path: Option<String>,
     discovered_at: u64,
 }
 
@@ -517,6 +519,7 @@ pub fn continue_session(
     note: Option<String>,
     handover_mode: Option<HandoverContentMode>,
     edited_prompt: Option<String>,
+    dangerous: Option<bool>,
     rows: Option<u16>,
     cols: Option<u16>,
 ) -> Result<HandoverResult, String> {
@@ -528,6 +531,7 @@ pub fn continue_session(
         note,
         handover_mode.unwrap_or_default(),
         edited_prompt,
+        dangerous,
         rows,
         cols,
     )
@@ -742,6 +746,7 @@ impl SessionManager {
                 name: None,
                 project: None,
                 resume_command: Some(format!("{} --resume={}", display_command, shell_quote(&id))),
+                transcript_path: None,
                 discovered_at: now,
             });
         }
@@ -751,12 +756,15 @@ impl SessionManager {
             && !claude_args_have_session_identity(&args)
         {
             append_claude_session_id(&mut args, &id);
+            let claude_path = find_claude_native_transcript_path(&cwd_path.to_string_lossy(), &id)
+                .map(|p| p.to_string_lossy().into_owned());
             native_session_ref = Some(NativeSessionRef {
                 provider: agent_id.to_string(),
                 id: Some(id.clone()),
                 name: None,
                 project: None,
                 resume_command: Some(format!("{} --resume={}", display_command, shell_quote(&id))),
+                transcript_path: claude_path,
                 discovered_at: now,
             });
         }
@@ -866,7 +874,7 @@ impl SessionManager {
                     Ok(0) => {
                         reader_session.finalize_open_assistant_message();
                         reader_session.mark_status(SessionStatus::Exited);
-                        cache_agy_resume_ref_on_session(&reader_session);
+                        resolve_and_cache_native_session_ref(&reader_session);
                         let _ = reader_app.emit(
                             "session:exited",
                             SessionEvent {
@@ -897,7 +905,7 @@ impl SessionManager {
                     Err(err) if err.raw_os_error() == Some(5) => {
                         reader_session.finalize_open_assistant_message();
                         reader_session.mark_status(SessionStatus::Exited);
-                        cache_agy_resume_ref_on_session(&reader_session);
+                        resolve_and_cache_native_session_ref(&reader_session);
                         let _ = reader_app.emit(
                             "session:exited",
                             SessionEvent {
@@ -909,7 +917,7 @@ impl SessionManager {
                     Err(err) => {
                         reader_session.finalize_open_assistant_message();
                         reader_session.mark_status(SessionStatus::Error);
-                        cache_agy_resume_ref_on_session(&reader_session);
+                        resolve_and_cache_native_session_ref(&reader_session);
                         let _ = reader_app.emit(
                             "session:error",
                             SessionErrorEvent {
@@ -1134,6 +1142,7 @@ impl SessionManager {
             .map_err(|err| format!("failed to write to PTY: {err}"))?;
         session.meta.lock().last_active_at = unix_timestamp();
         session.persist_meta();
+        resolve_and_cache_native_session_ref(&session);
         Ok(())
     }
 
@@ -1468,6 +1477,7 @@ impl SessionManager {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn continue_session(
         &self,
         app: AppHandle,
@@ -1477,6 +1487,7 @@ impl SessionManager {
         note: Option<String>,
         handover_mode: HandoverContentMode,
         edited_prompt: Option<String>,
+        dangerous: Option<bool>,
         rows: Option<u16>,
         cols: Option<u16>,
     ) -> Result<HandoverResult, String> {
@@ -1488,6 +1499,7 @@ impl SessionManager {
                 source_info.title
             ));
         }
+        let target_dangerous = dangerous.unwrap_or(source_info.dangerous);
 
         if target_agent_id == "agy" {
             return self.continue_agy_with_initial_prompt(
@@ -1498,6 +1510,7 @@ impl SessionManager {
                 note,
                 handover_mode,
                 edited_prompt.as_deref(),
+                target_dangerous,
                 rows,
                 cols,
             );
@@ -1512,6 +1525,7 @@ impl SessionManager {
                 note,
                 handover_mode,
                 edited_prompt.as_deref(),
+                target_dangerous,
                 rows,
                 cols,
             );
@@ -1526,6 +1540,7 @@ impl SessionManager {
                 note,
                 handover_mode,
                 edited_prompt.as_deref(),
+                target_dangerous,
                 rows,
                 cols,
             );
@@ -1540,6 +1555,7 @@ impl SessionManager {
                 note,
                 handover_mode,
                 edited_prompt.as_deref(),
+                target_dangerous,
                 rows,
                 cols,
             );
@@ -1554,44 +1570,16 @@ impl SessionManager {
                 note,
                 handover_mode,
                 edited_prompt.as_deref(),
+                target_dangerous,
                 rows,
                 cols,
             );
         }
 
-        let target_info = self.create_agent_session(
-            app,
-            target_agent_id,
-            cwd,
-            source_info.dangerous,
-            source_info.none_workspace,
-            rows,
-            cols,
-        )?;
-        let target = self.get(&target_info.id)?;
-        let handover = self.inject_handover(
-            &source,
-            &target,
-            note,
-            handover_mode,
-            edited_prompt.as_deref(),
-            true,
-        )?;
-        let target_info = target.info();
-
-        Ok(HandoverResult {
-            prompt: handover.prompt,
-            source_session: source_info,
-            target_session: target_info,
-            mode: "new-session".to_string(),
-            handover_mode: handover.effective_mode,
-            handover_path: Some(handover.main_path.display().to_string()),
-            evidence_path: handover
-                .evidence_path
-                .map(|path| path.display().to_string()),
-        })
+        Err(format!("unsupported continue target agent: {target_agent_id}"))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn continue_claude_with_initial_prompt(
         &self,
         app: AppHandle,
@@ -1601,6 +1589,7 @@ impl SessionManager {
         note: Option<String>,
         handover_mode: HandoverContentMode,
         edited_prompt: Option<&str>,
+        dangerous: bool,
         rows: Option<u16>,
         cols: Option<u16>,
     ) -> Result<HandoverResult, String> {
@@ -1628,7 +1617,7 @@ impl SessionManager {
             native_session_ref: None,
             parent_session_id: None,
             handover_root_id: None,
-            dangerous: source_info.dangerous,
+            dangerous,
             none_workspace: source_info.none_workspace,
         };
         let handover = self.write_handover_for(
@@ -1644,7 +1633,7 @@ impl SessionManager {
 
         let mut args = resolved.args;
         args.push(startup_prompt);
-        if source_info.dangerous {
+        if dangerous {
             apply_dangerous_flag(definition.id, &mut args);
         }
 
@@ -1672,7 +1661,7 @@ impl SessionManager {
                     .clone()
                     .unwrap_or(source_info.id.clone()),
             ),
-            source_info.dangerous,
+            dangerous,
             source_info.none_workspace,
         )?;
         let target = self.get(&target_info.id)?;
@@ -1693,6 +1682,7 @@ impl SessionManager {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn continue_agy_with_initial_prompt(
         &self,
         app: AppHandle,
@@ -1702,6 +1692,7 @@ impl SessionManager {
         note: Option<String>,
         handover_mode: HandoverContentMode,
         edited_prompt: Option<&str>,
+        dangerous: bool,
         rows: Option<u16>,
         cols: Option<u16>,
     ) -> Result<HandoverResult, String> {
@@ -1729,7 +1720,7 @@ impl SessionManager {
             native_session_ref: None,
             parent_session_id: None,
             handover_root_id: None,
-            dangerous: source_info.dangerous,
+            dangerous,
             none_workspace: source_info.none_workspace,
         };
         let handover = self.write_handover_for(
@@ -1749,6 +1740,9 @@ impl SessionManager {
         }
         args.push("--prompt-interactive".to_string());
         args.push(startup_prompt);
+        if dangerous {
+            apply_dangerous_flag(definition.id, &mut args);
+        }
         let target_info = self.spawn_session_with_identity(
             app,
             definition.id,
@@ -1766,9 +1760,14 @@ impl SessionManager {
             None,
             None,
             None,
-            None,
-            None,
-            source_info.dangerous,
+            Some(source_info.id.clone()),
+            Some(
+                source_info
+                    .handover_root_id
+                    .clone()
+                    .unwrap_or(source_info.id.clone()),
+            ),
+            dangerous,
             source_info.none_workspace,
         )?;
         let target = self.get(&target_info.id)?;
@@ -1789,6 +1788,7 @@ impl SessionManager {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn continue_codex_with_initial_prompt(
         &self,
         app: AppHandle,
@@ -1798,6 +1798,7 @@ impl SessionManager {
         note: Option<String>,
         handover_mode: HandoverContentMode,
         edited_prompt: Option<&str>,
+        dangerous: bool,
         rows: Option<u16>,
         cols: Option<u16>,
     ) -> Result<HandoverResult, String> {
@@ -1825,7 +1826,7 @@ impl SessionManager {
             native_session_ref: None,
             parent_session_id: None,
             handover_root_id: None,
-            dangerous: source_info.dangerous,
+            dangerous,
             none_workspace: source_info.none_workspace,
         };
         let handover = self.write_handover_for(
@@ -1845,7 +1846,7 @@ impl SessionManager {
             args.push(parent.to_string_lossy().into_owned());
         }
         args.push(startup_prompt);
-        if source_info.dangerous {
+        if dangerous {
             apply_dangerous_flag(definition.id, &mut args);
         }
 
@@ -1866,9 +1867,14 @@ impl SessionManager {
             None,
             None,
             None,
-            None,
-            None,
-            source_info.dangerous,
+            Some(source_info.id.clone()),
+            Some(
+                source_info
+                    .handover_root_id
+                    .clone()
+                    .unwrap_or(source_info.id.clone()),
+            ),
+            dangerous,
             source_info.none_workspace,
         )?;
         let target = self.get(&target_info.id)?;
@@ -1889,6 +1895,7 @@ impl SessionManager {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn continue_opencode_with_initial_prompt(
         &self,
         app: AppHandle,
@@ -1898,6 +1905,7 @@ impl SessionManager {
         note: Option<String>,
         handover_mode: HandoverContentMode,
         edited_prompt: Option<&str>,
+        dangerous: bool,
         rows: Option<u16>,
         cols: Option<u16>,
     ) -> Result<HandoverResult, String> {
@@ -1925,7 +1933,7 @@ impl SessionManager {
             native_session_ref: None,
             parent_session_id: None,
             handover_root_id: None,
-            dangerous: source_info.dangerous,
+            dangerous,
             none_workspace: source_info.none_workspace,
         };
         let handover = self.write_handover_for(
@@ -1942,6 +1950,9 @@ impl SessionManager {
         let mut args = resolved.args;
         args.push("--prompt".to_string());
         args.push(startup_prompt);
+        if dangerous {
+            apply_dangerous_flag(definition.id, &mut args);
+        }
 
         let target_info = self.spawn_session_with_identity(
             app,
@@ -1960,9 +1971,14 @@ impl SessionManager {
             None,
             None,
             None,
-            None,
-            None,
-            source_info.dangerous,
+            Some(source_info.id.clone()),
+            Some(
+                source_info
+                    .handover_root_id
+                    .clone()
+                    .unwrap_or(source_info.id.clone()),
+            ),
+            dangerous,
             source_info.none_workspace,
         )?;
         let target = self.get(&target_info.id)?;
@@ -1983,6 +1999,7 @@ impl SessionManager {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn continue_copilot_with_initial_prompt(
         &self,
         app: AppHandle,
@@ -1992,6 +2009,7 @@ impl SessionManager {
         note: Option<String>,
         handover_mode: HandoverContentMode,
         edited_prompt: Option<&str>,
+        dangerous: bool,
         rows: Option<u16>,
         cols: Option<u16>,
     ) -> Result<HandoverResult, String> {
@@ -2020,7 +2038,7 @@ impl SessionManager {
             native_session_ref: None,
             parent_session_id: None,
             handover_root_id: None,
-            dangerous: source_info.dangerous,
+            dangerous,
             none_workspace: source_info.none_workspace,
         };
         let handover = self.write_handover_for(
@@ -2041,6 +2059,9 @@ impl SessionManager {
         }
         append_copilot_cli_option(&mut args, "-i".to_string());
         append_copilot_cli_option(&mut args, startup_prompt);
+        if dangerous {
+            apply_dangerous_flag(definition.id, &mut args);
+        }
 
         let target_info = self.spawn_session_with_identity(
             app,
@@ -2059,9 +2080,14 @@ impl SessionManager {
             None,
             None,
             None,
-            None,
-            None,
-            source_info.dangerous,
+            Some(source_info.id.clone()),
+            Some(
+                source_info
+                    .handover_root_id
+                    .clone()
+                    .unwrap_or(source_info.id.clone()),
+            ),
+            dangerous,
             source_info.none_workspace,
         )?;
         let target = self.get(&target_info.id)?;
@@ -2353,17 +2379,6 @@ impl SessionManager {
         })
     }
 
-    fn resolve_and_cache_agy_conversation_id(
-        &self,
-        source: &Arc<PtySession>,
-        source_info: &SessionInfo,
-    ) {
-        if source_info.agent_id != "agy" {
-            return;
-        }
-        cache_agy_resume_ref_on_session(source);
-    }
-
     fn build_handover_prompt_for(
         &self,
         source: &Arc<PtySession>,
@@ -2371,7 +2386,7 @@ impl SessionManager {
         target_info: &SessionInfo,
         note: Option<String>,
     ) -> String {
-        self.resolve_and_cache_agy_conversation_id(source, source_info);
+        resolve_and_cache_native_session_ref(source);
 
         let recent_context =
             build_handover_source_context(source, source_info, HANDOVER_CONTEXT_CHARS);
@@ -2406,7 +2421,7 @@ impl SessionManager {
         note: Option<String>,
         evidence_path: Option<&str>,
     ) -> String {
-        self.resolve_and_cache_agy_conversation_id(source, source_info);
+        resolve_and_cache_native_session_ref(source);
 
         let recent_context =
             build_handover_source_context(source, source_info, COMPACT_HANDOVER_CONTEXT_CHARS);
@@ -2441,7 +2456,7 @@ impl SessionManager {
         target_info: &SessionInfo,
         note: Option<String>,
     ) -> String {
-        self.resolve_and_cache_agy_conversation_id(source, source_info);
+        resolve_and_cache_native_session_ref(source);
 
         let recent_context =
             build_handover_source_context(source, source_info, HANDOVER_CONTEXT_CHARS);
@@ -2730,6 +2745,38 @@ fn cache_agy_resume_ref_on_session(session: &Arc<PtySession>) -> bool {
     changed
 }
 
+fn cache_codex_resume_ref_on_session(session: &Arc<PtySession>) -> bool {
+    let changed = {
+        let mut meta = session.meta.lock();
+        cache_codex_resume_ref_in_meta(&mut meta)
+    };
+    if changed {
+        session.persist_meta();
+    }
+    changed
+}
+
+fn cache_claude_resume_ref_on_session(session: &Arc<PtySession>) -> bool {
+    let changed = {
+        let mut meta = session.meta.lock();
+        cache_claude_resume_ref_in_meta(&mut meta)
+    };
+    if changed {
+        session.persist_meta();
+    }
+    changed
+}
+
+fn resolve_and_cache_native_session_ref(session: &Arc<PtySession>) -> bool {
+    let agent_id = { session.meta.lock().agent_id.clone() };
+    match agent_id.as_str() {
+        "codex" => cache_codex_resume_ref_on_session(session),
+        "agy" => cache_agy_resume_ref_on_session(session),
+        "claude-code" => cache_claude_resume_ref_on_session(session),
+        _ => false,
+    }
+}
+
 fn should_append_terminal_session_marker(session: &Arc<PtySession>, data: &str) -> bool {
     if !data.contains('\r') && !data.contains('\n') {
         return false;
@@ -2792,6 +2839,9 @@ fn cache_agy_resume_ref_in_meta(meta: &mut SessionMeta) -> bool {
     let name = existing
         .as_ref()
         .and_then(|session_ref| session_ref.name.clone());
+    let transcript_path = find_agy_native_transcript_path(&resume_ref.conversation_id)
+        .map(|p| p.to_string_lossy().into_owned())
+        .or_else(|| existing.as_ref().and_then(|r| r.transcript_path.clone()));
     let discovered_at = existing
         .as_ref()
         .map(|session_ref| session_ref.discovered_at)
@@ -2803,6 +2853,7 @@ fn cache_agy_resume_ref_in_meta(meta: &mut SessionMeta) -> bool {
         name,
         project: resume_ref.project,
         resume_command: Some(resume_command),
+        transcript_path,
         discovered_at,
     };
 
@@ -2813,8 +2864,145 @@ fn cache_agy_resume_ref_in_meta(meta: &mut SessionMeta) -> bool {
                 || current.id != next.id
                 || current.project != next.project
                 || current.resume_command != next.resume_command
+                || current.transcript_path != next.transcript_path
         })
         .unwrap_or(true);
+    if changed {
+        meta.native_session_ref = Some(next);
+        meta.last_active_at = unix_timestamp();
+    }
+    changed
+}
+
+fn cache_codex_resume_ref_in_meta(meta: &mut SessionMeta) -> bool {
+    if meta.agent_id != "codex" {
+        return false;
+    }
+
+    let existing = meta.native_session_ref.clone();
+    if let Some(ref current) = existing {
+        if let (Some(id), Some(path_str)) = (&current.id, &current.transcript_path) {
+            if !id.trim().is_empty() && Path::new(path_str).is_file() {
+                return false;
+            }
+        }
+    }
+
+    let path_opt = existing
+        .as_ref()
+        .and_then(|r| r.transcript_path.as_deref())
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|r| r.id.as_deref())
+                .and_then(find_codex_native_transcript_path)
+        })
+        .or_else(|| find_codex_session_by_marker(&meta.id))
+        .or_else(|| find_latest_codex_native_transcript_path(&meta.cwd, meta.created_at));
+
+    let Some(path) = path_opt else {
+        return false;
+    };
+
+    let native_id = codex_transcript_session_id(&path).or_else(|| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix("rollout-"))
+            .and_then(|name| name.strip_suffix(".jsonl"))
+            .map(ToOwned::to_owned)
+    });
+
+    let display_command = if let Some(ref id) = native_id {
+        format!("codex resume {}", shell_quote(id))
+    } else {
+        "codex resume --last".to_string()
+    };
+
+    let discovered_at = existing
+        .as_ref()
+        .map(|r| r.discovered_at)
+        .filter(|v| *v > 0)
+        .unwrap_or_else(unix_timestamp);
+
+    let next = NativeSessionRef {
+        provider: "codex".to_string(),
+        id: native_id,
+        name: existing.as_ref().and_then(|r| r.name.clone()),
+        project: None,
+        resume_command: Some(display_command),
+        transcript_path: Some(path.to_string_lossy().into_owned()),
+        discovered_at,
+    };
+
+    let changed = existing
+        .as_ref()
+        .map(|current| {
+            current.provider != next.provider
+                || current.id != next.id
+                || current.resume_command != next.resume_command
+                || current.transcript_path != next.transcript_path
+        })
+        .unwrap_or(true);
+
+    if changed {
+        meta.native_session_ref = Some(next);
+        meta.last_active_at = unix_timestamp();
+    }
+    changed
+}
+
+fn cache_claude_resume_ref_in_meta(meta: &mut SessionMeta) -> bool {
+    if meta.agent_id != "claude-code" {
+        return false;
+    }
+
+    let existing = meta.native_session_ref.clone();
+    if let Some(ref current) = existing {
+        if let (Some(id), Some(path_str)) = (&current.id, &current.transcript_path) {
+            if !id.trim().is_empty() && Path::new(path_str).is_file() {
+                return false;
+            }
+        }
+    }
+
+    let native_id = existing
+        .as_ref()
+        .and_then(|r| r.id.clone())
+        .unwrap_or_else(|| meta.id.clone());
+
+    let Some(path) = find_claude_native_transcript_path(&meta.cwd, &native_id) else {
+        return false;
+    };
+
+    let display_command = format!("claude --resume={}", shell_quote(&native_id));
+    let discovered_at = existing
+        .as_ref()
+        .map(|r| r.discovered_at)
+        .filter(|v| *v > 0)
+        .unwrap_or_else(unix_timestamp);
+
+    let next = NativeSessionRef {
+        provider: "claude-code".to_string(),
+        id: Some(native_id),
+        name: existing.as_ref().and_then(|r| r.name.clone()),
+        project: None,
+        resume_command: Some(display_command),
+        transcript_path: Some(path.to_string_lossy().into_owned()),
+        discovered_at,
+    };
+
+    let changed = existing
+        .as_ref()
+        .map(|current| {
+            current.provider != next.provider
+                || current.id != next.id
+                || current.resume_command != next.resume_command
+                || current.transcript_path != next.transcript_path
+        })
+        .unwrap_or(true);
+
     if changed {
         meta.native_session_ref = Some(next);
         meta.last_active_at = unix_timestamp();
@@ -3245,7 +3433,7 @@ fn native_resume_command_for(meta: &SessionMeta) -> Result<Option<NativeResumeCo
         .as_ref()
         .and_then(|session_ref| session_ref.project.clone());
 
-    let (args, display_command) = match meta.agent_id.as_str() {
+    let (mut args, display_command) = match meta.agent_id.as_str() {
         "claude-code" => {
             let Some(native_id) = native_id else {
                 return Ok(None);
@@ -3260,9 +3448,6 @@ fn native_resume_command_for(meta: &SessionMeta) -> Result<Option<NativeResumeCo
             // `--resume` (open picker) plus `<id>` as a positional prompt, which
             // is why resuming a specific session used to pop the picker.
             args.push(format!("--resume={native_id}"));
-            if meta.dangerous {
-                apply_dangerous_flag("claude-code", &mut args);
-            }
             (
                 args,
                 format!("{} --resume={}", resolved.display, shell_quote(&native_id)),
@@ -3275,9 +3460,6 @@ fn native_resume_command_for(meta: &SessionMeta) -> Result<Option<NativeResumeCo
                 args.push(native_id.clone());
             } else {
                 args.push("--last".to_string());
-            }
-            if meta.dangerous {
-                apply_dangerous_flag("codex", &mut args);
             }
             let display = if let Some(ref id) = native_id {
                 format!("{} resume {}", resolved.display, shell_quote(id))
@@ -3355,6 +3537,10 @@ fn native_resume_command_for(meta: &SessionMeta) -> Result<Option<NativeResumeCo
         _ => return Ok(None),
     };
 
+    if meta.dangerous {
+        apply_dangerous_flag(&meta.agent_id, &mut args);
+    }
+
     Ok(Some(NativeResumeCommand {
         executable: resolved.executable,
         args,
@@ -3368,6 +3554,10 @@ fn native_resume_command_for(meta: &SessionMeta) -> Result<Option<NativeResumeCo
                 .and_then(|session_ref| session_ref.name.clone()),
             project: resolved_project,
             resume_command: Some(display_command),
+            transcript_path: meta
+                .native_session_ref
+                .as_ref()
+                .and_then(|session_ref| session_ref.transcript_path.clone()),
             discovered_at: now,
         }),
     }))
@@ -4282,6 +4472,15 @@ fn native_transcript_path(
     source_info: &SessionInfo,
     kind: NativeTranscriptKind,
 ) -> Option<PathBuf> {
+    if let Some(ref session_ref) = source_info.native_session_ref {
+        if let Some(ref path_str) = session_ref.transcript_path {
+            let path = PathBuf::from(path_str);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+
     let native_id = source_info
         .native_session_ref
         .as_ref()
@@ -4554,12 +4753,18 @@ fn append_claude_session_id(args: &mut Vec<String>, session_id: &str) {
 
 fn apply_dangerous_flag(agent_id: &str, args: &mut Vec<String>) {
     let flag = match agent_id {
-        "claude-code" => "--dangerously-skip-permissions",
+        "claude-code" | "agy" => "--dangerously-skip-permissions",
         "codex" => "--dangerously-bypass-approvals-and-sandbox",
+        "opencode" => "--auto",
+        "copilot" => "--yolo",
         _ => return,
     };
     if !args.iter().any(|arg| arg == flag) {
-        args.insert(0, flag.to_string());
+        if agent_id == "copilot" {
+            append_copilot_cli_option(args, flag.to_string());
+        } else {
+            args.insert(0, flag.to_string());
+        }
     }
 }
 
@@ -4665,6 +4870,22 @@ fn find_latest_codex_native_transcript_path(cwd: &str, created_at: u64) -> Optio
         .map(|(path, _)| path)
 }
 
+fn codex_transcript_session_id(path: &Path) -> Option<String> {
+    let file = File::open(path).ok()?;
+    for line in BufReader::new(file).lines().map_while(Result::ok).take(50) {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some("session_meta") {
+            continue;
+        }
+        if let Some(id) = value.pointer("/payload/id").and_then(Value::as_str) {
+            return Some(id.to_string());
+        }
+    }
+    None
+}
+
 fn codex_transcript_has_session_id(path: &Path, native_id: &str) -> bool {
     let Ok(file) = File::open(path) else {
         return false;
@@ -4755,8 +4976,15 @@ fn collect_jsonl_paths(root: &Path, max_depth: usize, paths: &mut Vec<PathBuf>) 
         return;
     };
 
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
+    let mut entry_paths: Vec<_> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
+    entry_paths.sort_by_key(|path| {
+        path.metadata()
+            .and_then(|meta| meta.modified())
+            .unwrap_or(UNIX_EPOCH)
+    });
+    entry_paths.reverse();
+
+    for path in entry_paths {
         if path.is_dir() {
             collect_jsonl_paths(&path, max_depth - 1, paths);
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
@@ -6711,6 +6939,38 @@ Resume in the same project: agy --conversation=c79caf4a-cdf9-4b20-a2fb-e6143ba1d
     }
 
     #[test]
+    fn test_apply_dangerous_flag_all_agents() {
+        let mut claude_args = vec!["prompt".to_string()];
+        apply_dangerous_flag("claude-code", &mut claude_args);
+        assert_eq!(
+            claude_args,
+            vec!["--dangerously-skip-permissions", "prompt"]
+        );
+
+        let mut agy_args = vec!["--prompt-interactive".to_string(), "prompt".to_string()];
+        apply_dangerous_flag("agy", &mut agy_args);
+        assert_eq!(
+            agy_args,
+            vec![
+                "--dangerously-skip-permissions",
+                "--prompt-interactive",
+                "prompt"
+            ]
+        );
+
+        let mut opencode_args = vec!["--prompt".to_string(), "prompt".to_string()];
+        apply_dangerous_flag("opencode", &mut opencode_args);
+        assert_eq!(opencode_args, vec!["--auto", "--prompt", "prompt"]);
+
+        let mut copilot_args = vec!["copilot".to_string(), "-i".to_string(), "prompt".to_string()];
+        apply_dangerous_flag("copilot", &mut copilot_args);
+        assert_eq!(
+            copilot_args,
+            vec!["copilot", "-i", "prompt", "--", "--yolo"]
+        );
+    }
+
+    #[test]
     fn test_parse_codex_native_transcript_preserves_user_messages() {
         let jsonl = r#"
 {"type":"session_meta","payload":{"id":"native-1","cwd":"/tmp/workspace"}}
@@ -6733,5 +6993,43 @@ Resume in the same project: agy --conversation=c79caf4a-cdf9-4b20-a2fb-e6143ba1d
         assert!(inputs.contains("用户追问"));
         assert!(!context.contains("duplicated event"));
         assert!(!context.contains("hidden"));
+    }
+
+    #[test]
+    fn test_native_transcript_path_fast_path_when_cached() {
+        let temp_dir = env::temp_dir().join(format!("waypoint-test-fast-path-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let file_path = temp_dir.join("transcript.jsonl");
+        fs::write(&file_path, "{}").unwrap();
+
+        let info = SessionInfo {
+            id: "waypoint-1".to_string(),
+            agent_id: "codex".to_string(),
+            agent_name: "Codex".to_string(),
+            title: "Codex".to_string(),
+            command: "codex".to_string(),
+            cwd: "/tmp".to_string(),
+            status: SessionStatus::Running,
+            attached: true,
+            created_at: 1000,
+            last_active_at: 1000,
+            first_user_message: None,
+            native_session_ref: Some(NativeSessionRef {
+                provider: "codex".to_string(),
+                id: Some("native-123".to_string()),
+                name: None,
+                project: None,
+                resume_command: Some("codex resume native-123".to_string()),
+                transcript_path: Some(file_path.to_string_lossy().into_owned()),
+                discovered_at: 1000,
+            }),
+            parent_session_id: None,
+            handover_root_id: None,
+            dangerous: false,
+            none_workspace: false,
+        };
+
+        let resolved = native_transcript_path(&info, NativeTranscriptKind::Codex);
+        assert_eq!(resolved, Some(file_path));
     }
 }

@@ -25,6 +25,7 @@ export type NativeSessionRef = {
   name?: string | null;
   project?: string | null;
   resumeCommand?: string | null;
+  transcriptPath?: string | null;
   discoveredAt: number;
 };
 

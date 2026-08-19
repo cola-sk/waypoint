@@ -208,6 +208,7 @@ export function continueSession(
   note: string,
   handoverMode: HandoverContentMode,
   editedPrompt?: string,
+  dangerous?: boolean,
 ): Promise<HandoverResult> {
   assertTauriRuntime();
   return invoke("continue_session", {
@@ -217,6 +218,7 @@ export function continueSession(
     note,
     handoverMode,
     editedPrompt: editedPrompt ?? null,
+    dangerous: dangerous ?? null,
     rows: DEFAULT_TERMINAL_ROWS,
     cols: DEFAULT_TERMINAL_COLS,
   });
