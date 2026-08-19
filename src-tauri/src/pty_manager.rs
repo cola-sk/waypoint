@@ -5131,9 +5131,12 @@ fn fetch_opencode_native_messages(
         return None;
     }
 
+    // Use JSON output mode so that multiline text fields (which are common when
+    // Waypoint injects cross-session prompts) are safely encoded as JSON strings
+    // rather than being split across multiple output lines by the \n separator.
     let query = if let Some(id) = native_id.filter(|s| !s.trim().is_empty()) {
         format!(
-            "SELECT json_extract(m.data, '$.role'), json_extract(p.data, '$.text') \
+            "SELECT json_extract(m.data, '$.role') AS role, json_extract(p.data, '$.text') AS text \
              FROM message m JOIN part p ON p.message_id = m.id \
              WHERE m.session_id = {} AND json_extract(p.data, '$.type') = 'text' \
              ORDER BY m.time_created ASC, p.time_created ASC;",
@@ -5141,7 +5144,7 @@ fn fetch_opencode_native_messages(
         )
     } else {
         format!(
-            "SELECT json_extract(m.data, '$.role'), json_extract(p.data, '$.text') \
+            "SELECT json_extract(m.data, '$.role') AS role, json_extract(p.data, '$.text') AS text \
              FROM message m JOIN part p ON p.message_id = m.id \
              WHERE m.session_id = (SELECT id FROM session WHERE directory = {} ORDER BY time_created DESC LIMIT 1) \
                AND json_extract(p.data, '$.type') = 'text' \
@@ -5151,8 +5154,7 @@ fn fetch_opencode_native_messages(
     };
 
     let output = Command::new("sqlite3")
-        .arg("-separator")
-        .arg("\t")
+        .arg("-json")
         .arg(&db_path)
         .arg(&query)
         .output()
@@ -5163,11 +5165,17 @@ fn fetch_opencode_native_messages(
     }
 
     let stdout = String::from_utf8(output.stdout).ok()?;
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // sqlite3 -json returns a JSON array of row objects.
+    let rows: Vec<Value> = serde_json::from_str(trimmed).ok()?;
     let mut messages = Vec::new();
-    for line in stdout.lines() {
-        let Some((role_str, text)) = line.split_once('\t') else {
-            continue;
-        };
+    for row in &rows {
+        let role_str = row.get("role").and_then(Value::as_str).unwrap_or("");
+        let text = row.get("text").and_then(Value::as_str).unwrap_or("");
         let role = match role_str.trim() {
             "user" => ChatRole::User,
             "assistant" => ChatRole::Assistant,
